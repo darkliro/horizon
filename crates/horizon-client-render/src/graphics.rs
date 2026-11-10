@@ -699,10 +699,28 @@ pub fn gpu_culling_lost() -> bool {
 /// Apple's: they share the CPU's memory bandwidth, and past it far terrain
 /// costs them more frame time than it is worth.
 pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
+/// Default upload budget in KiB per frame on integrated GPUs when unconfigured (0).
+/// Integrated GPUs share unified memory bandwidth with the CPU; unbudgeted uploads
+/// can cause severe frame drops (up to 270ms) during chunk mesh bursts.
+pub const INTEGRATED_DEFAULT_UPLOAD_BUDGET_KIB: u32 = 8192;
 /// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
 /// are integrated too, with memory and bandwidth enough for every distance.
 pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
     info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
+}
+/// Whether integrated GPU upload bandwidth budgeting should apply by default.
+pub fn upload_budget_capped(info: &wgpu::AdapterInfo) -> bool {
+    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
+}
+/// Effective upload budget in KiB per frame for the given adapter info.
+/// If a non-zero budget is configured, it is honored. When unconfigured (0),
+/// integrated non-Apple GPUs receive a 8 MiB budget to prevent unified memory bus saturation.
+pub fn effective_upload_budget(configured_kib: u32, info: &wgpu::AdapterInfo) -> u32 {
+    if configured_kib == 0 && upload_budget_capped(info) {
+        INTEGRATED_DEFAULT_UPLOAD_BUDGET_KIB
+    } else {
+        configured_kib
+    }
 }
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
@@ -714,6 +732,10 @@ pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
     }
 }
 impl Graphics {
+    /// `upload_budget_kib` as chunk streaming uses it on this adapter.
+    pub fn upload_budget_on(&self, info: &wgpu::AdapterInfo) -> u32 {
+        effective_upload_budget(self.upload_budget_kib, info)
+    }
     /// `lod_distance` as far terrain uses it on this adapter.
     pub fn lod_distance_on(&self, info: &wgpu::AdapterInfo) -> u32 {
         lod_distance_capped(self.lod_distance, info)
@@ -1841,6 +1863,44 @@ mod tests {
                     .contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks"))),
             "the LOD Distance description names the cap"
         );
+    }
+
+    #[test]
+    fn integrated_gpus_other_than_apple_default_upload_budget() {
+        let adapter = |name: &str, device_type| wgpu::AdapterInfo {
+            name: name.into(),
+            vendor: 0,
+            device: 0,
+            device_type,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: None,
+            limit_bucket: None,
+        };
+        let hd620 = adapter(
+            "Intel(R) HD Graphics 620 (KBL GT2)",
+            wgpu::DeviceType::IntegratedGpu,
+        );
+        let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
+        let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
+
+        // Default 0: Integrated non-Apple gets 8192 KiB; discrete and Apple stay unbudgeted (0)
+        let g = Graphics::default();
+        assert_eq!(g.upload_budget_on(&hd620), 8192);
+        assert_eq!(g.upload_budget_on(&m4), 0);
+        assert_eq!(g.upload_budget_on(&discrete), 0);
+
+        // Explicit non-zero values are preserved across all devices
+        let custom = Graphics {
+            upload_budget_kib: 4096,
+            ..Graphics::default()
+        };
+        assert_eq!(custom.upload_budget_on(&hd620), 4096);
+        assert_eq!(custom.upload_budget_on(&discrete), 4096);
     }
 
     #[test]

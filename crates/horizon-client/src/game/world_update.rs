@@ -319,7 +319,8 @@ impl Game<'_> {
                 }
             }
             let g = &self.settings.horizon;
-            let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
+            let effective_budget = g.upload_budget_on(&renderer.adapter_info());
+            let budgeted = g.chunk_updates > 0 || effective_budget > 0;
             // The meshes, once copied, are freed by a worker (`Streaming::free`).
             if !budgeted && self.pending_uploads.is_empty() && uploads.len() <= AUTO_UPLOADS_AT_ONCE
             {
@@ -361,10 +362,7 @@ impl Game<'_> {
                 };
                 pending.sort_unstable_by_key(|(k, _)| std::cmp::Reverse(far(k)));
                 let (limit, budget) = if budgeted {
-                    (
-                        g.chunk_updates as usize,
-                        u64::from(g.upload_budget_kib) * 1024,
-                    )
+                    (g.chunk_updates as usize, u64::from(effective_budget) * 1024)
                 } else {
                     (0, 0)
                 };
