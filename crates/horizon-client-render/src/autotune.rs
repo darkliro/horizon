@@ -16,8 +16,11 @@
 
 /// Frames in one verdict.
 pub const WINDOW: usize = 240;
-/// The CPU's time must be this many times the GPU's for a window to count as CPU-bound.
+/// The CPU's time must be this many times the GPU's for a window to count as CPU-bound on discrete GPUs.
 const CPU_BOUND: f32 = 1.3;
+/// On integrated GPUs, CPU and GPU share the SoC's TDP and unified memory bandwidth;
+/// reducing render thread load benefits the frame even when GPU times are comparable.
+const CPU_BOUND_INTEGRATED: f32 = 0.9;
 /// Below this CPU time, in milliseconds, a frame is fast enough that neither matters.
 const WORTH_TRYING_MS: f32 = 1.5;
 /// A trial is kept when the frame's busier side dropped under this share of what it was.
@@ -46,6 +49,7 @@ pub struct GpuCullingAuto {
     cpu: Vec<f32>,
     gpu: Vec<f32>,
     on: bool,
+    integrated: bool,
     state: State,
     /// CPU-bound windows in a row.
     streak: u8,
@@ -69,10 +73,16 @@ impl Default for GpuCullingAuto {
 
 impl GpuCullingAuto {
     pub fn new() -> Self {
+        Self::with_integrated(false)
+    }
+
+    /// Creates Auto tuning with device topology awareness (integrated SoC vs discrete GPU).
+    pub fn with_integrated(integrated: bool) -> Self {
         Self {
             cpu: Vec::with_capacity(WINDOW),
             gpu: Vec::with_capacity(WINDOW),
             on: false,
+            integrated,
             state: State::Watching,
             streak: 0,
             before: 0.0,
@@ -88,6 +98,11 @@ impl GpuCullingAuto {
         self.on
     }
 
+    /// Sets whether the adapter is an integrated GPU (sharing power/memory with the CPU).
+    pub fn set_integrated(&mut self, integrated: bool) {
+        self.integrated = integrated;
+    }
+
     /// Where Auto is, for the status: `watching`, `trial` or `kept`.
     pub fn state(&self) -> &'static str {
         match self.state {
@@ -99,7 +114,8 @@ impl GpuCullingAuto {
 
     /// Back to the start: off, with nothing measured (the mode changed, or the world did).
     pub fn reset(&mut self) {
-        *self = Self::new();
+        let integrated = self.integrated;
+        *self = Self::with_integrated(integrated);
     }
 
     /// One frame's CPU time, a GPU time where its timestamps have arrived, and its whole time,
@@ -132,7 +148,12 @@ impl GpuCullingAuto {
                 if self.clock_ms < self.retry_at_ms {
                     return None;
                 }
-                let bound = cpu >= WORTH_TRYING_MS && cpu > gpu * CPU_BOUND;
+                let ratio = if self.integrated {
+                    CPU_BOUND_INTEGRATED
+                } else {
+                    CPU_BOUND
+                };
+                let bound = cpu >= WORTH_TRYING_MS && cpu > gpu * ratio;
                 self.streak = if bound { self.streak + 1 } else { 0 };
                 if self.streak < STREAK {
                     return None;
@@ -298,6 +319,28 @@ mod tests {
             assert_eq!(answer, None);
         }
         assert!(!auto.on());
+    }
+
+    /// On integrated GPUs, CPU and GPU share SoC power and memory bandwidth.
+    /// Frames with active CPU rendering (above floor) and comparable GPU times
+    /// trigger a trial to relieve CPU load, and keep it if the frame improves.
+    #[test]
+    fn an_integrated_gpu_tries_culling_at_comparable_cpu_and_gpu_times() {
+        let mut auto = GpuCullingAuto::with_integrated(true);
+        // Discrete GPU threshold (1.3) would require CPU > 2.6 ms here (2.0 * 1.3).
+        // On integrated GPUs, ratio 0.9 allows 1.9 ms CPU with 2.0 ms GPU to be tried.
+        assert_eq!(window(&mut auto, 1.9, 2.0), None);
+        assert_eq!(window(&mut auto, 1.9, 2.0), Some(true));
+        assert!(auto.on());
+        assert_eq!(auto.state(), "trial");
+
+        // The window after the switch settles.
+        assert_eq!(window(&mut auto, 1.9, 2.0), None);
+
+        // Frame improves: kept.
+        assert_eq!(window(&mut auto, 1.4, 1.8), None);
+        assert_eq!(auto.state(), "kept");
+        assert!(auto.on());
     }
 
     #[test]

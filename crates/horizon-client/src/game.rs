@@ -11345,19 +11345,24 @@ impl Game<'_> {
                                 && horizon_client::graphics::gpu_culling_offer()
                                     .reason()
                                     .is_none()
-                                && let Some(on) = self.gpu_culling_auto.observe(
+                            {
+                                if let Some(adapter) = crate::gfx::adapter() {
+                                    self.gpu_culling_auto
+                                        .set_integrated(adapter.kind == "integrated");
+                                }
+                                if let Some(on) = self.gpu_culling_auto.observe(
                                     ms(cpu),
                                     r.gpu_times.last().copied(),
                                     ms(elapsed),
-                                )
-                            {
-                                log::info!(
-                                    "Horizon: GPU Culling Auto turns it {} ({})",
-                                    if on { "on" } else { "off" },
-                                    self.gpu_culling_auto.state()
-                                );
-                                if r.set_gpu_culling(on).is_err() {
-                                    self.gpu_culling_auto.reset();
+                                ) {
+                                    log::info!(
+                                        "Horizon: GPU Culling Auto turns it {} ({})",
+                                        if on { "on" } else { "off" },
+                                        self.gpu_culling_auto.state()
+                                    );
+                                    if r.set_gpu_culling(on).is_err() {
+                                        self.gpu_culling_auto.reset();
+                                    }
                                 }
                             }
                             self.frame_stats.record_cpu(ms(cpu));
