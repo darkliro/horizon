@@ -54,6 +54,9 @@ use std::{
 
 pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
 
+mod compression_pool;
+#[cfg(test)]
+mod compression_tests;
 mod gateway;
 #[cfg(test)]
 mod loot_tests;
@@ -2230,36 +2233,15 @@ fn write_region_records(
     Ok(())
 }
 
-/// Fewest chunks each helper of `compress_records` takes: below this a thread
-/// costs more to start than it saves.
-const CHUNKS_PER_HELPER: usize = 4;
 /// Each record encoded and compressed (`None` for a deletion), in the order
-/// given. Vanilla's IOWorker does this one chunk after another; here a batch
-/// is shared out to scoped threads, which take the next chunk as they finish
-/// one. Each chunk's bytes depend only on the chunk, and the writes stay in
-/// order, so the files are the same as from one thread. At most half the
-/// hardware threads help, leaving the rest to the game and its workers.
+/// given. Chunk compression and NBT encoding are offloaded across a persistent
+/// background worker pool, keeping region file writing and header flushes
+/// ordered, atomic, and thread-safe.
 fn compress_records(
     records: &[((i32, i32), &Record)],
     timestamp: u32,
 ) -> Vec<std::io::Result<Option<ChunkRecord>>> {
-    // `RegionFile.getVersion`: the version `region-file-compression` selected
-    // (`RegionFileVersion.getSelected`), zlib unless a dedicated server said
-    // otherwise.
-    let compression = Compression::selected();
-    let compress = |record: &Record| {
-        record
-            .tag()
-            .map(|tag| ChunkRecord::from_nbt(&tag, compression, timestamp, Limits::saved()))
-            .transpose()
-    };
-    let helpers = horizon_threads::worker_count()
-        .div_ceil(2)
-        .min(records.len() / CHUNKS_PER_HELPER);
-    if helpers <= 1 {
-        return records.iter().map(|(_, r)| compress(r)).collect();
-    }
-    share_out(records.len(), helpers, |i| compress(records[i].1), || true)
+    compression_pool::compress_records(records, timestamp)
 }
 
 /// `job(i)` for every `i` below `count`, in order, shared between this thread
@@ -2268,6 +2250,7 @@ fn compress_records(
 /// container at its limit of threads: EAGAIN) leaves its share to the
 /// others: this thread does all of it at worst, and never panics for it, as
 /// `thread::scope`'s own `spawn` would, which stopped the region writer.
+#[cfg(test)]
 fn share_out<R: Send>(
     count: usize,
     helpers: usize,
@@ -3045,7 +3028,21 @@ impl SaveDir {
         let thread = std::thread::Builder::new()
             .name("horizon-region-writer".into())
             .spawn(move || {
-                for (kind, batch) in receive {
+                let mut buffer: std::collections::VecDeque<WriteBatch> =
+                    std::collections::VecDeque::new();
+                while let Some((kind, mut batch)) =
+                    buffer.pop_front().or_else(|| receive.recv().ok())
+                {
+                    let mut batch_count = 1;
+                    while let Ok(next) = receive.try_recv() {
+                        if next.0 == kind {
+                            batch.extend(next.1);
+                            batch_count += 1;
+                        } else {
+                            buffer.push_back(next);
+                            break;
+                        }
+                    }
                     let cache = match kind {
                         Folder::Region => &regions,
                         Folder::Entities => &entity_regions,
@@ -3089,7 +3086,7 @@ impl SaveDir {
                         outstanding.chunks.fetch_sub(batch.len(), Ordering::Relaxed);
                     }
                     if let Ok(mut count) = outstanding.count.lock() {
-                        *count -= 1;
+                        *count -= batch_count;
                         outstanding.done.notify_all();
                     }
                 }
