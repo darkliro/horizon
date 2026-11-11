@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     io,
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
@@ -11,6 +11,10 @@ use std::{
 use horizon_world::{compression::Compression, nbt::Limits, region::ChunkRecord};
 
 use super::Record;
+
+/// Minimum chunk count where multithreading amortizes synchronization overhead.
+/// Matches the original `CHUNKS_PER_HELPER` threshold on main.
+const MIN_PARALLEL_CHUNKS: usize = 4;
 
 struct Batch {
     work: Box<dyn Fn(usize) + Send + Sync>,
@@ -27,16 +31,16 @@ struct Inner {
     shutdown: AtomicBool,
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.wake.notify_all();
-    }
-}
-
 pub struct CompressionPool {
     inner: Arc<Inner>,
     workers: usize,
+}
+
+impl Drop for CompressionPool {
+    fn drop(&mut self) {
+        self.inner.shutdown.store(true, Ordering::Relaxed);
+        self.inner.wake.notify_all();
+    }
 }
 
 static POOL: OnceLock<CompressionPool> = OnceLock::new();
@@ -60,10 +64,10 @@ impl CompressionPool {
             shutdown: AtomicBool::new(false),
         });
         for i in 0..workers {
-            let worker_inner = Arc::clone(&inner);
+            let worker_weak = Arc::downgrade(&inner);
             let _ = std::thread::Builder::new()
                 .name(format!("horizon-save-compression-{i}"))
-                .spawn(move || worker_loop(&worker_inner));
+                .spawn(move || worker_loop(worker_weak));
         }
         Self { inner, workers }
     }
@@ -127,9 +131,13 @@ fn run_job(batch: &Arc<Batch>, i: usize) {
     (batch.work)(i);
 }
 
-fn worker_loop(inner: &Arc<Inner>) {
+fn worker_loop(weak_inner: Weak<Inner>) {
     loop {
         let batch = {
+            let inner = match weak_inner.upgrade() {
+                Some(inner) => inner,
+                None => return,
+            };
             let mut queue = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
             while queue.is_empty() && !inner.shutdown.load(Ordering::Relaxed) {
                 queue = inner.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
@@ -146,12 +154,14 @@ fn worker_loop(inner: &Arc<Inner>) {
                 run_job(&batch, i);
             }
             if !did_work {
-                let mut queue = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(front) = queue.front()
-                    && Arc::ptr_eq(front, &batch)
-                    && front.next.load(Ordering::Relaxed) >= front.count
-                {
-                    queue.pop_front();
+                if let Some(inner) = weak_inner.upgrade() {
+                    let mut queue = inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(front) = queue.front()
+                        && Arc::ptr_eq(front, &batch)
+                        && front.next.load(Ordering::Relaxed) >= front.count
+                    {
+                        queue.pop_front();
+                    }
                 }
             }
         }
@@ -174,8 +184,8 @@ pub fn compress_records_with_pool(
             .map(|tag| ChunkRecord::from_nbt(&tag, compression, timestamp, Limits::saved()))
             .transpose()
     };
-    if count == 1 || pool.workers() == 0 {
-        return vec![compress(records[0].1)];
+    if count < MIN_PARALLEL_CHUNKS || pool.workers() == 0 {
+        return records.iter().map(|(_, r)| compress(r)).collect();
     }
     let records_arc: Arc<[Record]> = records.iter().map(|(_, r)| (*r).clone()).collect();
     let results: Arc<Mutex<Vec<Option<io::Result<Option<ChunkRecord>>>>>> =
@@ -184,14 +194,27 @@ pub fn compress_records_with_pool(
     let recs = Arc::clone(&records_arc);
     let res_lock = Arc::clone(&results);
     pool.run(count, move |i| {
-        let res = compress(&recs[i]);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compress(&recs[i])))
+            .unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "chunk compression worker panicked",
+                ))
+            });
         res_lock.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(res);
     });
 
     let mut guard = results.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .drain(..)
-        .map(|opt| opt.expect("all records compressed"))
+        .map(|opt| {
+            opt.unwrap_or_else(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "compression slot unpopulated",
+                ))
+            })
+        })
         .collect()
 }
 

@@ -54,6 +54,8 @@ use std::{
 
 pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
 
+#[cfg(test)]
+mod compression_bench;
 mod compression_pool;
 #[cfg(test)]
 mod compression_tests;
@@ -3030,11 +3032,14 @@ impl SaveDir {
             .spawn(move || {
                 let mut buffer: std::collections::VecDeque<WriteBatch> =
                     std::collections::VecDeque::new();
+                const MAX_BATCH_CHUNKS: usize = 64;
                 while let Some((kind, mut batch)) =
                     buffer.pop_front().or_else(|| receive.recv().ok())
                 {
                     let mut batch_count = 1;
-                    while let Ok(next) = receive.try_recv() {
+                    while batch.len() < MAX_BATCH_CHUNKS
+                        && let Ok(next) = receive.try_recv()
+                    {
                         if next.0 == kind {
                             batch.extend(next.1);
                             batch_count += 1;
