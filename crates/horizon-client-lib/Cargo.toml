@@ -73,7 +73,6 @@ mio = { version = "1.2.4", features = ["os-poll", "net"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 # Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md).
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
-horizon-bench = { path = "../horizon-bench" }
 crc32fast = "1"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.

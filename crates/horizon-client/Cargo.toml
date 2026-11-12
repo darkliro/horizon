@@ -69,10 +69,9 @@ log = "0.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 horizon-theme = { path = "../horizon-theme" }
-# Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md). The
-# anonymous "I'm playing" ping is the Horizon layer's (`horizon-heartbeat`, in the official executable).
+# The official server's address (multiplayer.rs) until it moves to the Horizon layer. Telemetry,
+# the "I'm playing" ping and the benchmark are Horizon parts the official executable registers.
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
-horizon-bench = { path = "../horizon-bench" }
 # The machine and process probes (the dedicated server's performance report).
 horizon-system = { path = "../horizon-system" }
 crc32fast = "1"

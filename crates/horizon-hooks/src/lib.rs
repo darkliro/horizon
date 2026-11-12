@@ -27,7 +27,9 @@ pub mod tunnel;
 
 use registry::Registry;
 use std::cell::Cell;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// What a crate above the engine hears from the game. Every method has an empty default:
 /// implement only those you need. Hooks run on the game's thread (the render thread) unless a
@@ -104,6 +106,40 @@ pub trait Hooks: Sync {
     fn get_the_game(&self) -> Option<GetTheGame> {
         None
     }
+
+    /// Whether this crate runs the benchmark `--benchmark SCENARIO` names. Asked while the command
+    /// line is read; a scenario no hook knows is refused there.
+    fn knows_benchmark(&self, _scenario: &str) -> bool {
+        false
+    }
+
+    /// Starts the benchmark [`Hooks::knows_benchmark`] accepted, once the title screen loads: it
+    /// drives the game through `control` on a thread of its own and quits the game when done.
+    /// Only the first hook that knows the scenario is called.
+    fn benchmark(&self, _run: &Benchmark<'_>, _control: Control) {}
+}
+
+/// One command line into the game's agent control (docs/agent-control.md), answered with its
+/// JSON reply, as `horizon-ctl` would send it. `None`: the game has exited, or gave no reply
+/// within the time given.
+pub type Control = Box<dyn Fn(&str, Duration) -> Option<String> + Send>;
+
+/// What [`Hooks::benchmark`] gets.
+pub struct Benchmark<'a> {
+    pub scenario: &'a str,
+    /// When the process started.
+    pub started: Instant,
+    /// The game's home folder (logs, crash reports, telemetry).
+    pub home: &'a Path,
+    /// The game folder (saves, options).
+    pub game_dir: &'a Path,
+    /// The release, as the game's log names it: a nightly's label, the tag, or the crate version
+    /// for a build from source.
+    pub version: &'a str,
+    /// As the upload or crash report names it.
+    pub build: &'a str,
+    pub simulation_distance: u32,
+    pub offscreen: bool,
 }
 
 /// What [`Hooks::get_the_game`] answers. The texts are translation keys of the game's own strings
@@ -361,6 +397,21 @@ pub mod engine {
     pub fn get_the_game() -> Option<GetTheGame> {
         all().iter().find_map(|hooks| hooks.get_the_game())
     }
+
+    /// [`Hooks::knows_benchmark`]: whether any hook does.
+    pub fn knows_benchmark(scenario: &str) -> bool {
+        all().iter().any(|h| h.knows_benchmark(scenario))
+    }
+
+    /// [`Hooks::benchmark`]: starts the run on the first hook that knows the scenario. False when
+    /// none does.
+    pub fn benchmark(run: &Benchmark<'_>, control: Control) -> bool {
+        let Some(hooks) = all().iter().find(|h| h.knows_benchmark(run.scenario)) else {
+            return false;
+        };
+        hooks.benchmark(run, control);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +444,16 @@ mod tests {
                 paragraphs: &[],
                 button: "recorder.button",
             })
+        }
+        fn knows_benchmark(&self, scenario: &str) -> bool {
+            scenario == "ocean"
+        }
+        fn benchmark(&self, run: &Benchmark<'_>, control: Control) {
+            let reply = control("status", Duration::from_secs(1)).unwrap_or_default();
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("benchmark {} {reply}", run.scenario));
         }
         fn frame(&self, frame: &players::Frame, sprites: &mut dyn players::SpriteStore) {
             self.0
@@ -582,6 +643,21 @@ mod tests {
         for now in [Activity::Menus, Activity::Menus, world, world] {
             engine::activity(now);
         }
+        // A benchmark runs on the hook that knows it, and on none when nobody does.
+        let run = |scenario| Benchmark {
+            scenario,
+            started: Instant::now(),
+            home: Path::new("home"),
+            game_dir: Path::new("game"),
+            version: "v0.2.31",
+            build: "v0.2.31",
+            simulation_distance: 12,
+            offscreen: true,
+        };
+        let control = || -> Control { Box::new(|line, _| Some(format!("{{{line}}}"))) };
+        assert!(engine::knows_benchmark("ocean") && !engine::knows_benchmark("nether"));
+        assert!(engine::benchmark(&run("ocean"), control()));
+        assert!(!engine::benchmark(&run("nether"), control()));
         engine::shutdown();
         assert!(engine::any());
         assert_eq!(
@@ -629,7 +705,8 @@ mod tests {
                 "published false",
                 "Menus",
                 "World { play: Singleplayer, dimension: Nether, mode: Creative }",
-                "frame 4"
+                "benchmark ocean {status}",
+                "frame 4",
             ]
         );
         assert_eq!(register(&Silent), Err(TooLate));

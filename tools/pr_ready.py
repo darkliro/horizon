@@ -349,10 +349,17 @@ def mark_old_rust(steps, warning):
     steps.insert(steps.index(clippy[0]), rust)
 
 
+# The features another workspace package turns on for these crates: horizon-mods' index, and the game parts
+# horizon-official runs (the benchmark's `game`).
+WORKSPACE_FEATURES = {"horizon-mods": "horizon-mods/index",
+                      "horizon-bench": "horizon-bench/game"}
+
+
 def mod_features(crates):
     """The features CI's workspace-wide test run gives these crates. Cargo unifies features over the packages it
-    builds, so a crate tested alone needs the ones the workspace would have turned on for it: horizon-mods' index."""
-    return " --features horizon-mods/index" if crates is not None and "horizon-mods" in crates else ""
+    builds, so a crate tested alone needs the ones the workspace would have turned on for it (WORKSPACE_FEATURES)."""
+    features = [f for crate, f in WORKSPACE_FEATURES.items() if crates is not None and crate in crates]
+    return f" --features {','.join(features)}" if features else ""
 
 
 # What horizon-client's full content-root tests load (mod_content_tests.rs). They take minutes on prepared data, so

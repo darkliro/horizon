@@ -83,7 +83,6 @@
   },
   "allowed": [
     "horizon-client -> horizon-anticheat",
-    "horizon-client -> horizon-bench",
     "horizon-client -> horizon-chat-filter",
     "horizon-client -> horizon-cosmetics",
     "horizon-client -> horizon-dualsense",
@@ -97,7 +96,6 @@
     "horizon-client -> horizon-telemetry",
     "horizon-client -> horizon-theme",
     "horizon-client-lib -> horizon-anticheat",
-    "horizon-client-lib -> horizon-bench",
     "horizon-client-lib -> horizon-hdr",
     "horizon-client-lib -> horizon-mcp",
     "horizon-client-lib -> horizon-mods",

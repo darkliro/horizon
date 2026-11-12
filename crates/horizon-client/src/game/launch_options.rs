@@ -324,7 +324,7 @@ impl Options {
                             "--player-dir" => {}
                             "--dev-mod" => o.dev_mods.push(std::path::absolute(&value)?),
                             "--benchmark" => {
-                                if horizon_client::benchmark::scenes(&value).is_none() {
+                                if !horizon_hooks::engine::knows_benchmark(&value) {
                                     return Err(format!(
                                     "unknown benchmark {value}: standard, village, forest, ocean or mountain"
                                 )

@@ -5,16 +5,54 @@
 //!
 //! The scenes, the world (seed 1234, creative) and every step and figure match `tools/perf_bench.py`,
 //! so reports from the two can be compared.
+//!
+//! Behind the `game` feature: the game starts it through the platform's hooks ([`HOOKS`],
+//! `horizon_platform::hooks`), which the official executable registers (`horizon_official::PARTS`).
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use horizon_bench::{App, Frames, Kind, Report};
+use horizon_platform::hooks::{self, Hooks};
 use serde_json::Value;
 
-use crate::control::Request;
+use crate::{App, Frames, Kind, Report};
+
+/// The benchmark's hooks, for `horizon_platform::hooks::register`.
+pub static HOOKS: Benchmark = Benchmark;
+
+/// Runs `--benchmark SCENARIO`.
+pub struct Benchmark;
+
+impl Hooks for Benchmark {
+    fn knows_benchmark(&self, scenario: &str) -> bool {
+        scenes(scenario).is_some()
+    }
+
+    fn benchmark(&self, run: &hooks::Benchmark<'_>, control: hooks::Control) {
+        start(
+            control,
+            Setup {
+                scenario: run.scenario.to_owned(),
+                started: run.started,
+                app: App {
+                    name: "horizon-client".into(),
+                    version: run.version.to_owned(),
+                    commit: option_env!("HORIZON_COMMIT").map(str::to_owned),
+                    mods: Vec::new(),
+                },
+                simulation_distance: run.simulation_distance,
+                vsync: false,
+                fps_cap: None,
+                offscreen: run.offscreen,
+                game_dir: run.game_dir.to_owned(),
+                home: run.home.to_owned(),
+                build: run.build.to_owned(),
+            },
+        );
+    }
+}
 
 pub const SEED: i64 = 1234;
 /// The world the benchmark creates under `saves/`, replaced on every run.
@@ -73,14 +111,18 @@ pub struct Setup {
     pub fps_cap: Option<u32>,
     pub offscreen: bool,
     pub game_dir: PathBuf,
+    /// The game's home folder: the telemetry outbox.
+    pub home: PathBuf,
+    /// The build, as an upload names it (`horizon_platform::hooks::Crash::version`).
+    pub build: String,
 }
 
 /// Starts the driver; the game quits when it is done, and the report's path is printed.
-pub fn start(requests: Sender<Request>, setup: Setup) {
+pub fn start(control: hooks::Control, setup: Setup) {
     thread::Builder::new()
         .name("horizon-benchmark".into())
         .spawn(move || {
-            let control = Control(requests);
+            let control = Control(control);
             match run(&control, setup) {
                 Ok(path) => println!("Horizon: benchmark report {}", path.display()),
                 Err(e) => eprintln!("Horizon: benchmark failed: {e}"),
@@ -90,21 +132,12 @@ pub fn start(requests: Sender<Request>, setup: Setup) {
         .expect("spawn the benchmark thread");
 }
 
-struct Control(Sender<Request>);
+struct Control(hooks::Control);
 
 impl Control {
     fn call(&self, line: &str) -> Result<Value, String> {
-        let (reply, response) = mpsc::channel();
-        self.0
-            .send(Request {
-                line: line.to_owned(),
-                reply,
-            })
-            .map_err(|_| "the game has exited".to_owned())?;
         // Flights and loads reply when they finish.
-        let text = response
-            .recv_timeout(LOAD_LIMIT)
-            .map_err(|_| format!("{line}: no reply"))?;
+        let text = (self.0)(line, LOAD_LIMIT).ok_or_else(|| format!("{line}: no reply"))?;
         let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         match value.get("error").and_then(Value::as_str) {
             Some(e) => Err(format!("{line}: {e}")),
@@ -154,8 +187,8 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
         scenes(&setup.scenario).ok_or_else(|| format!("unknown scenario {}", setup.scenario))?;
     let mut report = Report::new(Kind::Game, setup.app.clone());
     let pid = std::process::id();
-    report.conditions.load_avg_1m = horizon_bench::load_average();
-    report.conditions.power = horizon_bench::power_source().map(str::to_owned);
+    report.conditions.load_avg_1m = crate::load_average();
+    report.conditions.power = crate::power_source().map(str::to_owned);
     let rss = RssSampler::start(pid);
 
     let title = poll(control, LOAD_LIMIT, |s| {
@@ -163,7 +196,7 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
     })?;
     report.metric("startup.title_ms", &[ms(setup.started.elapsed())]);
     let renderer = &title["renderer"];
-    report.hardware.gpu = Some(horizon_bench::Gpu {
+    report.hardware.gpu = Some(crate::Gpu {
         name: text(&renderer["gpu"]),
         vendor: match text(&renderer["vendor"]) {
             // Metal reports no vendor ID.
@@ -176,7 +209,7 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
         vram_mb: None,
     });
     if let Some(gpu) = report.hardware.gpu.as_mut() {
-        let vendor = horizon_telemetry::system::gpu_vendor(&gpu.name, 0);
+        let vendor = horizon_platform::system::gpu_vendor(&gpu.name, 0);
         let vendor = if gpu.vendor.is_empty() {
             vendor
         } else {
@@ -184,11 +217,10 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
         }
         .to_owned();
         if gpu.kind.contains("iscrete") {
-            gpu.vram_mb = horizon_telemetry::system::vram_mb(&vendor);
+            gpu.vram_mb = horizon_platform::system::vram_mb(&vendor);
         }
     }
-    report.hardware.storage =
-        horizon_telemetry::system::storage(&setup.game_dir).map(str::to_owned);
+    report.hardware.storage = horizon_platform::system::storage(&setup.game_dir).map(str::to_owned);
     report.hardware.display = serde_json::from_value(title["display"].clone()).ok();
 
     replace_world(&setup.game_dir)?;
@@ -311,7 +343,7 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
     if let Ok(meta) = std::env::current_exe().and_then(std::fs::metadata) {
         report.metric("game.binary_bytes", &[meta.len() as f64]);
     }
-    crate::telemetry::keep_benchmark(&crate::logging::game_home(), &report);
+    keep_for_upload(&setup.home, &setup.build, &report);
     report
         .write_to(&setup.game_dir.join("benchmarks"))
         .map_err(|e| e.to_string())
@@ -456,7 +488,7 @@ impl RssSampler {
             while let Err(mpsc::RecvTimeoutError::Timeout) =
                 stopped.recv_timeout(Duration::from_millis(250))
             {
-                samples.extend(horizon_bench::rss_bytes(pid).map(|b| (Instant::now(), b)));
+                samples.extend(crate::rss_bytes(pid).map(|b| (Instant::now(), b)));
             }
             samples
         });
@@ -468,9 +500,79 @@ impl RssSampler {
     }
 }
 
+/// Keeps the report for the launcher to send, if the player allows benchmark uploads: the report
+/// as docs/benchmark-report.md defines it, dated to the day (docs/telemetry.md).
+fn keep_for_upload(home: &Path, build: &str, report: &Report) {
+    use horizon_telemetry::{Item, Payload, Source, outbox};
+    let Ok(data) = serde_json::to_value(report.for_upload()) else {
+        return;
+    };
+    let item = Item::new(Source::Game, build.to_owned(), Payload::Benchmark(data));
+    if let Err(e) = outbox::push(home, &item) {
+        log::warn!("Horizon: could not keep the benchmark report to send: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control line and where its reply goes, as the game's command queue takes them.
+    struct Request {
+        line: String,
+        reply: Sender<String>,
+    }
+
+    /// A control that hands each line to `requests`, as the game does.
+    fn control(requests: Sender<Request>) -> Control {
+        Control(Box::new(move |line, wait| {
+            let (reply, response) = mpsc::channel();
+            let request = Request {
+                line: line.to_owned(),
+                reply,
+            };
+            requests.send(request).ok()?;
+            response.recv_timeout(wait).ok()
+        }))
+    }
+
+    #[test]
+    fn reports_kept_for_upload_need_their_own_consent_and_go_dated_to_the_day() {
+        use horizon_telemetry::{Choices, Consent, outbox};
+        let home = std::env::temp_dir().join(format!(
+            "horizon-client-benchmark-upload-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let allow = |choices: Choices| {
+            let mut consent = Consent::load(&home);
+            consent.answer(choices);
+            consent.save(&home).unwrap();
+        };
+        let mut report = Report::new(Kind::Game, Default::default());
+        report.created = "2026-10-15T14:03:27Z".into();
+        report.label = Some("my machine".into());
+        keep_for_upload(&home, "0.2.31", &report);
+        allow(Choices {
+            performance: true,
+            ..Choices::NONE
+        });
+        keep_for_upload(&home, "0.2.31", &report);
+        assert!(outbox::pending(&home).is_empty());
+        allow(Choices {
+            benchmarks: true,
+            ..Choices::NONE
+        });
+        keep_for_upload(&home, "0.2.31", &report);
+        let pending = outbox::pending(&home);
+        assert_eq!(pending.len(), 1);
+        let text = serde_json::to_string(&pending[0].1).unwrap();
+        assert!(
+            text.contains("2026-10-15T00:00:00Z") && !text.contains("my machine"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn scenarios() {
@@ -524,7 +626,7 @@ mod tests {
                 }
             }
         });
-        let control = Control(tx);
+        let control = control(tx);
         wait_loaded(&control, |_| true).expect("the scene loads");
         assert!(
             polls.load(std::sync::atomic::Ordering::SeqCst) > LATE,
@@ -556,15 +658,15 @@ mod tests {
                 }
                 lines
             });
-            let hardware = horizon_bench::Hardware {
-                gpu: Some(horizon_bench::Gpu {
+            let hardware = crate::Hardware {
+                gpu: Some(crate::Gpu {
                     backend: backend.into(),
                     ..Default::default()
                 }),
                 ..Default::default()
             };
             let mut report = Report::with_hardware(Kind::Game, App::default(), hardware);
-            let control = Control(tx);
+            let control = control(tx);
             let timed = time_passes(&control, "forest", &mut report).expect("the wait runs");
             drop(control);
             (timed, server.join().unwrap(), report.metrics)

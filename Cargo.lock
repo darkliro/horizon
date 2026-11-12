@@ -1426,7 +1426,9 @@ dependencies = [
 name = "horizon-bench"
 version = "0.1.0"
 dependencies = [
+ "horizon-platform",
  "horizon-telemetry",
+ "log",
  "serde",
  "serde_json",
 ]
@@ -1464,7 +1466,6 @@ dependencies = [
  "glam",
  "horizon-anticheat",
  "horizon-assets",
- "horizon-bench",
  "horizon-chat-filter",
  "horizon-client-core",
  "horizon-client-input",
@@ -1548,7 +1549,6 @@ dependencies = [
  "glam",
  "horizon-anticheat",
  "horizon-assets",
- "horizon-bench",
  "horizon-client-core",
  "horizon-client-input",
  "horizon-client-render",
@@ -1827,6 +1827,7 @@ dependencies = [
 name = "horizon-official"
 version = "0.1.0"
 dependencies = [
+ "horizon-bench",
  "horizon-discord",
  "horizon-friends",
  "horizon-game",

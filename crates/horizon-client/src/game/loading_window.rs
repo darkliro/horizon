@@ -320,27 +320,32 @@ pub(super) fn start_game<'a>(
     game.preload_registries();
     game.start_agent_control()?;
     if let Some(scenario) = game.options.benchmark.clone() {
-        let control = game
+        // A part above the engine runs it (docs/benchmark.md), driving the game through the
+        // command queue horizon-ctl uses.
+        let requests = game
             .control
-            .get_or_insert_with(horizon_client::control::Server::local);
-        horizon_client::benchmark::start(
-            control.sender(),
-            horizon_client::benchmark::Setup {
-                scenario,
-                started,
-                app: horizon_bench::App {
-                    name: "horizon-client".into(),
-                    version: horizon_client::crash::version(),
-                    commit: option_env!("HORIZON_COMMIT").map(str::to_owned),
-                    mods: Vec::new(),
-                },
-                simulation_distance: game.settings.simulation_distance as u32,
-                vsync: false,
-                fps_cap: None,
-                offscreen: game.options.offscreen,
-                game_dir: std::env::current_dir()?,
-            },
-        );
+            .get_or_insert_with(horizon_client::control::Server::local)
+            .sender();
+        let control: horizon_hooks::Control = Box::new(move |line, wait| {
+            let (reply, response) = std::sync::mpsc::channel();
+            let line = line.to_owned();
+            requests
+                .send(horizon_client::control::Request { line, reply })
+                .ok()?;
+            response.recv_timeout(wait).ok()
+        });
+        let version = horizon_client::crash::version();
+        let run = horizon_hooks::Benchmark {
+            scenario: &scenario,
+            started,
+            home: &horizon_client::logging::game_home(),
+            game_dir: &std::env::current_dir()?,
+            version: &version,
+            build: &version,
+            simulation_distance: game.settings.simulation_distance as u32,
+            offscreen: game.options.offscreen,
+        };
+        horizon_hooks::engine::benchmark(&run, control);
     }
     if let Some(directory) = std::env::var_os("HORIZON_NATIVE_CLIENT_PARTICLES_FIXTURE") {
         game.run_native_client_particles_fixture(std::path::Path::new(&directory))?;
