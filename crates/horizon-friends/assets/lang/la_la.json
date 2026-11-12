@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Iunge",
   "horizon.multiplayer.join_friend": "Iungere amico",
   "horizon.multiplayer.invite_code": "invitare Code",
-  "horizon.multiplayer.relay": "Nullam (libitum)"
+  "horizon.multiplayer.relay": "Nullam (libitum)",
+  "horizon.multiplayer.finding_friend": "Inveniens mundum amici tui.",
+  "horizon.multiplayer.connected_friend_direct": "Coniuncta recta ad amicum tuum...",
+  "horizon.multiplayer.connected_friend_relay": "Nullam a orci lorem."
 }

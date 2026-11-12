@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Gå med",
   "horizon.multiplayer.join_friend": "Gå med i en vän",
   "horizon.multiplayer.invite_code": "Inbjudningskod",
-  "horizon.multiplayer.relay": "Relä (valfritt)"
+  "horizon.multiplayer.relay": "Relä (valfritt)",
+  "horizon.multiplayer.finding_friend": "Att hitta din väns värld...",
+  "horizon.multiplayer.connected_friend_direct": "Ansluten direkt till din vän...",
+  "horizon.multiplayer.connected_friend_relay": "Ansluten till din vän via reläet..."
 }

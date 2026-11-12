@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Dołącz",
   "horizon.multiplayer.join_friend": "Dołącz do znajomego",
   "horizon.multiplayer.invite_code": "Kod zaproszenia",
-  "horizon.multiplayer.relay": "Przekaźnik (opcjonalnie)"
+  "horizon.multiplayer.relay": "Przekaźnik (opcjonalnie)",
+  "horizon.multiplayer.finding_friend": "Szukanie świata znajomego…",
+  "horizon.multiplayer.connected_friend_direct": "Połączono bezpośrednio ze znajomym…",
+  "horizon.multiplayer.connected_friend_relay": "Połączono ze znajomym przez przekaźnik…"
 }

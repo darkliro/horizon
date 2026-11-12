@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Bli med",
   "horizon.multiplayer.join_friend": "Bli med en venn",
   "horizon.multiplayer.invite_code": "Invitasjonskode",
-  "horizon.multiplayer.relay": "Relé (valgfritt)"
+  "horizon.multiplayer.relay": "Relé (valgfritt)",
+  "horizon.multiplayer.finding_friend": "Finne din venns verden...",
+  "horizon.multiplayer.connected_friend_direct": "Koblet direkte til vennen din...",
+  "horizon.multiplayer.connected_friend_relay": "Koblet til vennen din via reléet..."
 }

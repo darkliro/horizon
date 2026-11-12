@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Нэгдэх",
   "horizon.multiplayer.join_friend": "Найзтайгаа нэгдээрэй",
   "horizon.multiplayer.invite_code": "Урилгын код",
-  "horizon.multiplayer.relay": "Реле (заавал биш)"
+  "horizon.multiplayer.relay": "Реле (заавал биш)",
+  "horizon.multiplayer.finding_friend": "Найзынхаа ертөнцийг хайж байна...",
+  "horizon.multiplayer.connected_friend_direct": "Найзтайгаа шууд холбогдсон...",
+  "horizon.multiplayer.connected_friend_relay": "Найзтайгаа релейгээр холбогдсон..."
 }

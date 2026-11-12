@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Iscrivitvi",
   "horizon.multiplayer.join_friend": "Iscrivitvi a un amì",
   "horizon.multiplayer.invite_code": "Codiç di invit",
-  "horizon.multiplayer.relay": "Relê (opzionâl)"
+  "horizon.multiplayer.relay": "Relê (opzionâl)",
+  "horizon.multiplayer.finding_friend": "Cjatâ il mont dal to amì...",
+  "horizon.multiplayer.connected_friend_direct": "Colegât diretementri al to amì...",
+  "horizon.multiplayer.connected_friend_relay": "Colegât al to amì midiant dal relê..."
 }

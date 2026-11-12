@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "انضم",
   "horizon.multiplayer.join_friend": "انضم إلى صديق",
   "horizon.multiplayer.invite_code": "رمز الدعوة",
-  "horizon.multiplayer.relay": "التتابع (اختياري)"
+  "horizon.multiplayer.relay": "التتابع (اختياري)",
+  "horizon.multiplayer.finding_friend": "البحث عن عالم صديقك...",
+  "horizon.multiplayer.connected_friend_direct": "تواصل مباشرة مع صديقك..",
+  "horizon.multiplayer.connected_friend_relay": "متصل بصديقك من خلال التتابع..."
 }

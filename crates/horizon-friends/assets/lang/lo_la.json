@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "ເຂົ້າຮ່ວມ",
   "horizon.multiplayer.join_friend": "ເຂົ້າຮ່ວມເພື່ອນ",
   "horizon.multiplayer.invite_code": "ລະຫັດເຊີນ",
-  "horizon.multiplayer.relay": "Relay (ທາງເລືອກ)"
+  "horizon.multiplayer.relay": "Relay (ທາງເລືອກ)",
+  "horizon.multiplayer.finding_friend": "ຊອກຫາໂລກຂອງເພື່ອນຂອງເຈົ້າ...",
+  "horizon.multiplayer.connected_friend_direct": "ເຊື່ອມຕໍ່ຫາໝູ່ຂອງເຈົ້າໂດຍກົງ...",
+  "horizon.multiplayer.connected_friend_relay": "ເຊື່ອມຕໍ່ກັບໝູ່ຂອງເຈົ້າຜ່ານສາຍສົ່ງ..."
 }

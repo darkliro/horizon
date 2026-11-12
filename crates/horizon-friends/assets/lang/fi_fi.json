@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Liity",
   "horizon.multiplayer.join_friend": "Liity ystäväksi",
   "horizon.multiplayer.invite_code": "Kutsukoodi",
-  "horizon.multiplayer.relay": "Rele (valinnainen)"
+  "horizon.multiplayer.relay": "Rele (valinnainen)",
+  "horizon.multiplayer.finding_friend": "Ystäväsi maailman löytäminen...",
+  "horizon.multiplayer.connected_friend_direct": "Yhdistetty suoraan ystäväsi...",
+  "horizon.multiplayer.connected_friend_relay": "Yhdistetty ystäväisi releen kautta..."
 }

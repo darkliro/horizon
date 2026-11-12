@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "加入",
   "horizon.multiplayer.join_friend": "加入好友",
   "horizon.multiplayer.invite_code": "邀请码",
-  "horizon.multiplayer.relay": "中继（可选）"
+  "horizon.multiplayer.relay": "中继（可选）",
+  "horizon.multiplayer.finding_friend": "正在查找好友的世界…",
+  "horizon.multiplayer.connected_friend_direct": "已直连好友的世界…",
+  "horizon.multiplayer.connected_friend_relay": "已通过中继连接好友的世界…"
 }

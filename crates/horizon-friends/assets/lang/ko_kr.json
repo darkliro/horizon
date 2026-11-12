@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "참가",
   "horizon.multiplayer.join_friend": "친구 참가",
   "horizon.multiplayer.invite_code": "초대 코드",
-  "horizon.multiplayer.relay": "릴레이 (선택 사항)"
+  "horizon.multiplayer.relay": "릴레이 (선택 사항)",
+  "horizon.multiplayer.finding_friend": "친구의 월드를 찾는 중...",
+  "horizon.multiplayer.connected_friend_direct": "친구에게 직접 연결되었습니다...",
+  "horizon.multiplayer.connected_friend_relay": "릴레이를 통해 친구에게 연결되었습니다..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Csatlakozz",
   "horizon.multiplayer.join_friend": "Csatlakozz egy baráthoz",
   "horizon.multiplayer.invite_code": "Meghívó kód",
-  "horizon.multiplayer.relay": "Relé (opcionális)"
+  "horizon.multiplayer.relay": "Relé (opcionális)",
+  "horizon.multiplayer.finding_friend": "Megtalálni a barátod világát...",
+  "horizon.multiplayer.connected_friend_direct": "Egyenesen a barátoddal...",
+  "horizon.multiplayer.connected_friend_relay": "Kapcsolatban áll a barátjával a relén keresztül..."
 }

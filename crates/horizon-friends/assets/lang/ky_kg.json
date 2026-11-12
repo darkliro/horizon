@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Кошулуу",
   "horizon.multiplayer.join_friend": "Доско кошулуңуз",
   "horizon.multiplayer.invite_code": "Чакыруу коду",
-  "horizon.multiplayer.relay": "Реле (милдеттүү эмес)"
+  "horizon.multiplayer.relay": "Реле (милдеттүү эмес)",
+  "horizon.multiplayer.finding_friend": "Досуңуздун дүйнөсүн табуу...",
+  "horizon.multiplayer.connected_friend_direct": "Досуңузга түз туташып...",
+  "horizon.multiplayer.connected_friend_relay": "Эстафета аркылуу досуңузга туташтырылды..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Doe mee",
   "horizon.multiplayer.join_friend": "Sluit je aan bij een vriend",
   "horizon.multiplayer.invite_code": "Uitnodigingscode",
-  "horizon.multiplayer.relay": "relais (optioneel)"
+  "horizon.multiplayer.relay": "relais (optioneel)",
+  "horizon.multiplayer.finding_friend": "Vind de wereld van je vriend...",
+  "horizon.multiplayer.connected_friend_direct": "Rechtstreeks verbonden met je vriend...",
+  "horizon.multiplayer.connected_friend_relay": "Verbonden met je vriend via het relais..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Thig còmhla",
   "horizon.multiplayer.join_friend": "Thig còmhla ri Caraid",
   "horizon.multiplayer.invite_code": "Còd cuireadh",
-  "horizon.multiplayer.relay": "Ath-chraoladh (roghainneil)"
+  "horizon.multiplayer.relay": "Ath-chraoladh (roghainneil)",
+  "horizon.multiplayer.finding_friend": "Lorg saoghal do charaid...",
+  "horizon.multiplayer.connected_friend_direct": "Ceangailte gu dìreach ri do charaid ...",
+  "horizon.multiplayer.connected_friend_relay": "Ceangailte ri do charaid tron t-sealaidheachd..."
 }

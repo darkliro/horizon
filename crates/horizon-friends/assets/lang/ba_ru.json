@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Ҡушылыу",
   "horizon.multiplayer.join_friend": "Дуҫҡа ҡушыл",
   "horizon.multiplayer.invite_code": "Саҡырыу коды",
-  "horizon.multiplayer.relay": "Реле (теләк буйынса)"
+  "horizon.multiplayer.relay": "Реле (теләк буйынса)",
+  "horizon.multiplayer.finding_friend": "Дуҫыңдың донъяһын табыу...",
+  "horizon.multiplayer.connected_friend_direct": "Һеҙҙең дуҫығыҙға туранан-тура тоташтырылған...",
+  "horizon.multiplayer.connected_friend_relay": "Һеҙҙең дуҫығыҙға реле аша тоташтырылған..."
 }

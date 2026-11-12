@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Միանալ",
   "horizon.multiplayer.join_friend": "Միացեք ընկերոջը",
   "horizon.multiplayer.invite_code": "Հրավիրել կոդը",
-  "horizon.multiplayer.relay": "Ռելե (ըստ ցանկության)"
+  "horizon.multiplayer.relay": "Ռելե (ըստ ցանկության)",
+  "horizon.multiplayer.finding_friend": "Գտեք ձեր ընկերոջ աշխարհը...",
+  "horizon.multiplayer.connected_friend_direct": "Միացված է ուղիղ ընկերոջդ հետ...",
+  "horizon.multiplayer.connected_friend_relay": "Միացված է ձեր ընկերոջը ռելեի միջոցով..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Prziłōncz sie",
   "horizon.multiplayer.join_friend": "Prziłōncz sie do Kamrata",
   "horizon.multiplayer.invite_code": "Kod zaproszynio",
-  "horizon.multiplayer.relay": "Przekaźnik (opcjōnalnie)"
+  "horizon.multiplayer.relay": "Przekaźnik (opcjōnalnie)",
+  "horizon.multiplayer.finding_friend": "Znojdowanie świata swojich kamratōw...",
+  "horizon.multiplayer.connected_friend_direct": "Połōnczōny prosto ze swojim kamratym...",
+  "horizon.multiplayer.connected_friend_relay": "Połōnczōny ze swojim kamratym bez przekaźnik..."
 }

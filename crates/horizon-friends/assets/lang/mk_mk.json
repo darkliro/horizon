@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Приклучи се",
   "horizon.multiplayer.join_friend": "Придружете се на пријател",
   "horizon.multiplayer.invite_code": "Код за покана",
-  "horizon.multiplayer.relay": "Реле (опционално)"
+  "horizon.multiplayer.relay": "Реле (опционално)",
+  "horizon.multiplayer.finding_friend": "Пронаоѓање на светот на вашиот пријател...",
+  "horizon.multiplayer.connected_friend_direct": "Поврзан директно со твојот пријател...",
+  "horizon.multiplayer.connected_friend_relay": "Поврзан со вашиот пријател преку релето..."
 }

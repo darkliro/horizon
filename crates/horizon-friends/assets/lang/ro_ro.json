@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Alăturați-vă",
   "horizon.multiplayer.join_friend": "Alăturați-vă unui prieten",
   "horizon.multiplayer.invite_code": "Cod de invitație",
-  "horizon.multiplayer.relay": "releu (optional)"
+  "horizon.multiplayer.relay": "releu (optional)",
+  "horizon.multiplayer.finding_friend": "Găsind lumea prietenului tău...",
+  "horizon.multiplayer.connected_friend_direct": "Conectat direct cu prietenul tău...",
+  "horizon.multiplayer.connected_friend_relay": "Conectat cu prietenul tău prin releu..."
 }

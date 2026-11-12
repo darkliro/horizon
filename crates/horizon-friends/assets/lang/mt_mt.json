@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Ingħaqad",
   "horizon.multiplayer.join_friend": "Ingħaqad ma' Ħabib",
   "horizon.multiplayer.invite_code": "Stieden Kodiċi",
-  "horizon.multiplayer.relay": "Relay (mhux obbligatorju)"
+  "horizon.multiplayer.relay": "Relay (mhux obbligatorju)",
+  "horizon.multiplayer.finding_friend": "Sib id-dinja ta' ħabib tiegħek...",
+  "horizon.multiplayer.connected_friend_direct": "Konnessi direttament mal-ħabib tiegħek...",
+  "horizon.multiplayer.connected_friend_relay": "Konness mal-ħabib tiegħek permezz tar-relay..."
 }

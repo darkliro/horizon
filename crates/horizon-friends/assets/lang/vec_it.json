@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Entra",
   "horizon.multiplayer.join_friend": "Entra a un amigo",
   "horizon.multiplayer.invite_code": "Codice de invito",
-  "horizon.multiplayer.relay": "Relè (opsionałe)"
+  "horizon.multiplayer.relay": "Relè (opsionałe)",
+  "horizon.multiplayer.finding_friend": "Trovando el mondo del tuo amico...",
+  "horizon.multiplayer.connected_friend_direct": "Collegato diretamente al tuo amico...",
+  "horizon.multiplayer.connected_friend_relay": "Collegato al tuo amico tramite el relè..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Пӗрлешӗр",
   "horizon.multiplayer.join_friend": "Тус ҫумне хутшӑн",
   "horizon.multiplayer.invite_code": "Йыхрав кодӗ",
-  "horizon.multiplayer.relay": "Реле (опционально)"
+  "horizon.multiplayer.relay": "Реле (опционально)",
+  "horizon.multiplayer.finding_friend": "Юлташӑн тӗнчине тупни...",
+  "horizon.multiplayer.connected_friend_direct": "Тӳрех тусупа ҫыхӑнтӑм...",
+  "horizon.multiplayer.connected_friend_relay": "Реле урлӑ тусупа ҫыхӑннӑ..."
 }

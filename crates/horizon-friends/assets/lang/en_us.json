@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Join",
   "horizon.multiplayer.join_friend": "Join a Friend",
   "horizon.multiplayer.invite_code": "Invite Code",
-  "horizon.multiplayer.relay": "Relay (optional)"
+  "horizon.multiplayer.relay": "Relay (optional)",
+  "horizon.multiplayer.finding_friend": "Finding your friend's world...",
+  "horizon.multiplayer.connected_friend_direct": "Connected straight to your friend...",
+  "horizon.multiplayer.connected_friend_relay": "Connected to your friend through the relay..."
 }

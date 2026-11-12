@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Εγγραφείτε",
   "horizon.multiplayer.join_friend": "Γίνετε μέλος ενός φίλου",
   "horizon.multiplayer.invite_code": "Κωδικός πρόσκλησης",
-  "horizon.multiplayer.relay": "Ρελέ (προαιρετικό)"
+  "horizon.multiplayer.relay": "Ρελέ (προαιρετικό)",
+  "horizon.multiplayer.finding_friend": "Βρες τον κόσμο του φίλου σου...",
+  "horizon.multiplayer.connected_friend_direct": "Συνδέθηκε απευθείας με τον φίλο σας...",
+  "horizon.multiplayer.connected_friend_relay": "Συνδέθηκε με τον φίλο σας μέσω του ρελέ..."
 }

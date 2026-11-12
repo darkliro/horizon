@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Ver við",
   "horizon.multiplayer.join_friend": "Melda teg til ein vin",
   "horizon.multiplayer.invite_code": "Boðkoda",
-  "horizon.multiplayer.relay": "Stafett (valfrítt)"
+  "horizon.multiplayer.relay": "Stafett (valfrítt)",
+  "horizon.multiplayer.finding_friend": "At finna heimin hjá tínum vini...",
+  "horizon.multiplayer.connected_friend_direct": "Samband beinleiðis við tín vin...",
+  "horizon.multiplayer.connected_friend_relay": "Samband við tín vin gjøgnum stafettina..."
 }

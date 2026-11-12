@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Soro",
   "horizon.multiplayer.join_friend": "Soro enyi",
   "horizon.multiplayer.invite_code": "Koodu ịkpọ oku",
-  "horizon.multiplayer.relay": "Ntugharị (nhọrọ)"
+  "horizon.multiplayer.relay": "Ntugharị (nhọrọ)",
+  "horizon.multiplayer.finding_friend": "Ịchọta ụwa enyi gị...",
+  "horizon.multiplayer.connected_friend_direct": "Ejikọtara ya na enyi gị ozugbo...",
+  "horizon.multiplayer.connected_friend_relay": "Ejikọrọ enyi gị site na relay..."
 }

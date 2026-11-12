@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "เข้าร่วม",
   "horizon.multiplayer.join_friend": "เข้าร่วมเป็นเพื่อน",
   "horizon.multiplayer.invite_code": "รหัสเชิญ",
-  "horizon.multiplayer.relay": "รีเลย์ (อุปกรณ์เสริม)"
+  "horizon.multiplayer.relay": "รีเลย์ (อุปกรณ์เสริม)",
+  "horizon.multiplayer.finding_friend": "ค้นหาโลกของเพื่อนของคุณ...",
+  "horizon.multiplayer.connected_friend_direct": "เชื่อมต่อโดยตรงกับเพื่อนของคุณ...",
+  "horizon.multiplayer.connected_friend_relay": "เชื่อมต่อกับเพื่อนของคุณผ่านรีเลย์..."
 }

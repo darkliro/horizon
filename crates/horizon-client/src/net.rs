@@ -512,10 +512,14 @@ pub fn is_invite(code: &str, full: bool) -> bool {
 /// An address as players and logs see it: a friend's invite code stays
 /// out of it (its secret is in there).
 pub fn shown_address(address: &str) -> String {
+    shown_address_with(address, horizon_hooks::engine::tunnel())
+}
+
+pub(crate) fn shown_address_with(address: &str, resolver: Option<&dyn tunnel::Resolver>) -> String {
     match address.strip_prefix(FRIEND) {
-        Some(code) => match horizon_hooks::engine::tunnel().and_then(|r| r.nameplate(code)) {
-            Some(nameplate) => format!("Friend's world ({nameplate}-****)"),
-            None => "Friend's world".to_owned(),
+        Some(code) => match resolver {
+            Some(resolver) => resolver.shown(code),
+            None => address.to_owned(),
         },
         None => address.to_owned(),
     }
@@ -537,16 +541,7 @@ fn join_friend(
         ));
     };
     let mut progress = |p: tunnel::Progress| {
-        let key = match p {
-            tunnel::Progress::Finding => "horizon.multiplayer.finding_friend",
-            tunnel::Progress::Connected { direct: true } => {
-                "horizon.multiplayer.connected_friend_direct"
-            }
-            tunnel::Progress::Connected { direct: false } => {
-                "horizon.multiplayer.connected_friend_relay"
-            }
-        };
-        status(send, &tr(lang, key));
+        status(send, &tr(lang, p.key()));
     };
     let opened = resolver.open(code, &mut progress).map_err(Reason::plain)?;
     Ok(("127.0.0.1".to_owned(), opened.port, opened.token))
@@ -2336,5 +2331,39 @@ mod tests {
         assert!(reg.entries[2].data.is_none());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    struct MockResolver;
+    impl tunnel::Resolver for MockResolver {
+        fn is_code(&self, _code: &str, _full: bool) -> bool {
+            true
+        }
+        fn nameplate(&self, code: &str) -> Option<String> {
+            code.split('-').next().map(str::to_owned)
+        }
+        fn public_part(&self, code: &str) -> String {
+            code.to_owned()
+        }
+        fn open(
+            &self,
+            _code: &str,
+            _progress: &mut dyn FnMut(tunnel::Progress),
+        ) -> Result<tunnel::Opened, String> {
+            Err("mock".into())
+        }
+    }
+
+    #[test]
+    fn shown_address_formats_plain_and_falls_back_when_no_resolver() {
+        assert_eq!(shown_address("example.com:25565"), "example.com:25565");
+        assert_eq!(shown_address("friend:K7QM-3XPD"), "friend:K7QM-3XPD");
+        assert_eq!(
+            shown_address_with("friend:K7QM-3XPD", Some(&MockResolver)),
+            "Friend's world (K7QM-****)"
+        );
+        assert_eq!(
+            shown_address_with("example.com:25565", Some(&MockResolver)),
+            "example.com:25565"
+        );
     }
 }

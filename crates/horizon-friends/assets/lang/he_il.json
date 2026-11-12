@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "הצטרף",
   "horizon.multiplayer.join_friend": "הצטרף לחבר",
   "horizon.multiplayer.invite_code": "קוד הזמנה",
-  "horizon.multiplayer.relay": "ממסר (אופציונלי)"
+  "horizon.multiplayer.relay": "ממסר (אופציונלי)",
+  "horizon.multiplayer.finding_friend": "למצוא את עולמו של חברך...",
+  "horizon.multiplayer.connected_friend_direct": "מחובר ישר לחבר שלך...",
+  "horizon.multiplayer.connected_friend_relay": "מחובר לחבר שלך דרך הממסר..."
 }

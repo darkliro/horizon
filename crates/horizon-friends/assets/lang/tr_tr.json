@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Katıl",
   "horizon.multiplayer.join_friend": "Bir Arkadaşa Katıl",
   "horizon.multiplayer.invite_code": "Davet Kodu",
-  "horizon.multiplayer.relay": "Aktarıcı (İsteğe Bağlı)"
+  "horizon.multiplayer.relay": "Aktarıcı (İsteğe Bağlı)",
+  "horizon.multiplayer.finding_friend": "Arkadaşınızın dünyası aranıyor...",
+  "horizon.multiplayer.connected_friend_direct": "Arkadaşınıza doğrudan bağlanıldı...",
+  "horizon.multiplayer.connected_friend_relay": "Arkadaşınıza aktarıcı üzerinden bağlanıldı..."
 }

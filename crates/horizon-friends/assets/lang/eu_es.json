@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Sartu",
   "horizon.multiplayer.join_friend": "Sartu Lagun batekin",
   "horizon.multiplayer.invite_code": "Gonbidatu kodea",
-  "horizon.multiplayer.relay": "Erreleboa (aukerakoa)"
+  "horizon.multiplayer.relay": "Erreleboa (aukerakoa)",
+  "horizon.multiplayer.finding_friend": "Zure lagunaren mundua aurkitzen...",
+  "horizon.multiplayer.connected_friend_direct": "Zure lagunarekin zuzenean konektatuta...",
+  "horizon.multiplayer.connected_friend_relay": "Zure lagunarekin erreleboaren bidez konektatuta..."
 }

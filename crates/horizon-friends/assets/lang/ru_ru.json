@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Подключиться",
   "horizon.multiplayer.join_friend": "Играть с другом",
   "horizon.multiplayer.invite_code": "Код приглашения",
-  "horizon.multiplayer.relay": "Ретранслятор (необязательно)"
+  "horizon.multiplayer.relay": "Ретранслятор (необязательно)",
+  "horizon.multiplayer.finding_friend": "Ищем мир друга…",
+  "horizon.multiplayer.connected_friend_direct": "Установлено прямое соединение с другом…",
+  "horizon.multiplayer.connected_friend_relay": "Соединение с другом через релей…"
 }

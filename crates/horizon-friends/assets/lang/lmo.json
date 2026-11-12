@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Partecipa",
   "horizon.multiplayer.join_friend": "Unis-te a un amig",
   "horizon.multiplayer.invite_code": "Codex de l'invito",
-  "horizon.multiplayer.relay": "Relè (facultatif)"
+  "horizon.multiplayer.relay": "Relè (facultatif)",
+  "horizon.multiplayer.finding_friend": "Truvar el mund del to amis...",
+  "horizon.multiplayer.connected_friend_direct": "Cunness diretament al tò amis...",
+  "horizon.multiplayer.connected_friend_relay": "Culegà al tò amì travers del relè..."
 }

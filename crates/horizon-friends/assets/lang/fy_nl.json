@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Meidwaan",
   "horizon.multiplayer.join_friend": "Doch mei oan in freon",
   "horizon.multiplayer.invite_code": "Koade útnoegje",
-  "horizon.multiplayer.relay": "Relais (opsjoneel)"
+  "horizon.multiplayer.relay": "Relais (opsjoneel)",
+  "horizon.multiplayer.finding_friend": "De wrâld fan jo freon fine ...",
+  "horizon.multiplayer.connected_friend_direct": "Direkt ferbûn mei jo freon ...",
+  "horizon.multiplayer.connected_friend_relay": "Ferbûn mei jo freon fia de estafette ..."
 }

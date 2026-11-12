@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Кыттыс",
   "horizon.multiplayer.join_friend": "Доҕоргор холбос",
   "horizon.multiplayer.invite_code": "Ыҥырыы куода",
-  "horizon.multiplayer.relay": "Реле (опциональнай)"
+  "horizon.multiplayer.relay": "Реле (опциональнай)",
+  "horizon.multiplayer.finding_friend": "Доҕоруҥ эйгэтин булан...",
+  "horizon.multiplayer.connected_friend_direct": "Доҕоргор быһа сибээстээх...",
+  "horizon.multiplayer.connected_friend_relay": "Доҕоргун кытта реле нөҥүө холбоннубут..."
 }

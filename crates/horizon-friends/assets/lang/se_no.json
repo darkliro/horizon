@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Searvva",
   "horizon.multiplayer.join_friend": "Searvva ovtta skihpárii",
   "horizon.multiplayer.invite_code": "Bovdehuskoda",
-  "horizon.multiplayer.relay": "Rele (válljejuvvon)"
+  "horizon.multiplayer.relay": "Rele (válljejuvvon)",
+  "horizon.multiplayer.finding_friend": "Gávdnat iežat ustibiid máilmmi...",
+  "horizon.multiplayer.connected_friend_direct": "Oktavuohta njuolga du ustibiidda...",
+  "horizon.multiplayer.connected_friend_relay": "Oktavuohta du skihpáriin relea bokte..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Kemer perzh",
   "horizon.multiplayer.join_friend": "Kemer perzh en ur mignon",
   "horizon.multiplayer.invite_code": "Kod pediñ",
-  "horizon.multiplayer.relay": "Treuzkas (dibar)"
+  "horizon.multiplayer.relay": "Treuzkas (dibar)",
+  "horizon.multiplayer.finding_friend": "O kavout bed ho mignon...",
+  "horizon.multiplayer.connected_friend_direct": "Kevreet war-eeun ouzh ho mignon...",
+  "horizon.multiplayer.connected_friend_relay": "Kevreet ouzh ho mignon dre ar c'heflusker..."
 }

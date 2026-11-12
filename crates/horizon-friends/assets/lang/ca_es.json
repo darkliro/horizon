@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Uneix-te",
   "horizon.multiplayer.join_friend": "Uneix-te a un amic",
   "horizon.multiplayer.invite_code": "Codi d'invitació",
-  "horizon.multiplayer.relay": "Relé (opcional)"
+  "horizon.multiplayer.relay": "Relé (opcional)",
+  "horizon.multiplayer.finding_friend": "Trobar el món del teu amic...",
+  "horizon.multiplayer.connected_friend_direct": "Connectat directament amb el teu amic...",
+  "horizon.multiplayer.connected_friend_relay": "Connectat amb el teu amic a través del relé..."
 }

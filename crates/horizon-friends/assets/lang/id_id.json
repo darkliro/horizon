@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Gabung",
   "horizon.multiplayer.join_friend": "Gabung dengan Teman",
   "horizon.multiplayer.invite_code": "Kode Undangan",
-  "horizon.multiplayer.relay": "Relay (opsional)"
+  "horizon.multiplayer.relay": "Relay (opsional)",
+  "horizon.multiplayer.finding_friend": "Mencari dunia teman Anda...",
+  "horizon.multiplayer.connected_friend_direct": "Terhubung langsung ke teman Anda...",
+  "horizon.multiplayer.connected_friend_relay": "Terhubung ke teman Anda melalui relay..."
 }

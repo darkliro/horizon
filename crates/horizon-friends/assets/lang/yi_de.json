@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "פאַרבינדן",
   "horizon.multiplayer.join_friend": "פאַרבינדן אַ פרייַנד",
   "horizon.multiplayer.invite_code": "לאַדן קאָד",
-  "horizon.multiplayer.relay": "רעלע (אַפּשאַנאַל)"
+  "horizon.multiplayer.relay": "רעלע (אַפּשאַנאַל)",
+  "horizon.multiplayer.finding_friend": "געפֿינען דיין פרייַנד 'ס וועלט ...",
+  "horizon.multiplayer.connected_friend_direct": "גלייך פארבונדן צו דיין פרייַנד ...",
+  "horizon.multiplayer.connected_friend_relay": "קאָננעקטעד צו דיין פרייַנד דורך די רעלע ..."
 }

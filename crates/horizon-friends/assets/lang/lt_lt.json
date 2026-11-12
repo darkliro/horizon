@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Prisijunk",
   "horizon.multiplayer.join_friend": "Prisijunk prie draugo",
   "horizon.multiplayer.invite_code": "Kvietimo kodas",
-  "horizon.multiplayer.relay": "Relė (neprivaloma)"
+  "horizon.multiplayer.relay": "Relė (neprivaloma)",
+  "horizon.multiplayer.finding_friend": "Atrask savo draugo pasaulį...",
+  "horizon.multiplayer.connected_friend_direct": "Prisijungę tiesiai su draugu...",
+  "horizon.multiplayer.connected_friend_relay": "Prisijungta prie savo draugo per relę..."
 }

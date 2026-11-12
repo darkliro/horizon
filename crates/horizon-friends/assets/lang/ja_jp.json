@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "参加する",
   "horizon.multiplayer.join_friend": "友達に加わる",
   "horizon.multiplayer.invite_code": "招待コード",
-  "horizon.multiplayer.relay": "リレー（オプション）"
+  "horizon.multiplayer.relay": "リレー（オプション）",
+  "horizon.multiplayer.finding_friend": "友達の世界を探しています...",
+  "horizon.multiplayer.connected_friend_direct": "友達と直接つながります...",
+  "horizon.multiplayer.connected_friend_relay": "リレーを通じて友達とつながっています..."
 }

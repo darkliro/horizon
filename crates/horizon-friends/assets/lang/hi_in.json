@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "शामिल हों",
   "horizon.multiplayer.join_friend": "मित्र से जुड़ें",
   "horizon.multiplayer.invite_code": "आमंत्रण कोड",
-  "horizon.multiplayer.relay": "रिले (वैकल्पिक)"
+  "horizon.multiplayer.relay": "रिले (वैकल्पिक)",
+  "horizon.multiplayer.finding_friend": "आपके मित्र की दुनिया खोजी जा रही है...",
+  "horizon.multiplayer.connected_friend_direct": "सीधे आपके मित्र से कनेक्ट हो गया...",
+  "horizon.multiplayer.connected_friend_relay": "रिले के माध्यम से आपके मित्र से कनेक्ट हो गया..."
 }

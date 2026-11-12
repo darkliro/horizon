@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Tham gia",
   "horizon.multiplayer.join_friend": "Tham gia cùng một người bạn",
   "horizon.multiplayer.invite_code": "Mã mời",
-  "horizon.multiplayer.relay": "Rơle (tùy chọn)"
+  "horizon.multiplayer.relay": "Rơle (tùy chọn)",
+  "horizon.multiplayer.finding_friend": "Đang tìm kiếm thế giới của bạn bè bạn...",
+  "horizon.multiplayer.connected_friend_direct": "Đã kết nối thẳng với bạn bè của bạn...",
+  "horizon.multiplayer.connected_friend_relay": "Đã kết nối với bạn bè của bạn thông qua rơle..."
 }

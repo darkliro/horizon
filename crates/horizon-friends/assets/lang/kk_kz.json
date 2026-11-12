@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Қосылыңыз",
   "horizon.multiplayer.join_friend": "Досқа қосылу",
   "horizon.multiplayer.invite_code": "Шақыру коды",
-  "horizon.multiplayer.relay": "Эстафета (міндетті емес)"
+  "horizon.multiplayer.relay": "Эстафета (міндетті емес)",
+  "horizon.multiplayer.finding_friend": "Досыңның әлемін табу...",
+  "horizon.multiplayer.connected_friend_direct": "Досыңызға тікелей қосылды...",
+  "horizon.multiplayer.connected_friend_relay": "Эстафета арқылы досыңызға қосылды..."
 }

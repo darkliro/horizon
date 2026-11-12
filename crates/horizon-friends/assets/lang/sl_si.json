@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Pridruži se",
   "horizon.multiplayer.join_friend": "Pridružite se prijatelju",
   "horizon.multiplayer.invite_code": "Koda povabila",
-  "horizon.multiplayer.relay": "Rele (neobvezno)"
+  "horizon.multiplayer.relay": "Rele (neobvezno)",
+  "horizon.multiplayer.finding_friend": "Iskanje prijateljevega sveta ...",
+  "horizon.multiplayer.connected_friend_direct": "Povezan neposredno s prijateljem ...",
+  "horizon.multiplayer.connected_friend_relay": "Povezan s prijateljem prek releja ..."
 }

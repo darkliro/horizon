@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Liitu",
   "horizon.multiplayer.join_friend": "Liituge sõbraga",
   "horizon.multiplayer.invite_code": "Kutsekood",
-  "horizon.multiplayer.relay": "Relee (valikuline)"
+  "horizon.multiplayer.relay": "Relee (valikuline)",
+  "horizon.multiplayer.finding_friend": "Oma sõbra maailma leidmine...",
+  "horizon.multiplayer.connected_friend_direct": "Ühendatakse otse teie sõbraga...",
+  "horizon.multiplayer.connected_friend_relay": "Sõbraga relee kaudu ühendatud..."
 }

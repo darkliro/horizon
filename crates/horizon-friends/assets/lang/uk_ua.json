@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Приєднатися",
   "horizon.multiplayer.join_friend": "Приєднатися до друга",
   "horizon.multiplayer.invite_code": "Код запрошення",
-  "horizon.multiplayer.relay": "Ретранслятор (необов’язково)"
+  "horizon.multiplayer.relay": "Ретранслятор (необов’язково)",
+  "horizon.multiplayer.finding_friend": "Шукаємо світ друга…",
+  "horizon.multiplayer.connected_friend_direct": "Пряме з'єднання з другом встановлено…",
+  "horizon.multiplayer.connected_friend_relay": "З'єднання з другом через ретранслятор…"
 }

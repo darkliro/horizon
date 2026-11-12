@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Pripojte sa",
   "horizon.multiplayer.join_friend": "Pridajte sa k priateľovi",
   "horizon.multiplayer.invite_code": "Pozývací kód",
-  "horizon.multiplayer.relay": "relé (voliteľné)"
+  "horizon.multiplayer.relay": "relé (voliteľné)",
+  "horizon.multiplayer.finding_friend": "Nájdenie sveta svojho priateľa...",
+  "horizon.multiplayer.connected_friend_direct": "Pripojený priamo k vášmu priateľovi...",
+  "horizon.multiplayer.connected_friend_relay": "Pripojené k vášmu priateľovi cez relé..."
 }

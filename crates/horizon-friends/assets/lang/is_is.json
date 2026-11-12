@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Vertu með",
   "horizon.multiplayer.join_friend": "Vertu með í vini",
   "horizon.multiplayer.invite_code": "Boðskóði",
-  "horizon.multiplayer.relay": "Relay (valfrjálst)"
+  "horizon.multiplayer.relay": "Relay (valfrjálst)",
+  "horizon.multiplayer.finding_friend": "Að finna heim vinar þíns...",
+  "horizon.multiplayer.connected_friend_direct": "Tengt beint við vin þinn...",
+  "horizon.multiplayer.connected_friend_relay": "Tengdur vini þínum í gegnum gengi..."
 }

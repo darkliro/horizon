@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "சேருங்கள்",
   "horizon.multiplayer.join_friend": "ஒரு நண்பருடன் சேருங்கள்",
   "horizon.multiplayer.invite_code": "அழைப்பு குறியீடு",
-  "horizon.multiplayer.relay": "ரிலே (விரும்பினால்)"
+  "horizon.multiplayer.relay": "ரிலே (விரும்பினால்)",
+  "horizon.multiplayer.finding_friend": "உங்கள் நண்பரின் உலகத்தைக் கண்டறிய...",
+  "horizon.multiplayer.connected_friend_direct": "உங்கள் நண்பருடன் நேரடியாக இணைக்கப்பட்டுள்ளது...",
+  "horizon.multiplayer.connected_friend_relay": "ரிலே மூலம் உங்கள் நண்பருடன் இணைக்கப்பட்டுள்ளது..."
 }

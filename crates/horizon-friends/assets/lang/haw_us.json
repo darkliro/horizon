@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Hui",
   "horizon.multiplayer.join_friend": "E hui me kahi Hoa",
   "horizon.multiplayer.invite_code": "Code kono",
-  "horizon.multiplayer.relay": "Relay (koho)"
+  "horizon.multiplayer.relay": "Relay (koho)",
+  "horizon.multiplayer.finding_friend": "Ke ʻimi nei i ka honua o kāu hoaaloha...",
+  "horizon.multiplayer.connected_friend_direct": "Hoʻopili pololei ʻia i kāu hoaaloha...",
+  "horizon.multiplayer.connected_friend_relay": "Hoʻohui ʻia i kāu hoaaloha ma o ka relay..."
 }

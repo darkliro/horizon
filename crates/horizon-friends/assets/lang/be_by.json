@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Далучайцеся",
   "horizon.multiplayer.join_friend": "Далучайцеся да сяброў",
   "horizon.multiplayer.invite_code": "Код запрашэння",
-  "horizon.multiplayer.relay": "Рэле (неабавязкова)"
+  "horizon.multiplayer.relay": "Рэле (неабавязкова)",
+  "horizon.multiplayer.finding_friend": "Пошук свету вашага сябра...",
+  "horizon.multiplayer.connected_friend_direct": "Падключаны непасрэдна да вашага сябра...",
+  "horizon.multiplayer.connected_friend_relay": "Падключаны да вашага сябра праз рэле..."
 }

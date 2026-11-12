@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Ku biir",
   "horizon.multiplayer.join_friend": "Ku biir saaxiib",
   "horizon.multiplayer.invite_code": "Koodhka martiqaadka",
-  "horizon.multiplayer.relay": "Gudbinta (ikhtiyaar)"
+  "horizon.multiplayer.relay": "Gudbinta (ikhtiyaar)",
+  "horizon.multiplayer.finding_friend": "Helitaanka adduunka saaxiibkaa...",
+  "horizon.multiplayer.connected_friend_direct": "Si toos ah ugu xidhan saaxiibkaa...",
+  "horizon.multiplayer.connected_friend_relay": "Ku xidhan saaxiibkaa iyada oo loo marayo gudbinta"
 }

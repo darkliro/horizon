@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Darapọ mọ",
   "horizon.multiplayer.join_friend": "Darapọ mọ Ọrẹ kan",
   "horizon.multiplayer.invite_code": "Koodu ifiwepe",
-  "horizon.multiplayer.relay": "Yiyi (aṣayan)"
+  "horizon.multiplayer.relay": "Yiyi (aṣayan)",
+  "horizon.multiplayer.finding_friend": "Wiwa aye ọrẹ rẹ...",
+  "horizon.multiplayer.connected_friend_direct": "Ti sopọ taara si ọrẹ rẹ ...",
+  "horizon.multiplayer.connected_friend_relay": "Ti sopọ mọ ọrẹ rẹ nipasẹ isọdọtun..."
 }

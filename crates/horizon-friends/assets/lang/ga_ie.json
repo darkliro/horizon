@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Bígí",
   "horizon.multiplayer.join_friend": "Bígí le Cara",
   "horizon.multiplayer.invite_code": "Cód Cuireadh",
-  "horizon.multiplayer.relay": "Sealaíocht (roghnach)"
+  "horizon.multiplayer.relay": "Sealaíocht (roghnach)",
+  "horizon.multiplayer.finding_friend": "Domhan do chara á aimsiú...",
+  "horizon.multiplayer.connected_friend_direct": "Ceangailte go díreach le do chara...",
+  "horizon.multiplayer.connected_friend_relay": "Ceangailte le do chara tríd an sealaíochta..."
 }

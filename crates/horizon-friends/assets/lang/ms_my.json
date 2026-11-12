@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Sertai",
   "horizon.multiplayer.join_friend": "Sertai Rakan",
   "horizon.multiplayer.invite_code": "Kod Jemputan",
-  "horizon.multiplayer.relay": "Relay (pilihan)"
+  "horizon.multiplayer.relay": "Relay (pilihan)",
+  "horizon.multiplayer.finding_friend": "Mencari dunia rakan anda...",
+  "horizon.multiplayer.connected_friend_direct": "Disambungkan terus kepada rakan anda...",
+  "horizon.multiplayer.connected_friend_relay": "Disambungkan kepada rakan anda melalui geganti..."
 }

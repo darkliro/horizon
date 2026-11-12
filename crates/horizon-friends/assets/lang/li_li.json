@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Sluit aan",
   "horizon.multiplayer.join_friend": "Doe dich aan bij un vrund",
   "horizon.multiplayer.invite_code": "Uitnodigingscode",
-  "horizon.multiplayer.relay": "Relais (optioneel)"
+  "horizon.multiplayer.relay": "Relais (optioneel)",
+  "horizon.multiplayer.finding_friend": "De wereld vaan dien vrund vinde...",
+  "horizon.multiplayer.connected_friend_direct": "Direk verboonde mit dien vrund...",
+  "horizon.multiplayer.connected_friend_relay": "Verboonde mit eur vrund via de relais..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Aliĝu",
   "horizon.multiplayer.join_friend": "Aliĝu al Amiko",
   "horizon.multiplayer.invite_code": "Inviti Kodon",
-  "horizon.multiplayer.relay": "Relajso (laŭvola)"
+  "horizon.multiplayer.relay": "Relajso (laŭvola)",
+  "horizon.multiplayer.finding_friend": "Trovi la mondon de via amiko...",
+  "horizon.multiplayer.connected_friend_direct": "Konektita rekte al via amiko...",
+  "horizon.multiplayer.connected_friend_relay": "Konektita al via amiko per la relajso..."
 }

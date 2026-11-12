@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Pievienojieties",
   "horizon.multiplayer.join_friend": "Pievienojieties draugam",
   "horizon.multiplayer.invite_code": "Uzaicinājuma kods",
-  "horizon.multiplayer.relay": "Relejs (pēc izvēles)"
+  "horizon.multiplayer.relay": "Relejs (pēc izvēles)",
+  "horizon.multiplayer.finding_friend": "Atrodi savu draugu pasauli...",
+  "horizon.multiplayer.connected_friend_direct": "Savienots tieši ar draugu...",
+  "horizon.multiplayer.connected_friend_relay": "Savienots ar draugu, izmantojot releju..."
 }

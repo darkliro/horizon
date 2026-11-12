@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Inscrivètz-vos",
   "horizon.multiplayer.join_friend": "Rejonhètz un amic",
   "horizon.multiplayer.invite_code": "Còde d'invitacion",
-  "horizon.multiplayer.relay": "Relè (facultatiu)"
+  "horizon.multiplayer.relay": "Relè (facultatiu)",
+  "horizon.multiplayer.finding_friend": "Trobant lo mond de ton amic...",
+  "horizon.multiplayer.connected_friend_direct": "Connectat dirèctament a vòstre amic...",
+  "horizon.multiplayer.connected_friend_relay": "Connectat a vòstre amic a travèrs lo relais..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Bashkohu",
   "horizon.multiplayer.join_friend": "Bashkohu me një mik",
   "horizon.multiplayer.invite_code": "Kodi i Ftesës",
-  "horizon.multiplayer.relay": "Rele (opsionale)"
+  "horizon.multiplayer.relay": "Rele (opsionale)",
+  "horizon.multiplayer.finding_friend": "Duke gjetur botën e mikut tuaj...",
+  "horizon.multiplayer.connected_friend_direct": "Lidhur direkt me shokun tuaj...",
+  "horizon.multiplayer.connected_friend_relay": "Lidhu me mikun tënd përmes stafetës..."
 }

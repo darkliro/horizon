@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Deltag",
   "horizon.multiplayer.join_friend": "Slut dig til en ven",
   "horizon.multiplayer.invite_code": "Invitationskode",
-  "horizon.multiplayer.relay": "Relæ (valgfrit)"
+  "horizon.multiplayer.relay": "Relæ (valgfrit)",
+  "horizon.multiplayer.finding_friend": "At finde din vens verden...",
+  "horizon.multiplayer.connected_friend_direct": "Forbundet direkte til din ven...",
+  "horizon.multiplayer.connected_friend_relay": "Forbundet til din ven gennem relæet..."
 }

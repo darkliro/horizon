@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Ymuno",
   "horizon.multiplayer.join_friend": "Ymunwch â Ffrind",
   "horizon.multiplayer.invite_code": "Cod Gwahodd",
-  "horizon.multiplayer.relay": "Cyfnewid (dewisol)"
+  "horizon.multiplayer.relay": "Cyfnewid (dewisol)",
+  "horizon.multiplayer.finding_friend": "Dod o hyd i fyd eich ffrind...",
+  "horizon.multiplayer.connected_friend_direct": "Wedi'i gysylltu'n syth â'ch ffrind...",
+  "horizon.multiplayer.connected_friend_relay": "Wedi'i gysylltu â'ch ffrind trwy'r ras gyfnewid ..."
 }

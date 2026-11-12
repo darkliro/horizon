@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "ಸೇರಿಕೊಳ್ಳಿ",
   "horizon.multiplayer.join_friend": "ಸ್ನೇಹಿತನನ್ನು ಸೇರಿ",
   "horizon.multiplayer.invite_code": "ಆಹ್ವಾನ ಕೋಡ್",
-  "horizon.multiplayer.relay": "ರಿಲೇ (ಐಚ್ಛಿಕ)"
+  "horizon.multiplayer.relay": "ರಿಲೇ (ಐಚ್ಛಿಕ)",
+  "horizon.multiplayer.finding_friend": "ನಿಮ್ಮ ಸ್ನೇಹಿತರ ಪ್ರಪಂಚವನ್ನು ಹುಡುಕಲಾಗುತ್ತಿದೆ...",
+  "horizon.multiplayer.connected_friend_direct": "ನಿಮ್ಮ ಸ್ನೇಹಿತರಿಗೆ ನೇರವಾಗಿ ಸಂಪರ್ಕಿಸಲಾಗಿದೆ...",
+  "horizon.multiplayer.connected_friend_relay": "ರಿಲೇ ಮೂಲಕ ನಿಮ್ಮ ಸ್ನೇಹಿತರಿಗೆ ಸಂಪರ್ಕಿಸಲಾಗಿದೆ..."
 }

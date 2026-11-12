@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "شامل ہوں",
   "horizon.multiplayer.join_friend": "کسی دوست کے ساتھ جڑیں",
   "horizon.multiplayer.invite_code": "دعوت نامہ کوڈ",
-  "horizon.multiplayer.relay": "رلے (اختیاری)"
+  "horizon.multiplayer.relay": "رلے (اختیاری)",
+  "horizon.multiplayer.finding_friend": "آپ کے دوست کی دنیا تلاش کی جا رہی ہے...",
+  "horizon.multiplayer.connected_friend_direct": "سیدھے آپ کے دوست سے جڑ گیا...",
+  "horizon.multiplayer.connected_friend_relay": "رلے کے ذریعے آپ کے دوست سے جڑ گیا..."
 }

@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Sluit aan",
   "horizon.multiplayer.join_friend": "Sluit aan by 'n Vriend",
   "horizon.multiplayer.invite_code": "Uitnodigingskode",
-  "horizon.multiplayer.relay": "Aflos (opsioneel)"
+  "horizon.multiplayer.relay": "Aflos (opsioneel)",
+  "horizon.multiplayer.finding_friend": "Soek jou vriend se wêreld...",
+  "horizon.multiplayer.connected_friend_direct": "Reguit gekoppel aan jou vriend...",
+  "horizon.multiplayer.connected_friend_relay": "Gekoppel aan jou vriend deur die aflos..."
 }

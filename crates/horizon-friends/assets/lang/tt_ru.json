@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Кушыл",
   "horizon.multiplayer.join_friend": "Дуска кушыл",
   "horizon.multiplayer.invite_code": "Чакыру коды",
-  "horizon.multiplayer.relay": "Эстафета (өстәмә)"
+  "horizon.multiplayer.relay": "Эстафета (өстәмә)",
+  "horizon.multiplayer.finding_friend": "Дустың дөньясын табу ...",
+  "horizon.multiplayer.connected_friend_direct": "Дустыңа туры ...",
+  "horizon.multiplayer.connected_friend_relay": "Эстафета аша дустыңа тоташты ..."
 }

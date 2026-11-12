@@ -71,6 +71,13 @@ impl Resolver for Invites {
         }
     }
 
+    fn shown(&self, code: &str) -> String {
+        match self.nameplate(code) {
+            Some(nameplate) => format!("Friend's world ({nameplate}-****)"),
+            None => "Friend's world".to_owned(),
+        }
+    }
+
     /// The relay is kept beside the addresses: two hosts on other networks can
     /// share a private address and the fixed direct port.
     fn public_part(&self, code: &str) -> String {
@@ -151,6 +158,8 @@ mod tests {
         // Only a short code's name may be shown; a full invite is all secret.
         assert_eq!(Invites.nameplate(&invite), None);
         assert_eq!(Invites.nameplate(&short).as_deref(), Some("K7QM"));
+        assert_eq!(Invites.shown(&short), "Friend's world (K7QM-****)");
+        assert_eq!(Invites.shown(&invite), "Friend's world");
     }
 
     #[test]

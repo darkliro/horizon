@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "بپیوندید",
   "horizon.multiplayer.join_friend": "به یک دوست بپیوندید",
   "horizon.multiplayer.invite_code": "کد دعوت",
-  "horizon.multiplayer.relay": "رله (اختیاری)"
+  "horizon.multiplayer.relay": "رله (اختیاری)",
+  "horizon.multiplayer.finding_friend": "پیدا کردن دنیای دوستت...",
+  "horizon.multiplayer.connected_friend_direct": "مستقیم به دوستت وصل شد...",
+  "horizon.multiplayer.connected_friend_relay": "از طریق رله به دوستت وصل شد..."
 }

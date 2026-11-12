@@ -19,6 +19,17 @@ pub enum Progress {
     Connected { direct: bool },
 }
 
+impl Progress {
+    /// Translation key for the progress stage shown to the player.
+    pub fn key(self) -> &'static str {
+        match self {
+            Progress::Finding => "horizon.multiplayer.finding_friend",
+            Progress::Connected { direct: true } => "horizon.multiplayer.connected_friend_direct",
+            Progress::Connected { direct: false } => "horizon.multiplayer.connected_friend_relay",
+        }
+    }
+}
+
 /// The tunnel's local end: the loopback port to connect to, and the token to send on it first
 /// (the port takes only the client that sends it).
 pub struct Opened {
@@ -35,6 +46,14 @@ pub trait Resolver: Send + Sync {
     /// A short code's name, the part players may see (`K7QM` of `K7QM-3XPD`); None for any other
     /// code, whose secret is all through it.
     fn nameplate(&self, code: &str) -> Option<String>;
+    /// An address as players and logs see it without revealing secrets: the short code's
+    /// nameplate or generic text.
+    fn shown(&self, code: &str) -> String {
+        match self.nameplate(code) {
+            Some(nameplate) => format!("Friend's world ({nameplate}-****)"),
+            None => "Friend's world".to_owned(),
+        }
+    }
     /// What tells one shared world from another, without any secret: native mods key a server's
     /// data by it.
     fn public_part(&self, code: &str) -> String;

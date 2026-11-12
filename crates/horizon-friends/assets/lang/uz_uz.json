@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Qo'shilish",
   "horizon.multiplayer.join_friend": "Do'stga qo'shiling",
   "horizon.multiplayer.invite_code": "Taklif kodi",
-  "horizon.multiplayer.relay": "Rele (ixtiyoriy)"
+  "horizon.multiplayer.relay": "Rele (ixtiyoriy)",
+  "horizon.multiplayer.finding_friend": "Do'stingiz dunyosini topmoqdasiz...",
+  "horizon.multiplayer.connected_friend_direct": "To'g'ridan-to'g'ri do'stingizga ulandi ...",
+  "horizon.multiplayer.connected_friend_relay": "Estafeta orqali do'stingizga ulangan..."
 }

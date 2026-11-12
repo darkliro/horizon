@@ -19,5 +19,8 @@
   "horizon.multiplayer.join": "Qoşulun",
   "horizon.multiplayer.join_friend": "Dosta Qoşulun",
   "horizon.multiplayer.invite_code": "Dəvət Kodu",
-  "horizon.multiplayer.relay": "Rele (isteğe bağlı)"
+  "horizon.multiplayer.relay": "Rele (isteğe bağlı)",
+  "horizon.multiplayer.finding_friend": "Dostunuzun dünyasını tapmaq...",
+  "horizon.multiplayer.connected_friend_direct": "Dostunuza birbaşa qoşulun...",
+  "horizon.multiplayer.connected_friend_relay": "Rele vasitəsilə dostunuza qoşulun..."
 }
