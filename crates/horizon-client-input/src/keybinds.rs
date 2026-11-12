@@ -88,7 +88,11 @@ pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
 /// Active non-vanilla mappings: registered crate mappings, falling back to HORIZON_MAPPINGS if empty.
 fn non_vanilla_mappings()
 -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
-    let registered = crate_mappings();
+    active_non_vanilla(crate_mappings())
+}
+fn active_non_vanilla(
+    registered: &'static [&'static [(&'static str, &'static str, &'static str)]],
+) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     let horizon: &[(&'static str, &'static str, &'static str)] = if registered.is_empty() {
         HORIZON_MAPPINGS
     } else {
@@ -700,5 +704,23 @@ mod tests {
             saved_rebound[0],
             ("key.emote", "key.keyboard.v".to_string())
         );
+    }
+    #[test]
+    fn active_non_vanilla_uses_registered_mappings_and_drops_fallback() {
+        static CUSTOM: &[(&str, &str, &str)] = &[
+            ("key.custom.test", "key.keyboard.k", "multiplayer"),
+            ("key.emote", "key.keyboard.x", "multiplayer"),
+        ];
+        static REGISTERED: &[&'static [(&'static str, &'static str, &'static str)]] = &[CUSTOM];
+        let active: Vec<_> = active_non_vanilla(REGISTERED).collect();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].0, "key.custom.test");
+        assert_eq!(active[1].0, "key.emote");
+        assert_eq!(active[1].1, "key.keyboard.x");
+        // Verify fallback is empty when registered is provided
+        let fallback_only: Vec<_> = active_non_vanilla(&[]).collect();
+        assert_eq!(fallback_only.len(), 1);
+        assert_eq!(fallback_only[0].0, "key.emote");
+        assert_eq!(fallback_only[0].1, "key.keyboard.b");
     }
 }
