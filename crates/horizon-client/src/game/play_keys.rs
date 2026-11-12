@@ -74,7 +74,7 @@ impl Game<'_> {
                     self.capture(true);
                 }
                 Screen::GameModeSwitcher => self.close_gamemode_switcher(false),
-                Screen::EmoteWheel => self.close_emote_wheel(None),
+                Screen::Overlay => self.close_overlay_screen(),
                 Screen::Dead => {
                     if self.ui.death_confirm.is_some() {
                         self.death_confirm_answer(false)?;
@@ -166,11 +166,11 @@ impl Game<'_> {
                 self.release_use_for_keybind_screen();
             }
             KeyCode::KeyL if self.screen == Screen::Advancements => self.close_advancements(),
-            // key.emote (Horizon's): the emote wheel, a tap again closes it.
-            KeyCode::KeyB if self.screen == Screen::Playing && super::cosmetics::enabled() => {
-                self.open_emote_wheel();
+            // A registered overlay screen: open from play if registered and enabled, close if already open.
+            KeyCode::KeyB if self.screen == Screen::Playing && self.can_open_overlay_screen() => {
+                self.open_overlay_screen();
             }
-            KeyCode::KeyB if self.screen == Screen::EmoteWheel => self.close_emote_wheel(None),
+            KeyCode::KeyB if self.screen == Screen::Overlay => self.close_overlay_screen(),
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
@@ -179,10 +179,10 @@ impl Game<'_> {
             | KeyCode::Digit6
             | KeyCode::Digit7
             | KeyCode::Digit8
-                if self.screen == Screen::EmoteWheel =>
+                if self.screen == Screen::Overlay =>
             {
                 let slot = (key as u32).wrapping_sub(KeyCode::Digit1 as u32) as usize;
-                self.close_emote_wheel(Some(slot));
+                self.overlay_screen_slot(slot);
             }
             // key.quickActions: only open if a datapack provides dialog actions.
             KeyCode::KeyG if self.screen == Screen::Playing => {
@@ -310,5 +310,36 @@ impl Game<'_> {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Whether an overlay screen can open now: a registered overlay screen exists for key.emote.
+    pub(super) fn can_open_overlay_screen(&self) -> bool {
+        horizon_hooks::screens::engine::find_by_trigger("key.emote").is_some()
+            && super::cosmetics::enabled()
+    }
+
+    /// Opens the registered overlay screen over gameplay.
+    pub(super) fn open_overlay_screen(&mut self) {
+        self.open_emote_wheel();
+    }
+
+    /// Closes the registered overlay screen.
+    pub(super) fn close_overlay_screen(&mut self) {
+        self.close_emote_wheel(None);
+    }
+
+    /// Acts on a numbered slot on the open overlay screen.
+    pub(super) fn overlay_screen_slot(&mut self, slot: usize) {
+        self.close_emote_wheel(Some(slot));
+    }
+
+    /// Draws the registered overlay screen.
+    pub(super) fn draw_overlay_screen(&mut self, batch: &mut HudBatch) {
+        self.draw_emote_wheel(batch);
+    }
+
+    /// Dispatches an event to the registered overlay screen.
+    pub(super) fn overlay_screen_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+        self.emote_wheel_event(event)
     }
 }

@@ -644,8 +644,8 @@ const HELD_FAR_COLUMNS: usize = 1 << 13;
 enum Screen {
     Playing,
     GameModeSwitcher,
-    /// Horizon's emote wheel (`game/cosmetics/emote_wheel.rs`): over the world, not pausing.
-    EmoteWheel,
+    /// An interactive registered overlay screen over the world (`horizon_hooks::screens`).
+    Overlay,
     Paused,
     Options,
     Chat,
@@ -694,7 +694,7 @@ impl Screen {
         match self {
             Screen::Playing => "playing",
             Screen::GameModeSwitcher => "game_mode_switcher",
-            Screen::EmoteWheel => "emote_wheel",
+            Screen::Overlay => "overlay",
             Screen::Paused => "paused",
             Screen::Options => "options",
             Screen::Chat => "chat",
@@ -6241,7 +6241,7 @@ impl Game<'_> {
                 );
             }
             Screen::GameModeSwitcher => self.draw_gamemode_switcher(&mut batch),
-            Screen::EmoteWheel => self.draw_emote_wheel(&mut batch),
+            Screen::Overlay => self.draw_overlay_screen(&mut batch),
             Screen::Dead => self.draw_death_screen(&mut batch),
             Screen::Stats => self.draw_stats(&mut batch),
             Screen::Advancements => self.draw_advancements(&mut batch),
@@ -10150,8 +10150,8 @@ impl Game<'_> {
             {
                 self.track_drag_button(*button, *state == ElementState::Pressed);
             }
-            // The emote key let go over the wheel, a click on it.
-            if self.screen == Screen::EmoteWheel && self.emote_wheel_event(&event) {
+            // A registered overlay screen event (the emote key let go, or a click on it).
+            if self.screen == Screen::Overlay && self.overlay_screen_event(&event) {
                 return Ok(());
             }
             if let WindowEvent::KeyboardInput { event, .. } = &event

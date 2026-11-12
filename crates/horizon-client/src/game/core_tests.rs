@@ -113,7 +113,7 @@ fn screen_ids_are_distinct_and_stable() {
     let all = [
         Screen::Playing,
         Screen::GameModeSwitcher,
-        Screen::EmoteWheel,
+        Screen::Overlay,
         Screen::Paused,
         Screen::Options,
         Screen::Chat,

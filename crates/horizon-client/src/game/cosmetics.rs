@@ -442,6 +442,7 @@ pub(super) fn register() -> Result<(), horizon_hooks::TooLate> {
     if enabled() {
         horizon_hooks::register(&HOOKS)?;
         horizon_hooks::pages::register(&settings::SECTION)?;
+        horizon_hooks::screens::register(&emote_wheel::EMOTE_WHEEL_OVERLAY)?;
     }
     Ok(())
 }

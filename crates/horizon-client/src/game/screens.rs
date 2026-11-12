@@ -60,9 +60,9 @@ impl Screen {
             // SocialInteractionsScreen.isPauseScreen.
             | Self::Social
             // No screen over the world, and Horizon's own screens that
-            // draw over it (the emote wheel, a native mod's screen and
+            // draw over it (an overlay screen, a native mod's screen and
             // Studio) leave it running as they always have.
-            | Self::Playing | Self::EmoteWheel | Self::Mod | Self::Studio
+            | Self::Playing | Self::Overlay | Self::Mod | Self::Studio
             // WinScreen.isPauseScreen is `!poem`: Game::win_screen_pauses.
             | Self::Win => false,
             // Every other screen, and the game-master block editors
@@ -100,7 +100,7 @@ impl Screen {
             | Self::DebugOptions => true,
             Self::Playing
             | Self::GameModeSwitcher
-            | Self::EmoteWheel
+            | Self::Overlay
             | Self::Chat
             | Self::Creative
             | Self::Inventory
@@ -1045,7 +1045,7 @@ mod tests {
             Screen::GameModeSwitcher,
             Screen::Social,
             Screen::Playing,
-            Screen::EmoteWheel,
+            Screen::Overlay,
             Screen::Mod,
             Screen::Studio,
             Screen::Win,
