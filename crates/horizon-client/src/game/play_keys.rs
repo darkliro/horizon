@@ -315,7 +315,6 @@ impl Game<'_> {
     /// Whether an overlay screen can open now: a registered overlay screen exists for key.emote.
     pub(super) fn can_open_overlay_screen(&self) -> bool {
         horizon_hooks::screens::engine::find_by_trigger("key.emote").is_some()
-            && super::cosmetics::enabled()
     }
 
     /// Opens the registered overlay screen over gameplay.
