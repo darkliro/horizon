@@ -711,7 +711,7 @@ mod tests {
             ("key.custom.test", "key.keyboard.k", "multiplayer"),
             ("key.emote", "key.keyboard.x", "multiplayer"),
         ];
-        static REGISTERED: &[&'static [(&'static str, &'static str, &'static str)]] = &[CUSTOM];
+        static REGISTERED: &[&[(&str, &str, &str)]] = &[CUSTOM];
         let active: Vec<_> = active_non_vanilla(REGISTERED).collect();
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].0, "key.custom.test");
