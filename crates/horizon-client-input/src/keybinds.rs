@@ -75,7 +75,7 @@ pub const MAPPINGS: &[(&str, &str, &str)] = &[
     ("key.debug.improvedTransparency", "key.keyboard.x", "debug"),
 ];
 /// Registered key mappings (docs/layers.md, "Platform registries"): crate-registered mappings,
-/// kept in `horizon-extras.txt` or a crate's own file, never in `options.txt`.
+/// kept in `horizon-extras.txt`, never in `options.txt`.
 pub fn crate_mappings() -> &'static [&'static [(&'static str, &'static str, &'static str)]] {
     horizon_hooks::actions::engine::all()
 }
@@ -85,18 +85,19 @@ pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     // The emote wheel (docs/cosmetics.md), on a key vanilla leaves free.
     ("key.emote", "key.keyboard.b", "multiplayer"),
 ];
-/// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then registered crate mappings (or fallback).
-pub fn all_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+/// Active non-vanilla mappings: registered crate mappings, falling back to HORIZON_MAPPINGS if empty.
+fn non_vanilla_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     let registered = crate_mappings();
     let horizon: &[(&'static str, &'static str, &'static str)] = if registered.is_empty() {
         HORIZON_MAPPINGS
     } else {
         &[]
     };
-    MAPPINGS
-        .iter()
-        .chain(horizon)
-        .chain(registered.iter().flat_map(|m| m.iter()))
+    horizon.iter().chain(registered.iter().flat_map(|m| m.iter()))
+}
+/// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then registered crate mappings (or fallback).
+pub fn all_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+    MAPPINGS.iter().chain(non_vanilla_mappings())
 }
 /// Mappings Options builds as `ToggleKeyMapping` (hold or toggle by option).
 pub fn is_toggle(name: &str) -> bool {
@@ -389,9 +390,7 @@ impl KeyBinds {
     }
     /// Horizon's own bindings, for `horizon-extras.txt`.
     pub fn horizon_saved(&self) -> Vec<(&'static str, String)> {
-        crate_mappings()
-            .iter()
-            .flat_map(|m| m.iter())
+        non_vanilla_mappings()
             .map(|(n, _, _)| (*n, self.get(n).to_owned()))
             .collect()
     }
@@ -685,5 +684,15 @@ mod tests {
     fn display_names() {
         assert_eq!(display_name("key.keyboard.w").plain(), "W");
         assert_eq!(display_name("key.keyboard.slash").plain(), "/");
+    }
+    #[test]
+    fn horizon_saved_falls_back_when_no_crates_registered() {
+        let mut keys = KeyBinds::default();
+        let saved = keys.horizon_saved();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0], ("key.emote", "key.keyboard.b".to_string()));
+        keys.set("key.emote", "key.keyboard.v");
+        let saved_rebound = keys.horizon_saved();
+        assert_eq!(saved_rebound[0], ("key.emote", "key.keyboard.v".to_string()));
     }
 }
