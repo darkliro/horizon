@@ -74,16 +74,29 @@ pub const MAPPINGS: &[(&str, &str, &str)] = &[
     ("key.debug.lightmapTexture", "key.keyboard.4", "debug"),
     ("key.debug.improvedTransparency", "key.keyboard.x", "debug"),
 ];
-/// Horizon's own key mappings: bound in Controls like the vanilla ones, but kept in
-/// `horizon-extras.txt` (`emoteKey`), never in `options.txt`, which stays exactly vanilla's
-/// (`MAPPINGS` is what the options parity harness compares with the pinned client).
+/// Registered key mappings (docs/layers.md, "Platform registries"): crate-registered mappings,
+/// kept in `horizon-extras.txt` or a crate's own file, never in `options.txt`.
+pub fn crate_mappings() -> &'static [&'static [(&'static str, &'static str, &'static str)]] {
+    horizon_hooks::actions::engine::all()
+}
+/// Horizon's own key mappings: kept with registered defaults so standalone tests and
+/// defaults without external crates registered retain their fallback bindings.
 pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     // The emote wheel (docs/cosmetics.md), on a key vanilla leaves free.
     ("key.emote", "key.keyboard.b", "multiplayer"),
 ];
-/// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then Horizon's.
+/// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then registered crate mappings (or fallback).
 pub fn all_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
-    MAPPINGS.iter().chain(HORIZON_MAPPINGS)
+    let registered = crate_mappings();
+    let horizon: &[(&'static str, &'static str, &'static str)] = if registered.is_empty() {
+        HORIZON_MAPPINGS
+    } else {
+        &[]
+    };
+    MAPPINGS
+        .iter()
+        .chain(horizon)
+        .chain(registered.iter().flat_map(|m| m.iter()))
 }
 /// Mappings Options builds as `ToggleKeyMapping` (hold or toggle by option).
 pub fn is_toggle(name: &str) -> bool {
@@ -376,8 +389,9 @@ impl KeyBinds {
     }
     /// Horizon's own bindings, for `horizon-extras.txt`.
     pub fn horizon_saved(&self) -> Vec<(&'static str, String)> {
-        HORIZON_MAPPINGS
+        crate_mappings()
             .iter()
+            .flat_map(|m| m.iter())
             .map(|(n, _, _)| (*n, self.get(n).to_owned()))
             .collect()
     }
