@@ -86,14 +86,17 @@ pub const HORIZON_MAPPINGS: &[(&str, &str, &str)] = &[
     ("key.emote", "key.keyboard.b", "multiplayer"),
 ];
 /// Active non-vanilla mappings: registered crate mappings, falling back to HORIZON_MAPPINGS if empty.
-fn non_vanilla_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+fn non_vanilla_mappings()
+-> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     let registered = crate_mappings();
     let horizon: &[(&'static str, &'static str, &'static str)] = if registered.is_empty() {
         HORIZON_MAPPINGS
     } else {
         &[]
     };
-    horizon.iter().chain(registered.iter().flat_map(|m| m.iter()))
+    horizon
+        .iter()
+        .chain(registered.iter().flat_map(|m| m.iter()))
 }
 /// Every mapping the game binds: vanilla's in `Options.keyMappings` order, then registered crate mappings (or fallback).
 pub fn all_mappings() -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
@@ -693,6 +696,9 @@ mod tests {
         assert_eq!(saved[0], ("key.emote", "key.keyboard.b".to_string()));
         keys.set("key.emote", "key.keyboard.v");
         let saved_rebound = keys.horizon_saved();
-        assert_eq!(saved_rebound[0], ("key.emote", "key.keyboard.v".to_string()));
+        assert_eq!(
+            saved_rebound[0],
+            ("key.emote", "key.keyboard.v".to_string())
+        );
     }
 }
