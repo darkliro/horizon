@@ -1,0 +1,69 @@
+name: Fork CI (GitHub-Hosted)
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+# Annule les builds précédents si vous repoussez sur la même branche
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    name: Fast Checks & PR Ready
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Dépendances système requises par Horizon (wgpu, alsa, wayland, etc.)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libfontconfig1-dev libvulkan-dev xvfb mesa-vulkan-drivers
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Cache intelligent de cargo (target/, registry, git) propre à votre fork
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "horizon-fork-cache"
+
+      - name: Ensure upstream remote for pr_ready.py diffs
+        run: |
+          git remote add upstream https://github.com/horizon-rust/horizon.git || true
+          git fetch upstream main --depth=100
+
+      - name: Cargo Check
+        run: cargo check --workspace --tests
+
+      - name: Fast Clippy
+        run: cargo clippy --workspace --tests -- -D warnings
+
+      - name: Run Horizon Parity Checks
+        env:
+          HORIZON_NO_AUDIO: "1"
+          HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
+          RUST_TEST_THREADS: "1"
+        run: |
+          python3 tools/pr_ready.py --base upstream/main
+
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "### ✅ Build & Checks terminés sur runner GitHub" >> $GITHUB_STEP_SUMMARY
+          echo "Statut : **${{ job.status }}**" >> $GITHUB_STEP_SUMMARY
