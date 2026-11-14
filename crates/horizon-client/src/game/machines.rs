@@ -809,6 +809,10 @@ impl Game<'_> {
             .chain(self.chest_other_half(pos))
             .collect();
         for pos in halves {
+            // Wake any sleeping block entity directly below (such as a hopper).
+            self.world
+                .block_entities
+                .wake(&(pos.0, pos.1 - 1, pos.2));
             self.world.modified.insert((pos.0 >> 4, pos.2 >> 4));
             self.with_level(|b, level, ticks| {
                 b.container_changed(level, ticks, BlockPos::new(pos.0, pos.1, pos.2))
@@ -1079,6 +1083,7 @@ impl Game<'_> {
             return;
         }
         if info.properties.get("enabled").is_some_and(|v| v == "false") {
+            self.world.block_entities.sleep(pos);
             return;
         }
         self.hopper_try_move_items_with_state(pos, state);
@@ -1100,6 +1105,7 @@ impl Game<'_> {
             return;
         };
         if info.properties.get("enabled").is_some_and(|v| v == "false") {
+            self.world.block_entities.sleep(pos);
             return;
         }
         if self.hoppers.get(&pos).is_some_and(|h| h.cooldown > 0) {

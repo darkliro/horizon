@@ -374,6 +374,9 @@ impl BlockEntities {
             self.asleep.insert(pos);
         }
     }
+    pub fn wake(&mut self, pos: &Pos) {
+        self.asleep.remove(pos);
+    }
     pub fn is_asleep(&self, pos: &Pos) -> bool {
         self.asleep.contains(pos)
     }
@@ -394,6 +397,7 @@ impl BlockEntities {
         let new_box = shows_box(&entity);
         self.note_sign_editor(pos, &entity);
         self.asleep.remove(&pos);
+        self.asleep.remove(&(pos.0, pos.1 - 1, pos.2));
         let old = self.map.insert(pos, entity);
         if old.is_none() {
             self.add(pos);
@@ -550,6 +554,7 @@ impl BlockEntities {
     /// `old` to `new`: a ticker made, kept or dropped.
     pub fn state_changed(&mut self, pos: Pos, old: u32, new: u32) {
         self.asleep.remove(&pos);
+        self.asleep.remove(&(pos.0, pos.1 - 1, pos.2));
         if self.states.is_empty() || !self.map.contains_key(&pos) {
             return;
         }
@@ -729,6 +734,23 @@ mod tests {
 
         // Redstone power toggle (enabled true -> false or false -> true) wakes it
         b.state_changed(p, 1, 1);
+        assert!(!b.is_asleep(&p));
+
+        // Sleeps again
+        b.sleep(p);
+        assert!(b.is_asleep(&p));
+
+        // A container placed above it (pos.1 + 1) wakes the hopper below
+        let above = (p.0, p.1 + 1, p.2);
+        b.insert(above, BlockEntity::Chest(vec![None; 27]));
+        assert!(!b.is_asleep(&p));
+
+        // Sleeps again
+        b.sleep(p);
+        assert!(b.is_asleep(&p));
+
+        // A block change above it (e.g. state_changed on above block) wakes the hopper below
+        b.state_changed(above, 1, 1);
         assert!(!b.is_asleep(&p));
     }
     #[test]
