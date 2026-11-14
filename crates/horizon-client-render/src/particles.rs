@@ -31,8 +31,10 @@ mod native;
 pub mod polytone;
 mod polytone_gpu;
 mod polytone_model;
+mod simple;
 mod spawn;
 pub use native::{ParticleController, ParticleUpdate};
+use simple::{PARALLEL_MIN, parallel_threads, sprite_from_age_in, tick_simple};
 
 /// `ParticleOptions` with the parameters of the option classes used here.
 #[derive(Clone, Debug)]
@@ -524,6 +526,8 @@ pub struct Particle {
     no_render: bool,
     /// Ticked once when created (`CritParticle` constructor).
     pre_tick: bool,
+    /// A Polytone particle with physics, which joins only where its box is clear of blocks.
+    spawn_check: bool,
     /// `Particle.random`: the particle's own generator (`RandomSource.create()`).
     random: LegacyRandom,
     controller: Option<Box<dyn native::Controller>>,
@@ -893,6 +897,7 @@ impl Particle {
             behaviour: Behaviour::Base,
             no_render: false,
             pre_tick: false,
+            spawn_check: false,
             frame_ticks: 0,
             random: LegacyRandom::new(0),
             controller: None,
@@ -1325,6 +1330,9 @@ pub struct ParticleEngine {
     /// A native mod's sprite sets, by namespaced particle name.
     mod_sets: HashMap<String, (u32, Option<ModBehaviour>)>,
     set_sprites: Vec<Vec<u32>>,
+    /// How many live particles it takes to tick them on several threads (`tick_all`), and how many threads.
+    parallel_min: usize,
+    parallel_threads: usize,
     /// Resource packs' Polytone custom particle types (#11486).
     polytone: Option<std::sync::Arc<polytone::Registry>>,
     /// Vanilla particle types a pack replaces with a custom one of the same id
@@ -1394,100 +1402,8 @@ impl ParticleLightCache {
     }
 }
 
-const PARTICLE_SECTION_CACHE_SIZE: usize = 128;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SectionFrustumResult {
-    Outside,
-    Intersects,
-    Inside,
-}
-
-#[derive(Clone, Copy)]
-struct CachedSectionFrustum {
-    section: [i32; 3],
-    radius_quarters: i32,
-    result: SectionFrustumResult,
-}
-
-struct ParticleSectionFrustumCache {
-    entries: [Option<CachedSectionFrustum>; PARTICLE_SECTION_CACHE_SIZE],
-}
-
-impl Default for ParticleSectionFrustumCache {
-    fn default() -> Self {
-        Self {
-            entries: [None; PARTICLE_SECTION_CACHE_SIZE],
-        }
-    }
-}
-
-impl ParticleSectionFrustumCache {
-    fn result(
-        &mut self,
-        world: [f64; 3],
-        camera: DVec3,
-        radius: f64,
-        frustum: &crate::gfx::Frustum,
-    ) -> SectionFrustumResult {
-        let Some(section) = world_section(world) else {
-            return SectionFrustumResult::Intersects;
-        };
-        if !radius.is_finite() || radius < 0.0 || radius * 4.0 > f64::from(i32::MAX) {
-            return SectionFrustumResult::Intersects;
-        }
-        let radius_quarters = (radius * 4.0).ceil() as i32;
-        let hash = (section[0] as u32).wrapping_mul(73_856_093)
-            ^ (section[1] as u32).wrapping_mul(19_349_663)
-            ^ (section[2] as u32).wrapping_mul(83_492_791)
-            ^ (radius_quarters as u32).wrapping_mul(2_654_435_761);
-        let slot = hash as usize & (PARTICLE_SECTION_CACHE_SIZE - 1);
-        if let Some(entry) = self.entries[slot]
-            && entry.section == section
-            && entry.radius_quarters == radius_quarters
-        {
-            return entry.result;
-        }
-
-        let pad = f64::from(radius_quarters) * 0.25;
-        let camera = camera.to_array();
-        let min = array::from_fn(|axis| f64::from(section[axis]) * 16.0 - pad - camera[axis]);
-        let max = array::from_fn(|axis| min[axis] + 16.0 + 2.0 * pad);
-        let result = if min.into_iter().chain(max).any(|v| !v.is_finite()) {
-            SectionFrustumResult::Intersects
-        } else {
-            let min = FVec3::from_array(min.map(|v| v as f32));
-            let max = FVec3::from_array(max.map(|v| v as f32));
-            if !min.is_finite() || !max.is_finite() {
-                SectionFrustumResult::Intersects
-            } else if frustum.contains(min, max) {
-                SectionFrustumResult::Inside
-            } else if frustum.intersects(min, max) {
-                SectionFrustumResult::Intersects
-            } else {
-                SectionFrustumResult::Outside
-            }
-        };
-        self.entries[slot] = Some(CachedSectionFrustum {
-            section,
-            radius_quarters,
-            result,
-        });
-        result
-    }
-}
-
-fn world_section(position: [f64; 3]) -> Option<[i32; 3]> {
-    let mut block = [0; 3];
-    for axis in 0..3 {
-        let value = position[axis].floor();
-        if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
-            return None;
-        }
-        block[axis] = value as i32;
-    }
-    Some([block[0] >> 4, block[1] >> 4, block[2] >> 4])
-}
+mod view_cull;
+use view_cull::{PARTICLE_FRUSTUM_OFFSET, ParticleSectionFrustumCache, SectionFrustumResult};
 
 fn below_half_pixel(radius: f64, distance_squared: f64, pixel_focal_length: f32) -> bool {
     let projected_limit = 4.0 * radius * f64::from(pixel_focal_length);
@@ -1527,6 +1443,8 @@ impl ParticleEngine {
             sets: HashMap::new(),
             mod_sets: HashMap::new(),
             set_sprites: Vec::new(),
+            parallel_min: PARALLEL_MIN,
+            parallel_threads: parallel_threads(),
             polytone: None,
             polytone_overrides: HashMap::new(),
             polytone_gpu: Vec::new(),
@@ -1751,28 +1669,6 @@ impl ParticleEngine {
         particle.behaviour = Behaviour::Controlled { translucent };
         particle.controller = Some(Box::new(controller));
         Some(particle)
-    }
-    /// Sets (or clears) the resource packs' Polytone custom particle types.
-    pub fn set_polytone(&mut self, registry: Option<std::sync::Arc<polytone::Registry>>) {
-        let registry = registry.filter(|r| !r.is_empty());
-        let same = match (&self.polytone, &registry) {
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.polytone_gpu.clear();
-            self.polytone_overrides = registry
-                .iter()
-                .flat_map(|r| {
-                    ParticleType::ALL.iter().filter_map(|&ty| {
-                        let id = format!("minecraft:{}", ty.name());
-                        r.get(&id).is_some().then_some((ty, id))
-                    })
-                })
-                .collect();
-        }
-        self.polytone = registry;
     }
     /// The quads the last render blends additively (`RenderPipelines` additive, src alpha and
     /// one), for the frame's additive pass.
@@ -2121,23 +2017,7 @@ impl ParticleEngine {
     }
     /// `SingleQuadParticle.setSpriteFromAge`.
     fn sprite_from_age(&self, p: &mut Particle) {
-        if p.removed {
-            return;
-        }
-        if let Some(set) = p.set {
-            // A sprite set's index can outlive the reload that rebuilt them.
-            let Some(sprites) = self.set_sprites.get(set as usize) else {
-                return;
-            };
-            let lifetime = p.lifetime.max(1);
-            let index = if p.frame_ticks > 0 {
-                (p.age.max(0) as i64 / i64::from(p.frame_ticks)) % sprites.len() as i64
-            } else {
-                (p.age.max(0) as i64 * (sprites.len() as i64 - 1) / i64::from(lifetime))
-                    .clamp(0, sprites.len() as i64 - 1)
-            };
-            p.sprite = Sprite::Index(sprites[index as usize]);
-        }
+        sprite_from_age_in(&self.set_sprites, p);
     }
     #[allow(clippy::too_many_lines)]
     /// `ParticleProvider.createParticle`: provider draws use the engine's
@@ -3630,13 +3510,14 @@ impl ParticleEngine {
         self.sprite_from_age(&mut q);
         q
     }
-    /// ClientLevel.createFireworks: a Starter (or poofs without explosions).
+    /// ClientLevel.createFireworks: a Starter (or poofs without explosions) with `playSound`.
     pub fn fireworks(
         &mut self,
         at: [f64; 3],
         v: [f64; 3],
         explosions: Vec<FireworkExplosion>,
         camera: [f64; 3],
+        play_sound: bool,
     ) {
         if explosions.is_empty() {
             for _ in 0..self.random.next_int_bound(3).unwrap_or(0) + 2 {
@@ -3660,17 +3541,17 @@ impl ParticleEngine {
             life: 0,
             lifetime,
             twinkle_delay: twinkle,
-            far,
+            sound: play_sound.then_some(far),
         });
     }
     fn tick_starters(&mut self) {
         for mut s in std::mem::take(&mut self.starters) {
-            if s.life == 0 {
+            if s.life == 0 && s.sound.is_some() {
                 let large = s.explosions.len() >= 3
                     || s.explosions
                         .iter()
                         .any(|e| e.shape == FireworkShape::LargeBall);
-                let sound = match (large, s.far) {
+                let sound = match (large, s.sound == Some(true)) {
                     (true, true) => "minecraft:entity.firework_rocket.large_blast_far",
                     (true, false) => "minecraft:entity.firework_rocket.large_blast",
                     (false, true) => "minecraft:entity.firework_rocket.blast_far",
@@ -3713,16 +3594,13 @@ impl ParticleEngine {
                     (c & 255) as f32 / 255.0,
                     ((c >> 24) & 255) as f32 / 255.0,
                 ];
-                self.create(
-                    &ParticleOptions::colored(ParticleType::Flash, rgba),
-                    s.at,
-                    [0.0; 3],
-                );
+                let flash = ParticleOptions::colored(ParticleType::Flash, rgba);
+                self.create(&flash, s.at, [0.0; 3]);
             }
             s.life += 1;
             if s.life > s.lifetime {
-                if s.twinkle_delay {
-                    let sound = if s.far {
+                if s.twinkle_delay && s.sound.is_some() {
+                    let sound = if s.sound == Some(true) {
                         "minecraft:entity.firework_rocket.twinkle_far"
                     } else {
                         "minecraft:entity.firework_rocket.twinkle"
@@ -3847,9 +3725,7 @@ impl ParticleEngine {
         self.emitters = emitters;
         let mut particles = std::mem::take(&mut self.particles);
         self.spawned_in_tick = Some(Vec::new());
-        for p in &mut particles {
-            self.tick_particle(p, level);
-        }
+        self.tick_all(&mut particles, level);
         particles.retain(|p| !p.removed);
         self.particles = particles;
         for (options, pos, velocity) in self.spawned_in_tick.take().unwrap_or_default() {
@@ -3857,6 +3733,9 @@ impl ParticleEngine {
         }
         let pending = std::mem::take(&mut self.pending);
         for mut p in pending {
+            if !self.polytone_joins(&p, level) {
+                continue;
+            }
             if p.pre_tick {
                 p.pre_tick = false;
                 self.tick_particle(&mut p, level);
@@ -3954,7 +3833,15 @@ impl ParticleEngine {
     #[allow(clippy::too_many_lines)]
     fn tick_particle(&mut self, p: &mut Particle, level: &ParticleLevel) {
         match p.behaviour {
-            Behaviour::Base => p.base_tick(level),
+            Behaviour::Base
+            | Behaviour::Mod { .. }
+            | Behaviour::Animated
+            | Behaviour::Snowflake
+            | Behaviour::Crit
+            | Behaviour::Spark { .. } => {
+                let simple = tick_simple(&self.set_sprites, p, level);
+                self.finish_simple(p, simple);
+            }
             Behaviour::Controlled { .. } => {
                 if let Some(mut controller) = p.controller.take() {
                     let update = controller.tick(p, level);
@@ -3973,23 +3860,6 @@ impl ParticleEngine {
                     p.remove();
                 }
             }
-            Behaviour::Mod { size, alpha } => {
-                p.base_tick(level);
-                p.size = mod_curve(size, p.age, p.lifetime);
-                p.rgba[3] = mod_curve(alpha, p.age, p.lifetime);
-                self.sprite_from_age(p);
-            }
-            Behaviour::Animated => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-            }
-            Behaviour::Snowflake => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                p.velocity[0] *= f64::from(0.95f32);
-                p.velocity[1] *= f64::from(0.9f32);
-                p.velocity[2] *= f64::from(0.95f32);
-            }
             Behaviour::Lava => {
                 p.base_tick(level);
                 if !p.removed && p.random.next_float() > p.age as f32 / p.lifetime as f32 {
@@ -3999,11 +3869,6 @@ impl ParticleEngine {
                         p.velocity,
                     );
                 }
-            }
-            Behaviour::Crit => {
-                p.base_tick(level);
-                p.rgba[1] *= 0.96;
-                p.rgba[2] *= 0.9;
             }
             Behaviour::Drip {
                 fluid,
@@ -4475,27 +4340,6 @@ impl ParticleEngine {
                     }
                 }
             }
-            Behaviour::Spark {
-                fade,
-                trail,
-                twinkle,
-            } => {
-                p.base_tick(level);
-                self.sprite_from_age(p);
-                if p.age > p.lifetime / 2 {
-                    p.rgba[3] = 1.0 - (p.age as f32 - (p.lifetime / 2) as f32) / p.lifetime as f32;
-                    if let Some(f) = fade {
-                        for i in 0..3 {
-                            p.rgba[i] += (f[i] - p.rgba[i]) * 0.2;
-                        }
-                    }
-                }
-                if trail && p.age < p.lifetime / 2 && (p.age + p.lifetime) % 2 == 0 {
-                    let mut child = self.spark(p.position, [0.0; 3], p.rgba, fade, false, twinkle);
-                    child.age = child.lifetime / 2;
-                    self.pending.push(child);
-                }
-            }
             Behaviour::Spell { original_alpha } => {
                 p.base_tick(level);
                 self.sprite_from_age(p);
@@ -4757,27 +4601,17 @@ impl ParticleEngine {
             .collect()
     }
 
-    /// Camera-facing quads (`QuadParticleRenderState.renderRotatedQuad`).
+    /// Camera-facing quads (`QuadParticleRenderState.renderRotatedQuad`), turned by
+    /// `Camera.rotation()`: `rotationYXZ(PI - yRot, -xRot, 0)`.
     pub fn render(
         &self,
         camera: DVec3,
-        yaw: f32,
-        pitch: f32,
+        base: Quat,
         partial: f32,
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
     ) {
-        self.render_inner::<false>(
-            camera,
-            yaw,
-            pitch,
-            partial,
-            0.0,
-            None,
-            &mut |_, _| false,
-            light_at,
-            out,
-        );
+        self.render_in_view(camera, base, partial, None, light_at, out);
     }
 
     /// Render particles after rejecting view-frustum misses and any particles
@@ -4785,8 +4619,7 @@ impl ParticleEngine {
     pub fn render_culled(
         &self,
         camera: DVec3,
-        yaw: f32,
-        pitch: f32,
+        base: Quat,
         partial: f32,
         pixel_focal_length: f32,
         culling_enabled: bool,
@@ -4796,13 +4629,12 @@ impl ParticleEngine {
         out: &mut Vec<Vertex>,
     ) {
         if !culling_enabled {
-            self.render(camera, yaw, pitch, partial, light_at, out);
+            self.render_in_view(camera, base, partial, frustum, light_at, out);
             return;
         }
         self.render_inner::<true>(
             camera,
-            yaw,
-            pitch,
+            base,
             partial,
             pixel_focal_length,
             frustum,
@@ -4815,8 +4647,7 @@ impl ParticleEngine {
     fn render_inner<const CULL: bool>(
         &self,
         camera: DVec3,
-        yaw: f32,
-        pitch: f32,
+        base: Quat,
         partial: f32,
         pixel_focal_length: f32,
         frustum: Option<&crate::gfx::Frustum>,
@@ -4824,16 +4655,19 @@ impl ParticleEngine {
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
     ) {
-        // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
-        let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
-            * Quat::from_rotation_x(-pitch.to_radians());
         let mut light_cache = ParticleLightCache::default();
         let mut additive = self.additive.lock().unwrap_or_else(|e| e.into_inner());
         additive.clear();
         let mut section_cache =
             (CULL && frustum.is_some()).then(ParticleSectionFrustumCache::default);
+        let view = frustum.map(|f| f.pulled_back(PARTICLE_FRUSTUM_OFFSET));
         for p in &self.particles {
             if p.no_render {
+                continue;
+            }
+            if let Some(view) = &view
+                && !view_cull::in_view(view, p, camera)
+            {
                 continue;
             }
             // SparkParticle.extract: twinkling sparks blink after a third of their life.
@@ -5100,7 +4934,9 @@ struct Starter {
     life: i32,
     lifetime: i32,
     twinkle_delay: bool,
-    far: bool,
+    /// `FireworkParticles.Starter.playSound`, with `isFarAwayFromCamera` when
+    /// it plays: `None` for a silent rocket.
+    sound: Option<bool>,
 }
 const STAR: [[f64; 2]; 6] = [
     [0.0, 1.0],
@@ -5235,12 +5071,11 @@ mod tests {
 
         let light_at = |_: [i32; 3]| 0xf0;
         let mut regular = Vec::new();
-        engine.render(DVec3::ZERO, 0.0, 0.0, 0.5, &light_at, &mut regular);
+        engine.render(DVec3::ZERO, Quat::IDENTITY, 0.5, &light_at, &mut regular);
         let mut disabled = Vec::new();
         engine.render_culled(
             DVec3::ZERO,
-            0.0,
-            0.0,
+            Quat::IDENTITY,
             0.5,
             900.0,
             false,
@@ -5267,6 +5102,145 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(attributes(&disabled), attributes(&regular));
+    }
+
+    /// An engine whose smoke particles stand at `positions`, camera-relative (the camera is at
+    /// the origin looking down -z, like `Mat4::IDENTITY` as a view).
+    fn smoke_at(positions: &[[f64; 3]]) -> ParticleEngine {
+        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new(), &HashSet::new());
+        let sprite = "test:smoke".to_owned();
+        engine.atlas.insert(
+            sprite.clone(),
+            (
+                Rect {
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    w: 16,
+                    h: 16,
+                },
+                false,
+            ),
+        );
+        let mut random = LegacyRandom::new(7);
+        for &at in positions {
+            let mut particle = Particle::moving(&mut random, ParticleType::Smoke, at, [0.0; 3]);
+            particle.sprite = Sprite::Named(sprite.clone());
+            engine.particles.push(particle);
+        }
+        engine
+    }
+
+    fn quad_vertices(engine: &ParticleEngine, view: Option<&crate::gfx::Frustum>) -> usize {
+        let mut out = Vec::new();
+        engine.render_in_view(DVec3::ZERO, Quat::IDENTITY, 0.5, view, &|_| 0xf0, &mut out);
+        out.len()
+    }
+
+    #[test]
+    fn particles_outside_the_pulled_back_frustum_make_no_quads() {
+        use crate::gfx::{Frustum, world_projection};
+        let view = Frustum::from_view_projection(world_projection(70.0, 16.0 / 9.0, 512.0));
+        let kept = [
+            [0.0, 0.0, -5.0],   // straight ahead
+            [0.0, 0.0, 2.5],    // behind the camera, inside the 3 blocks of offset
+            [0.0, 0.0, -300.0], // far, inside the far plane
+        ];
+        let dropped = [
+            [0.0, 0.0, 10.0],   // well behind the camera
+            [0.0, 0.0, 3.5],    // just past the offset
+            [100.0, 0.0, -5.0], // far to the side
+            [0.0, 60.0, -5.0],  // far above
+            [0.0, 0.0, -600.0], // beyond the far plane
+        ];
+        let all: Vec<_> = kept.iter().chain(&dropped).copied().collect();
+        let engine = smoke_at(&all);
+        let only_kept = quad_vertices(&smoke_at(&kept), None);
+        assert!(only_kept > 0);
+        assert_eq!(quad_vertices(&engine, Some(&view)), only_kept);
+        // Without a view every particle is drawn, as before.
+        assert_eq!(
+            quad_vertices(&engine, None),
+            only_kept * all.len() / kept.len()
+        );
+        // `render` is the same as no view.
+        let mut regular = Vec::new();
+        engine.render(DVec3::ZERO, Quat::IDENTITY, 0.5, &|_| 0xf0, &mut regular);
+        assert_eq!(regular.len(), quad_vertices(&engine, None));
+    }
+
+    #[test]
+    fn the_culled_path_applies_the_same_frustum_test() {
+        use crate::gfx::{Frustum, world_projection};
+        let view = Frustum::from_view_projection(world_projection(70.0, 16.0 / 9.0, 512.0));
+        let engine = smoke_at(&[[0.0, 0.0, -5.0], [0.0, 0.0, 10.0]]);
+        let mut out = Vec::new();
+        // The disabled setting still keeps vanilla's always-on test.
+        engine.render_culled(
+            DVec3::ZERO,
+            Quat::IDENTITY,
+            0.5,
+            900.0,
+            false,
+            Some(&view),
+            |_, _| panic!("disabled culling must not query particle visibility"),
+            &|_| 0xf0,
+            &mut out,
+        );
+        assert_eq!(
+            out.len(),
+            quad_vertices(&smoke_at(&[[0.0, 0.0, -5.0]]), None)
+        );
+    }
+
+    #[test]
+    fn a_particle_is_tested_at_its_position_this_tick_not_an_interpolated_one() {
+        use crate::gfx::{Frustum, world_projection};
+        let view = Frustum::from_view_projection(world_projection(70.0, 16.0 / 9.0, 512.0));
+        // The frame is drawn half way (0.5) between `previous` and `position`.
+        // Ahead now, far behind a tick ago (half way: 12.5 behind, outside): kept.
+        let mut coming = smoke_at(&[[0.0, 0.0, -5.0]]);
+        coming.particles[0].previous = [0.0, 0.0, 30.0];
+        assert!(quad_vertices(&coming, None) > 0);
+        assert_eq!(
+            quad_vertices(&coming, Some(&view)),
+            quad_vertices(&coming, None)
+        );
+        // Behind now, ahead a tick ago (half way: 5 ahead, inside): dropped.
+        let mut going = smoke_at(&[[0.0, 0.0, 10.0]]);
+        going.particles[0].previous = [0.0, 0.0, -20.0];
+        assert_eq!(quad_vertices(&going, Some(&view)), 0);
+    }
+
+    #[test]
+    fn quads_face_the_rotation_they_are_given() {
+        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new(), &HashSet::new());
+        let sprite = "test:smoke".to_owned();
+        let rect = Rect {
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            w: 16,
+            h: 16,
+        };
+        engine.atlas.insert(sprite.clone(), (rect, false));
+        let mut random = LegacyRandom::new(7);
+        let mut particle =
+            Particle::moving(&mut random, ParticleType::Smoke, [0.0, 0.0, -3.0], [0.0; 3]);
+        particle.sprite = Sprite::Named(sprite);
+        engine.particles.push(particle);
+        let draw = |rotation: Quat| {
+            let mut out = Vec::new();
+            engine.render(DVec3::ZERO, rotation, 0.5, &|_| 0xf0, &mut out);
+            out.iter().map(|v| v.pos).collect::<Vec<_>>()
+        };
+        // A bed's view turns the quads as the player's own yaw would not.
+        let ahead = draw(Quat::IDENTITY);
+        let turned = draw(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        assert_eq!(ahead.len(), 4);
+        assert_ne!(ahead, turned);
     }
 
     #[test]
@@ -5662,7 +5636,7 @@ mod tests {
         particle.sprite = Sprite::Index(0);
         engine.particles.push(particle);
         let mut vertices = Vec::new();
-        engine.render(DVec3::ZERO, 0.0, 0.0, 0.0, &|_| 0, &mut vertices);
+        engine.render(DVec3::ZERO, Quat::IDENTITY, 0.0, &|_| 0, &mut vertices);
         assert_eq!(vertices.len(), 4);
         assert!(vertices.iter().all(
             |v| v.color >> 24 == 127 && v.layer & crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY != 0

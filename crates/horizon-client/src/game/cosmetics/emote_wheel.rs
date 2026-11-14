@@ -50,7 +50,7 @@ impl Game<'_> {
             opened: Some(Instant::now()),
             hovered: None,
         };
-        self.screen = Screen::EmoteWheel;
+        self.screen = Screen::Overlay;
         self.keys.clear();
         self.left = false;
         self.right = false;
@@ -190,6 +190,22 @@ impl Game<'_> {
         );
     }
 }
+
+/// The registered emote wheel overlay screen.
+pub(in crate::game) struct EmoteWheelOverlay;
+impl horizon_hooks::screens::OverlayScreen for EmoteWheelOverlay {
+    fn id(&self) -> &'static str {
+        "horizon.emote_wheel"
+    }
+    fn title(&self) -> &'static str {
+        "horizon.emote_wheel.title"
+    }
+    fn trigger_action(&self) -> Option<&'static str> {
+        Some("key.emote")
+    }
+}
+
+pub(in crate::game) static EMOTE_WHEEL_OVERLAY: EmoteWheelOverlay = EmoteWheelOverlay;
 
 #[cfg(test)]
 mod tests {

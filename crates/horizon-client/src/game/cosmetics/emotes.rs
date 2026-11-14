@@ -277,6 +277,33 @@ impl Game<'_> {
         }
         self.tick_emote();
     }
+
+    /// `horizon-ctl emote [ID|stop]`.
+    pub(in crate::game) fn emote_control(
+        &mut self,
+        words: &[&str],
+    ) -> horizon_client::Result<Option<serde_json::Value>> {
+        use serde_json::json;
+        if words.first().copied() != Some("emote") {
+            return Ok(None);
+        }
+        match words.get(1).copied() {
+            None => {
+                let owned: Vec<String> = self.owned_emotes().iter().map(|i| i.id.clone()).collect();
+                Ok(Some(
+                    json!({ "owned": owned, "playing": self.emote_playing() }),
+                ))
+            }
+            Some("stop") => {
+                self.stop_emote();
+                Ok(Some(json!({ "ok": true })))
+            }
+            Some(id) if self.play_emote(id) => Ok(Some(json!({ "ok": true }))),
+            Some(id) => {
+                Err(format!("can't play emote {id} now (not owned, or not standing)").into())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
