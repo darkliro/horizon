@@ -1,0 +1,21 @@
+name: bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [bench/hopper-sleep-bench]
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
+      - name: Setup Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Hopper Sleep Benchmark
+        run: cargo run --release --example hopper_sleep_bench
