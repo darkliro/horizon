@@ -15,6 +15,28 @@ use horizon_client::{
 use horizon_core::position::BlockPos;
 use horizon_world::registry::BlockStateId;
 
+/// The block entity type a sample is attributed to while its ticker runs.
+fn ticker_name(entity: &BlockEntity) -> &'static str {
+    match entity {
+        BlockEntity::Chest(_) => "hopper",
+        BlockEntity::Crafter(_) => "crafter",
+        BlockEntity::Jukebox(_) => "jukebox",
+        BlockEntity::Beacon(_) => "beacon",
+        BlockEntity::CreakingHeart(_) => "creaking_heart",
+        BlockEntity::Spawner(_) => "mob_spawner",
+        BlockEntity::TrialSpawner(_) => "trial_spawner",
+        BlockEntity::Vault(_) => "vault",
+        BlockEntity::Beehive(_) => "beehive",
+        BlockEntity::Furnace(_) => "furnace",
+        BlockEntity::Brewing(_) => "brewing_stand",
+        BlockEntity::DaylightDetector => "daylight_detector",
+        BlockEntity::Campfire(_) => "campfire",
+        BlockEntity::Mod(_) => "mod_block_entity",
+        BlockEntity::PotentSulfur(_) => "potent_sulfur",
+        _ => "block_entity",
+    }
+}
+
 impl Game<'_> {
     pub(super) fn tick_block_entities(&mut self) -> Result<()> {
         self.tick_mount_menu();
@@ -65,7 +87,12 @@ impl Game<'_> {
             {
                 continue;
             }
-            match self.world.block_entities.get(&pos) {
+            horizon_threads::work::set_chunk(pos.0 >> 4, pos.2 >> 4);
+            let entity = self.world.block_entities.get(&pos);
+            horizon_threads::work::set_entity(horizon_threads::work::entity_id(
+                entity.map_or("", ticker_name),
+            ));
+            match entity {
                 Some(BlockEntity::Chest(items)) if items.len() == HOPPER_SLOTS => {
                     self.tick_hopper(pos)
                 }
@@ -100,9 +127,11 @@ impl Game<'_> {
                 _ => {}
             }
         }
+        horizon_threads::work::clear_work();
         // Items move between passes: the columns hold for this one only.
         self.item_columns = None;
         self.pass_mobs = None;
+        self.tick_sign_editors();
         self.update_song_volumes();
         self.scan_for_hearts();
         // The client ticks (particles, sounds, the turning mob) are for a
@@ -153,7 +182,18 @@ impl Game<'_> {
                 .shulkers
                 .get_mut(&pos)
                 .map(|shulker| shulker.tick(pos, facing));
-            if let Some(push) = tick.and_then(|tick| tick.push) {
+            let Some(tick) = tick else { continue };
+            // `ShulkerBoxBlockEntity.doNeighborUpdates` at the start and the
+            // end of an opening or closing lid: the box's collision shape
+            // moved, so the neighbours' shapes and their redstone updates run.
+            for _ in 0..tick.neighbor_updates {
+                let state = self.world.block(pos[0], pos[1], pos[2]);
+                let at = BlockPos::new(pos[0], pos[1], pos[2]);
+                self.with_level(|b, level, ticks| {
+                    b.shulker_neighbor_updates(level, ticks, at, state)
+                });
+            }
+            if let Some(push) = tick.push {
                 pushes.push((pos, facing, push));
             }
         }
