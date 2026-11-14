@@ -707,6 +707,30 @@ mod tests {
         b.clear();
         assert!(!b.is_asleep(&p));
     }
+
+    #[test]
+    fn an_empty_hopper_sleeps_and_wakes_on_interaction_or_state_change() {
+        let p = (5, 64, 5);
+        let mut b = level();
+        b.insert(p, hopper());
+        assert!(!b.is_asleep(&p));
+
+        // Hopper enters sleep when idle
+        b.sleep(p);
+        assert!(b.is_asleep(&p));
+
+        // A slot change (e.g. item inserted via UI or hopper transfer) wakes it
+        b.get_mut(&p);
+        assert!(!b.is_asleep(&p));
+
+        // Sleeps again
+        b.sleep(p);
+        assert!(b.is_asleep(&p));
+
+        // Redstone power toggle (enabled true -> false or false -> true) wakes it
+        b.state_changed(p, 1, 1);
+        assert!(!b.is_asleep(&p));
+    }
     #[test]
     fn mod_block_entities_are_listed_by_chunk_until_they_go() {
         let mut b = level();

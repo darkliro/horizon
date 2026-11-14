@@ -1142,6 +1142,7 @@ impl Game<'_> {
                     s.name != "minecraft:composter" && s.name != "minecraft:decorated_pot"
                 })
         {
+            self.world.block_entities.sleep(pos);
             return;
         }
 
