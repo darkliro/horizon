@@ -1,0 +1,41 @@
+name: frustum bench
+
+on:
+  push:
+    branches: ['bench/frustum**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "frustum-bench"
+
+      - name: Run Frustum Benchmark
+        run: |
+          cargo run --profile fast -p horizon-client-render --example frustum_cull_bench | tee bench_results.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### 🏎️ Résultats du Benchmark Frustum Culling" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat bench_results.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
