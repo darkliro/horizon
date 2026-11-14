@@ -10,10 +10,13 @@ pub struct Frustum {
 impl Frustum {
     /// Whether the camera-relative box `min..max` is at least partly inside.
     pub fn intersects(&self, min: Vec3, max: Vec3) -> bool {
+        let c = (max + min) * 0.5;
+        let e = (max - min) * 0.5;
         !self.planes.iter().any(|p| {
-            let sign = p.truncate().cmpge(Vec3::ZERO);
-            let v = Vec3::select(sign, max, min);
-            p.truncate().dot(v) + p.w < 0.0
+            let n = p.truncate();
+            let r = n.abs().dot(e);
+            let d = n.dot(c) + p.w;
+            d < -r
         })
     }
     /// Whether a camera-relative sphere is at least partly inside. Frustum
@@ -34,10 +37,13 @@ impl Frustum {
         if !min.is_finite() || !max.is_finite() || !min.cmple(max).all() {
             return true;
         }
+        let c = (max + min) * 0.5;
+        let e = (max - min) * 0.5;
         !self.planes[4..].iter().any(|p| {
-            let sign = p.truncate().cmpge(Vec3::ZERO);
-            let v = Vec3::select(sign, max, min);
-            p.truncate().dot(v) + p.w < 0.0
+            let n = p.truncate();
+            let r = n.abs().dot(e);
+            let d = n.dot(c) + p.w;
+            d < -r
         })
     }
     /// Whether the camera-relative box `min..max` is entirely inside. Then
@@ -45,10 +51,13 @@ impl Frustum {
     /// grows from this box's nearest corner to the inner box's farthest, and
     /// rounding keeps that order.
     pub fn contains(&self, min: Vec3, max: Vec3) -> bool {
+        let c = (max + min) * 0.5;
+        let e = (max - min) * 0.5;
         self.planes.iter().all(|p| {
-            let sign = p.truncate().cmpge(Vec3::ZERO);
-            let v = Vec3::select(sign, min, max);
-            p.truncate().dot(v) + p.w >= 0.0
+            let n = p.truncate();
+            let r = n.abs().dot(e);
+            let d = n.dot(c) + p.w;
+            d >= r
         })
     }
     /// Whether the camera-relative `point` is on or inside every plane (vanilla's
@@ -248,5 +257,30 @@ mod tests {
         ] {
             assert_eq!(flat.contains_point(p), moved.contains_point(p));
         }
+    }
+
+    #[test]
+    fn aabb_center_extent_intersects_and_contains() {
+        let view = looking_down_minus_z();
+        // A box centered in front of camera
+        let min = Vec3::new(-1.0, -1.0, -20.0);
+        let max = Vec3::new(1.0, 1.0, -10.0);
+        assert!(view.intersects(min, max));
+        assert!(view.contains(min, max));
+
+        // A box behind camera (Z > 0)
+        let min_behind = Vec3::new(-1.0, -1.0, 5.0);
+        let max_behind = Vec3::new(1.0, 1.0, 10.0);
+        assert!(!view.intersects(min_behind, max_behind));
+        assert!(!view.contains(min_behind, max_behind));
+
+        // A box straddling the boundary
+        let (tan_x, _) = tangents();
+        let depth = 20.0;
+        let right_edge = depth * tan_x;
+        let min_straddle = Vec3::new(right_edge - 1.0, -1.0, -depth - 1.0);
+        let max_straddle = Vec3::new(right_edge + 1.0, 1.0, -depth + 1.0);
+        assert!(view.intersects(min_straddle, max_straddle));
+        assert!(!view.contains(min_straddle, max_straddle));
     }
 }
