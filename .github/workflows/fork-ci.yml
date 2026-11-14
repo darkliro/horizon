@@ -26,9 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
-            libfontconfig1-dev libvulkan-dev xvfb mesa-vulkan-drivers
+            pkg-config libasound2-dev libudev-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,11 +54,29 @@ jobs:
           HORIZON_NO_AUDIO: "1"
           HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
           RUST_TEST_THREADS: "1"
+          WGPU_BACKEND: "none"
         run: |
-          python3 tools/pr_ready.py --base upstream/main
+          python3 tools/pr_ready.py --base upstream/main --verbose 2>&1 | tee pr_ready_output.log || {
+            echo "::error::pr_ready.py a échoué"
+            exit 1
+          }
+
+      - name: Upload PR Ready Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-ready-log
+          path: pr_ready_output.log
+          if-no-files-found: ignore
 
       - name: CI Summary
         if: always()
         run: |
-          echo "### ✅ Build & Checks terminés sur runner GitHub-Hosted" >> $GITHUB_STEP_SUMMARY
+          echo "### Build & Checks sur runner GitHub-Hosted" >> $GITHUB_STEP_SUMMARY
           echo "Statut : **${{ job.status }}**" >> $GITHUB_STEP_SUMMARY
+          if [ -f pr_ready_output.log ]; then
+            echo "#### Dernières lignes de pr_ready.py :" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 80 pr_ready_output.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
