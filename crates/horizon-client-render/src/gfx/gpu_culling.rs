@@ -337,27 +337,83 @@ const TEST_READ: wgpu::BufferUsages = if cfg!(test) {
 };
 
 /// What a frame's pass works from.
+#[derive(Clone, Copy)]
 pub(super) struct FrameInputs<'a> {
-    pub camera: DVec3,
+    pub(super) camera: DVec3,
     /// The level's lowest block y and its height in sections.
-    pub min_y: i32,
-    pub sections: i32,
+    pub(super) min_y: i32,
+    pub(super) sections: i32,
     /// The render distance in columns, as the walk takes it.
-    pub radius: i32,
+    pub(super) radius: i32,
     /// The frustum the walk culls with (a GPU frame has no water mirror).
-    pub frustum: &'a Frustum,
+    pub(super) frustum: &'a Frustum,
     /// The cave-culling graph, while cave culling runs and has one
     /// (`Occlusion::reach`); `None`: every section counts as reached.
-    pub reach: Option<Reach<'a>>,
+    pub(super) reach: Option<Reach<'a>>,
     /// The eye (gfx.rs `projection_center`), while solid quads facing away
     /// from it are left out (`sides_on`); `None`: every solid quad is drawn. A
     /// GPU frame has no water mirror, whose eye below would see more of them.
-    pub eye: Option<Vec3>,
+    pub(super) eye: Option<Vec3>,
     /// The world pass's view projection (gfx.rs `globals.view_proj`), and
     /// whether occlusion culling is on: frames that can run its test then
     /// do, by its gate (`GpuCulling::occluding`).
-    pub view_proj: Mat4,
-    pub occlude: bool,
+    pub(super) view_proj: Mat4,
+    pub(super) occlude: bool,
+}
+
+impl<'a> FrameInputs<'a> {
+    /// Construct a basic set of GPU culling frame inputs with defaults for optional passes.
+    #[inline]
+    pub(super) fn new(
+        camera: DVec3,
+        min_y: i32,
+        sections: i32,
+        radius: i32,
+        frustum: &'a Frustum,
+    ) -> Self {
+        Self {
+            camera,
+            min_y,
+            sections,
+            radius,
+            frustum,
+            reach: None,
+            eye: None,
+            view_proj: Mat4::IDENTITY,
+            occlude: false,
+        }
+    }
+
+    #[inline]
+    pub(super) fn with_reach(mut self, reach: Option<Reach<'a>>) -> Self {
+        self.reach = reach;
+        self
+    }
+
+    #[inline]
+    pub(super) fn with_eye(mut self, eye: Option<Vec3>) -> Self {
+        self.eye = eye;
+        self
+    }
+
+    #[inline]
+    pub(super) fn with_view_proj(mut self, view_proj: Mat4) -> Self {
+        self.view_proj = view_proj;
+        self
+    }
+
+    #[inline]
+    pub(super) fn with_occlude(mut self, occlude: bool) -> Self {
+        self.occlude = occlude;
+        self
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn with_camera(mut self, camera: DVec3) -> Self {
+        self.camera = camera;
+        self
+    }
 }
 
 /// What `GpuCulling::prepare` made of a frame.
@@ -1708,17 +1764,7 @@ mod tests {
     /// A frame of the overworld's 24 sections, cave culling off, every solid
     /// quad drawn.
     fn inputs(camera: DVec3, radius: i32, frustum: &Frustum) -> FrameInputs<'_> {
-        FrameInputs {
-            camera,
-            min_y: crate::chunk::MIN_Y,
-            sections: 24,
-            radius,
-            frustum,
-            reach: None,
-            eye: None,
-            view_proj: Mat4::IDENTITY,
-            occlude: false,
-        }
+        FrameInputs::new(camera, crate::chunk::MIN_Y, 24, radius, frustum)
     }
 
     /// The frustum `draw_frame` culls with for the view and projection `m`, and
@@ -2431,10 +2477,7 @@ mod tests {
                 (Vec3::new(0.5, f32::NAN, -0.25), false),
                 (Vec3::NEG_INFINITY, true),
             ] {
-                let input = FrameInputs {
-                    eye: Some(eye),
-                    ..inputs(DVec3::new(x, 64.5, z), radius, &frustum)
-                };
+                let input = inputs(DVec3::new(x, 64.5, z), radius, &frustum).with_eye(Some(eye));
                 assert_eq!(tables(&input, &mut words).is_some(), fits, "eye {eye}");
             }
         }
@@ -2523,10 +2566,7 @@ mod tests {
                     inside += usize::from(frustum.contains(min, top + Vec3::splat(16.0)));
                 }
             }
-            let input = FrameInputs {
-                eye: Some(eye),
-                ..inputs(camera, radius, &frustum)
-            };
+            let input = inputs(camera, radius, &frustum).with_eye(Some(eye));
             let mut params =
                 tables(&input, &mut words).unwrap_or_else(|| panic!("case {case}: the planes fit"));
             params.pages = 1;
@@ -2997,24 +3037,13 @@ mod tests {
                 t.begin(device, queue);
             }
             let mut encoder = device.create_command_encoder(&Default::default());
-            let input = FrameInputs {
-                camera,
-                min_y,
-                sections: height,
-                radius,
-                frustum: &frustum,
-                reach,
-                eye,
-                view_proj: Mat4::IDENTITY,
-                occlude: false,
-            };
+            let input = FrameInputs::new(camera, min_y, height, radius, &frustum)
+                .with_reach(reach)
+                .with_eye(eye);
             if case == 7 {
                 // Planes past the integers: the CPU draws that frame, nothing is
                 // written, and the records that changed wait for the next.
-                let up = FrameInputs {
-                    camera: camera + DVec3::Y * 2.0e7,
-                    ..input
-                };
+                let up = input.with_camera(camera + DVec3::Y * 2.0e7);
                 let prepared = gpu.prepare(device, queue, &mut uploads, &mut encoder, &up, None);
                 assert_eq!(prepared, Prepared::Cpu, "case 7");
                 assert!(gpu.records.all_dirty || !gpu.records.dirty.is_empty());
@@ -3213,17 +3242,9 @@ mod tests {
                         t.begin(device, queue);
                     }
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    let input = FrameInputs {
-                        camera: DVec3::new(0.5, 70.0, 0.5),
-                        min_y: -64,
-                        sections: 24,
-                        radius: 5,
-                        frustum: &frustum,
-                        reach: None,
-                        eye: None,
-                        view_proj: Mat4::IDENTITY,
-                        occlude: true,
-                    };
+                    let input =
+                        FrameInputs::new(DVec3::new(0.5, 70.0, 0.5), -64, 24, 5, &frustum)
+                            .with_occlude(true);
                     let prepared = gpu.prepare(
                         device,
                         queue,
@@ -3510,17 +3531,7 @@ struct Quad {
                 }
             }
             let mut encoder = device.create_command_encoder(&Default::default());
-            let input = FrameInputs {
-                camera,
-                min_y,
-                sections: levels,
-                radius,
-                frustum,
-                reach: None,
-                eye,
-                view_proj: Mat4::IDENTITY,
-                occlude: false,
-            };
+            let input = FrameInputs::new(camera, min_y, levels, radius, frustum).with_eye(eye);
             let prepared = gpu.prepare(device, queue, &mut uploads, &mut encoder, &input, None);
             assert_eq!(prepared, Prepared::Gpu, "frame {frame}");
             let mut params = tables(&input, &mut words).expect("the planes fit");

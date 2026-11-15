@@ -8163,17 +8163,17 @@ impl Renderer {
         #[cfg(debug_assertions)]
         let graph_given = self.occlusion.generation();
         if gpu_frame && let Some(gpu) = &mut self.gpu_culling {
-            let input = gpu_culling::FrameInputs {
+            let input = gpu_culling::FrameInputs::new(
                 camera,
-                min_y: self.sections.min_y(),
-                sections: self.layout.sections() as i32,
+                self.sections.min_y(),
+                self.layout.sections() as i32,
                 radius,
-                frustum: &view,
-                reach: self.occlusion.reach().filter(|_| culling),
-                eye,
-                view_proj: jittered,
-                occlude: self.cull_on,
-            };
+                &view,
+            )
+            .with_reach(self.occlusion.reach().filter(|_| culling))
+            .with_eye(eye)
+            .with_view_proj(jittered)
+            .with_occlude(self.cull_on);
             let prepared = crate::spans::time("gpu culling", || {
                 gpu.prepare(
                     &self.device,
