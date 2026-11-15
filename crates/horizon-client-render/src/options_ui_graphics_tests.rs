@@ -54,10 +54,7 @@ fn look_is_the_packs_only_over_a_world() {
         ),
     ] {
         s.running_pack = name.map(str::to_owned);
-        let request = crate::gfx::FrameRequest {
-            shaders_pack,
-            ..Default::default()
-        };
+        let request = crate::gfx::FrameRequest::default().with_shaders_pack(shaders_pack);
         let running = snapshot(&s.horizon, request, caps, reading).with_pack(true);
         assert_eq!(running.frame.hud_layer, !shaders_pack);
         ui.open(true);

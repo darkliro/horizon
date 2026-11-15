@@ -81,16 +81,73 @@ impl DisplayReading {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameRequest {
     /// One of Horizon's own packs is picked: its frame is float.
-    pub linear_pack: bool,
+    pub(crate) linear_pack: bool,
     /// That pack's `[frame] blend` is `"linear"`: its frame holds linear light where it is
     /// float (`linear_blend`).
-    pub linear_blend: bool,
+    pub(crate) linear_blend: bool,
     /// The pack declares `[ray_tracing]`: the device asks for ray queries (`ray_query`).
-    pub ray_tracing: bool,
+    pub(crate) ray_tracing: bool,
     /// A `shaders/` pack is picked: it draws its SDR picture on the 8-bit frame, which HDR
     /// output shows at paper white. With no pack available or one of Horizon's own, the frame
     /// is the layered float one wherever HDR output goes.
-    pub shaders_pack: bool,
+    pub(crate) shaders_pack: bool,
+}
+
+impl FrameRequest {
+    /// Construct a default `FrameRequest` with all flags set to false.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            linear_pack: false,
+            linear_blend: false,
+            ray_tracing: false,
+            shaders_pack: false,
+        }
+    }
+
+    #[inline]
+    pub const fn with_linear_pack(mut self, linear_pack: bool) -> Self {
+        self.linear_pack = linear_pack;
+        self
+    }
+
+    #[inline]
+    pub const fn with_linear_blend(mut self, linear_blend: bool) -> Self {
+        self.linear_blend = linear_blend;
+        self
+    }
+
+    #[inline]
+    pub const fn with_ray_tracing(mut self, ray_tracing: bool) -> Self {
+        self.ray_tracing = ray_tracing;
+        self
+    }
+
+    #[inline]
+    pub const fn with_shaders_pack(mut self, shaders_pack: bool) -> Self {
+        self.shaders_pack = shaders_pack;
+        self
+    }
+
+    #[inline]
+    pub const fn linear_pack(&self) -> bool {
+        self.linear_pack
+    }
+
+    #[inline]
+    pub const fn linear_blend(&self) -> bool {
+        self.linear_blend
+    }
+
+    #[inline]
+    pub const fn ray_tracing(&self) -> bool {
+        self.ray_tracing
+    }
+
+    #[inline]
+    pub const fn shaders_pack(&self) -> bool {
+        self.shaders_pack
+    }
 }
 
 /// What a renderer's frame is drawn in, and what the hand, overlays and HUD draw on.
@@ -372,14 +429,8 @@ pub(crate) mod tests {
     fn the_resolver_picks_one_output_and_frame_for_each_combination() {
         // A refused, missing or disabled pick asks as no pack does (`picked_pack_shape`).
         let no_pack = FrameRequest::default();
-        let own_pack = FrameRequest {
-            linear_pack: true,
-            ..no_pack
-        };
-        let shaders_pack = FrameRequest {
-            shaders_pack: true,
-            ..no_pack
-        };
+        let own_pack = no_pack.with_linear_pack(true);
+        let shaders_pack = no_pack.with_shaders_pack(true);
         for mode in HdrMode::ALL {
             for hdr in [None, Some(Output::Pq), Some(Output::ScRgb)] {
                 for system in [None, Some(false), Some(true)] {
@@ -718,10 +769,7 @@ pub(crate) mod tests {
             ..Graphics::default()
         };
         let no_pack = FrameRequest::default();
-        let shaders_pack = FrameRequest {
-            shaders_pack: true,
-            ..no_pack
-        };
+        let shaders_pack = no_pack.with_shaders_pack(true);
         let (caps, reading) = window(Some(Output::Pq), Some(true));
         let layered = snapshot(&on, no_pack, caps, reading);
         assert!(layered.frame.hud_layer && layered.display().hdr);

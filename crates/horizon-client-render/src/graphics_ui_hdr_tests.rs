@@ -96,10 +96,7 @@ fn ui_brightness_is_greyed_under_a_shaders_pack() {
     s.horizon.hdr = HdrMode::On;
     let (caps, reading) = tests::window(Some(HdrOutput::Pq), Some(true));
     let shown = |shaders_pack| {
-        let request = FrameRequest {
-            shaders_pack,
-            ..Default::default()
-        };
+        let request = FrameRequest::default().with_shaders_pack(shaders_pack);
         tests::snapshot(&s.horizon, request, caps, reading).with_pack(shaders_pack)
     };
     let (layered, flat) = (shown(false), shown(true));
