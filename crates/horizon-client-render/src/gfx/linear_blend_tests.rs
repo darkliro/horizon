@@ -388,12 +388,9 @@ fn only_a_float_frame_holds_linear_light() {
         for (linear_pack, linear_blend) in [(false, false), (true, false), (true, true)] {
             let (mut caps, reading) = window(None, None);
             caps.float_frame = float_frame;
-            let request = FrameRequest {
-                linear_pack,
-                linear_blend,
-                ray_tracing: false,
-                shaders_pack: false,
-            };
+            let request = FrameRequest::new()
+                .with_linear_pack(linear_pack)
+                .with_linear_blend(linear_blend);
             let frame = resolve_frame(
                 &settings,
                 request,

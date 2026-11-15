@@ -159,10 +159,7 @@ pub(super) fn loading_renderer(
         (false, false),
         // An 8-bit frame, which HDR output takes as well: HDR off until the settings apply.
         &horizon_client::graphics::Graphics::default(),
-        horizon_client::gfx::FrameRequest {
-            ray_tracing: rays,
-            ..Default::default()
-        },
+        horizon_client::gfx::FrameRequest::default().with_ray_tracing(rays),
         previous.map(|r| r.display_reading()).unwrap_or_default(),
     ))?;
     if let Some(atlas) = atlas {

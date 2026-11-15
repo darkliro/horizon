@@ -66,14 +66,8 @@ fn hdr_stays_off_for_each_missing_requirement_of_its_frame() {
         (true, coverage(2, blend, usages, Fl::empty())),
     ];
     let no_pack = FrameRequest::default();
-    let shaders_pack = FrameRequest {
-        shaders_pack: true,
-        ..no_pack
-    };
-    let pack_0_2 = FrameRequest {
-        linear_pack: true,
-        ..no_pack
-    };
+    let shaders_pack = no_pack.with_shaders_pack(true);
+    let pack_0_2 = no_pack.with_linear_pack(true);
     for (float_frame, hud_layer) in devices {
         for mode in [HdrMode::On, HdrMode::Auto] {
             let settings = Graphics {

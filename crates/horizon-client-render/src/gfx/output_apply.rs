@@ -489,12 +489,7 @@ mod tests {
         }
     }
 
-    const NO_PACK: FrameRequest = FrameRequest {
-        linear_pack: false,
-        linear_blend: false,
-        ray_tracing: false,
-        shaders_pack: false,
-    };
+    const NO_PACK: FrameRequest = FrameRequest::new();
     fn on() -> Graphics {
         Graphics {
             hdr: HdrMode::On,

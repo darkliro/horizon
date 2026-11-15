@@ -111,12 +111,11 @@ pub(crate) struct PickedPack {
 impl PickedPack {
     /// What it asks of the renderer's frame.
     pub(crate) fn frame(self) -> horizon_client::gfx::FrameRequest {
-        horizon_client::gfx::FrameRequest {
-            linear_pack: self.linear.is_some(),
-            linear_blend: self.linear == Some(horizon_shader_api::Blend::Linear),
-            ray_tracing: self.ray_tracing,
-            shaders_pack: self.shaders_pack,
-        }
+        horizon_client::gfx::FrameRequest::new()
+            .with_linear_pack(self.linear.is_some())
+            .with_linear_blend(self.linear == Some(horizon_shader_api::Blend::Linear))
+            .with_ray_tracing(self.ray_tracing)
+            .with_shaders_pack(self.shaders_pack)
     }
 }
 
