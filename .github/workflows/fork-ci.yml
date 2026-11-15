@@ -1,0 +1,89 @@
+name: Fork CI (GitHub-Hosted)
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      run_parity:
+        description: 'Exécuter manuellement les checks de parité (pr_ready.py)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    name: Fast Checks & PR Ready
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "horizon-fork-cache"
+
+      - name: Ensure upstream remote for pr_ready.py diffs
+        run: |
+          git remote add upstream https://github.com/horizon-rust/horizon.git || true
+          git fetch upstream main --depth=100
+
+      - name: Cargo Check
+        run: cargo check --workspace --tests
+
+      - name: Fast Clippy
+        run: cargo clippy --workspace --tests -- -D warnings
+
+      - name: Run Horizon Parity Checks
+        if: ${{ inputs.run_parity == true }}
+        env:
+          HORIZON_NO_AUDIO: "1"
+          HORIZON_LAUNCHER_NO_SELF_UPDATE: "1"
+          RUST_TEST_THREADS: "1"
+          WGPU_BACKEND: "none"
+        run: |
+          python3 tools/pr_ready.py --base upstream/main --verbose 2>&1 | tee pr_ready_output.log || {
+            echo "::error::pr_ready.py a échoué"
+            exit 1
+          }
+
+      - name: Upload PR Ready Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-ready-log
+          path: pr_ready_output.log
+          if-no-files-found: ignore
+
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "### Build & Checks sur runner GitHub-Hosted" >> $GITHUB_STEP_SUMMARY
+          echo "Statut : **${{ job.status }}**" >> $GITHUB_STEP_SUMMARY
+          if [ -f pr_ready_output.log ]; then
+            echo "#### Dernières lignes de pr_ready.py :" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 80 pr_ready_output.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
