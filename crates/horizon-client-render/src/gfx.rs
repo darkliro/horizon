@@ -7284,9 +7284,7 @@ impl Renderer {
         depth_far: f32,
     ) -> Frustum {
         let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
-        Frustum {
-            planes: frustum(views.cull().view_proj(bob)),
-        }
+        Frustum::from_planes(frustum(views.cull().view_proj(bob)))
     }
     /// A conservative view for geometry built before TAA chooses this frame's
     /// jitter. Cover a whole rendered pixel on each side, at the configured
@@ -8048,13 +8046,11 @@ impl Renderer {
         };
         // Frustum culling and camera-relative origins.
         let cull_proj = views.cull().view_proj(pose);
-        let view = Frustum {
-            planes: if warp_on {
-                [Vec4::W; 6]
-            } else {
-                frustum(cull_proj)
-            },
-        };
+        let view = Frustum::from_planes(if warp_on {
+            [Vec4::W; 6]
+        } else {
+            frustum(cull_proj)
+        });
         let camera = frame.camera;
         let camera_section = camera_section(camera, self.layout.min_y());
         // The water mirror draws the same lists: they take in what its camera sees too
@@ -8062,11 +8058,11 @@ impl Renderer {
         let mirror_plane = frame
             .water_plane
             .filter(|_| !frame.title && !warp_on && self.wants_water_plane());
-        let mirror = mirror_plane.map(|plane| Frustum {
-            planes: frustum(mirror_view_projection(
+        let mirror = mirror_plane.map(|plane| {
+            Frustum::from_planes(frustum(mirror_view_projection(
                 cull_proj,
                 plane - frame.camera.y as f32,
-            )),
+            )))
         });
         // Solid quads facing away from the eye are left out: the bob moves
         // the eye off `camera`, so it is found from the projection. With the mirror, those
@@ -8256,9 +8252,7 @@ impl Renderer {
                 // Within the unculled distance every section, then those in the light's box.
                 if let Some(d) = v.unculled {
                     let all = ShadowCull {
-                        light: Frustum {
-                            planes: [glam::Vec4::W; 6],
-                        },
+                        light: Frustum::from_planes([glam::Vec4::W; 6]),
                         casters: None,
                         reach: v.distance,
                     };
@@ -11972,9 +11966,7 @@ fn taa_frustum(view_proj: Mat4, rendered_size: [u32; 2]) -> Frustum {
     // Widen x/y before extracting the planes: this includes every such shifted
     // view, including a posed camera, without changing the near/far planes.
     let [x, y] = rendered_size.map(|size| 1.0 / (1.0 + 2.0 / size.max(1) as f32));
-    Frustum {
-        planes: frustum(Mat4::from_scale(Vec3::new(x, y, 1.0)) * view_proj),
-    }
+    Frustum::from_planes(frustum(Mat4::from_scale(Vec3::new(x, y, 1.0)) * view_proj))
 }
 
 fn frustum(m: Mat4) -> [Vec4; 6] {
@@ -12007,9 +11999,7 @@ mod tests {
                     * crate::camera::view_matrix(yaw, pitch);
                 let matrix = world_projection(70.0, 16.0 / 9.0, 512.0) * pose;
                 let guarded = taa_frustum(matrix, size);
-                let ordinary = Frustum {
-                    planes: frustum(matrix),
-                };
+                let ordinary = Frustum::from_planes(frustum(matrix));
                 for x in [-1.0, 1.0] {
                     for y in [-1.0, 1.0] {
                         let jitter = Mat4::from_translation(Vec3::new(
@@ -12053,9 +12043,7 @@ mod tests {
             let pose = Mat4::from_translation(Vec3::new(0.03, -0.02, 0.01))
                 * crate::camera::view_matrix(yaw, pitch);
             let matrix = world_projection(70.0, 16.0 / 9.0, 512.0) * pose;
-            let view = Frustum {
-                planes: frustum(matrix),
-            };
+            let view = Frustum::from_planes(frustum(matrix));
             for size in [[1, 1], [320, 180], [1280, 720], [3840, 2160]] {
                 for (x, y) in [(-1.0, 1.0), (1.0, -1.0)] {
                     let jitter = Mat4::from_translation(Vec3::new(
@@ -14183,9 +14171,7 @@ mod shadow_caster_tests {
         let camera = world_projection(70.0, 16.0 / 9.0, 192.0)
             * Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
         let cull = ShadowCull {
-            light: Frustum {
-                planes: [Vec4::W; 6],
-            },
+            light: Frustum::from_planes([Vec4::W; 6]),
             casters: Some(shadow_casters(camera, light)),
             reach: None,
         };
@@ -14230,9 +14216,7 @@ mod shadow_caster_tests {
             let camera =
                 world_projection(77.0, 16.0 / 9.0, 1024.0) * crate::camera::view_matrix(yaw, 0.0);
             let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
+                light: Frustum::from_planes([Vec4::W; 6]),
                 casters: Some(shadow_casters(camera, Vec3::Y)),
                 reach: None,
             };
@@ -14265,9 +14249,7 @@ mod shadow_caster_tests {
                 sections.insert_with_bounds((x, y, z), (), None);
             }
             let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
+                light: Frustum::from_planes([Vec4::W; 6]),
                 casters: None,
                 reach: Some(reach),
             };
@@ -14294,9 +14276,7 @@ mod shadow_caster_tests {
         let camera = DVec3::new(8.0, 6.0, 8.0);
         let up = world_projection(70.0, 16.0 / 9.0, 192.0)
             * Mat4::look_to_rh(Vec3::ZERO, Vec3::Y, Vec3::Z);
-        let view = Frustum {
-            planes: frustum(up),
-        };
+        let view = Frustum::from_planes(frustum(up));
         // The section east of the camera's, y 0..16, with ground only in its lowest 2 blocks.
         let mut sections = resident::Resident::<()>::default();
         let key = (1, -crate::chunk::MIN_Y / 16, 0);
@@ -14306,9 +14286,7 @@ mod shadow_caster_tests {
             cull(&mut out);
             out.iter().map(|v| v.key).collect::<Vec<_>>()
         };
-        let all = Frustum {
-            planes: [Vec4::W; 6],
-        };
+        let all = Frustum::from_planes([Vec4::W; 6]);
         let shadow = ShadowCull {
             light: all,
             casters: Some(shadow_casters(up, Vec3::Y)),
@@ -14381,9 +14359,7 @@ mod shadow_caster_tests {
             let camera = world_projection(fov * 1.1, 16.0 / 9.0, 1024.0)
                 * crate::camera::view_matrix(yaw, pitch);
             let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
+                light: Frustum::from_planes([Vec4::W; 6]),
                 casters: Some(shadow_casters(camera, Vec3::Y)),
                 reach: None,
             };

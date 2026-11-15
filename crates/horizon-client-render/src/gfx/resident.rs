@@ -547,9 +547,7 @@ mod tests {
             for radius in [2, 6, 10] {
                 let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
                 let view = crate::camera::view_matrix(yaw, pitch);
-                let frustum = Frustum {
-                    planes: super::super::frustum(projection * view),
-                };
+                let frustum = Frustum::from_planes(super::super::frustum(projection * view));
                 let mut fast = Vec::new();
                 // Columns past the distance kept for distant terrain.
                 let beyond = |x: i32, z: i32| (x + z).rem_euclid(3) == 0;
@@ -607,9 +605,9 @@ mod tests {
         }
         let camera = DVec3::new(0.5, -8.0, 0.5);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * crate::camera::view_matrix(0.0, 5.0)),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(
+            projection * crate::camera::view_matrix(0.0, 5.0),
+        ));
         let inside = r
             .columns
             .iter()
@@ -819,9 +817,9 @@ mod tests {
             (DVec3::new(100.0, -60.0, -3.0), 270.0, -80.0),
             (DVec3::new(8.0, 64.0, 8.0), 45.0, 89.0),
         ] {
-            let view = Frustum {
-                planes: super::super::frustum(projection * crate::camera::view_matrix(yaw, pitch)),
-            };
+            let view = Frustum::from_planes(super::super::frustum(
+                projection * crate::camera::view_matrix(yaw, pitch),
+            ));
             inside += r
                 .columns
                 .iter()
@@ -876,9 +874,9 @@ mod tests {
         }
         let camera = DVec3::new(8.5, 100.0, 8.5);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 1024.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * crate::camera::view_matrix(30.0, 35.0)),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(
+            projection * crate::camera::view_matrix(30.0, 35.0),
+        ));
         let (mut old, mut new) = (Duration::MAX, Duration::MAX);
         let (mut list, mut keys) = (Vec::new(), Vec::new());
         let mut sum = 0i64;
@@ -920,9 +918,7 @@ mod tests {
         let camera = DVec3::new(8.0, f64::from(crate::chunk::MIN_Y + 15), -2.0);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
         let view = crate::camera::view_matrix(0.0, -60.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * view),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(projection * view));
 
         // Tight bounds culls the section whose geometry is entirely outside the frustum
         let mut out = Vec::new();
@@ -984,9 +980,7 @@ mod tests {
 
         for (desc, yaw, pitch) in test_views {
             let view = crate::camera::view_matrix(yaw, pitch);
-            let frustum = Frustum {
-                planes: super::super::frustum(projection * view),
-            };
+            let frustum = Frustum::from_planes(super::super::frustum(projection * view));
 
             let mut out_fallback = Vec::new();
             let mut out_tight = Vec::new();

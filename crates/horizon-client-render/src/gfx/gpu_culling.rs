@@ -438,7 +438,7 @@ fn tables(input: &FrameInputs<'_>, words: &mut Vec<u32>) -> Option<Params> {
             .map(|&o| f64::from(f32::from_bits(o)).abs());
         sizes.fold(0.0, f64::max) + 24.0
     });
-    let planes = input.frustum.planes.map(|p| {
+    let planes = input.frustum.planes().map(|p| {
         if p.is_finite() {
             p.as_dvec4()
         } else {
@@ -1726,7 +1726,7 @@ mod tests {
     fn through(m: Mat4) -> (Frustum, Vec3) {
         let eye = super::super::projection_center(m).expect("a perspective");
         let planes = super::super::frustum(m);
-        (Frustum { planes }, eye)
+        (Frustum::from_planes(planes), eye)
     }
 
     /// A view as `draw_frame` builds one, looking `yaw` and `pitch` out to
@@ -2535,7 +2535,7 @@ mod tests {
             // Every term rounds up: at least the plane's component times its
             // origin or box end, which f64 holds exactly.
             let n = nx + ny + nz;
-            let planes = frustum.planes.iter().enumerate();
+            let planes = frustum.planes().iter().enumerate();
             for (j, p) in planes.filter(|(_, p)| p.is_finite()) {
                 for i in 0..n {
                     let axis = usize::from(i >= nx) + usize::from(i >= nx + ny);
@@ -2666,9 +2666,14 @@ mod tests {
                 }));
                 let plane = normal.extend(-normal.dot(corner)).as_vec4();
                 let plane = plane / plane.truncate().length();
-                let frustum = Frustum {
-                    planes: [plane, Vec4::W, Vec4::W, Vec4::W, Vec4::W, Vec4::W],
-                };
+                let frustum = Frustum::from_planes([
+                    plane,
+                    Vec4::W,
+                    Vec4::W,
+                    Vec4::W,
+                    Vec4::W,
+                    Vec4::W,
+                ]);
                 let walk_keeps = |t: f64| {
                     let camera = base + normal * t;
                     let o = origin(camera, low).as_vec3();
@@ -3487,9 +3492,7 @@ struct Quad {
         // the distance, and draws all their quads. The second, from another
         // camera in the same column, keeps those in its view: fewer, and draws
         // those of their quads that can face its eye.
-        let all = Frustum {
-            planes: [Vec4::W; 6],
-        };
+        let all = Frustum::from_planes([Vec4::W; 6]);
         let lens = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
         let (ahead, eye) = through(lens * crate::camera::view_matrix(0.0, 0.0));
         let frames = [

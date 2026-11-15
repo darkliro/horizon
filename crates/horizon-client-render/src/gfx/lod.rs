@@ -593,12 +593,10 @@ mod tests {
         let bounds = Bounds::mesh(&mesh).unwrap();
         assert_eq!(bounds.min, Vec3::new(0.0, -64.0, 0.0));
         assert_eq!(bounds.max, Vec3::new(1024.0, 120.0, 1024.0));
-        let view = Frustum {
-            planes: super::super::frustum(
-                super::super::world_projection(70.0, 16.0 / 9.0, 8192.0)
-                    * crate::camera::view_matrix(0.0, 0.0),
-            ),
-        };
+        let view = Frustum::from_planes(super::super::frustum(
+            super::super::world_projection(70.0, 16.0 / 9.0, 8192.0)
+                * crate::camera::view_matrix(0.0, 0.0),
+        ));
         // The tile origin is far behind, but its far edge reaches the camera.
         // Negative world origins therefore remain visible.
         assert!(

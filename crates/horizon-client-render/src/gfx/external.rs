@@ -131,7 +131,7 @@ pub(super) fn shadow_box(view: &ShadowView) -> Frustum {
         planes[4] = Vec4::W;
         planes[5] = Vec4::W;
     }
-    Frustum { planes }
+    Frustum::from_planes(planes)
 }
 
 /// The runs of a section's solid quads the shadow pass draws: every face within the unculled
@@ -207,8 +207,8 @@ pub(super) fn shadow_casters(view_proj: Mat4, light: Vec3) -> [Frustum; 2] {
             }
         }
     }
-    let [a, b] = [0, 6].map(|i| Frustum {
-        planes: planes[i..i + 6].try_into().expect("six planes"),
+    let [a, b] = [0, 6].map(|i| {
+        Frustum::from_planes(planes[i..i + 6].try_into().expect("six planes"))
     });
     [a, b]
 }
