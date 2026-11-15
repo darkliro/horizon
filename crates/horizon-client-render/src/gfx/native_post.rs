@@ -597,17 +597,13 @@ impl NativeFrame {
     /// What the shadow camera sees this frame, for the renderer's shadow lists.
     pub fn shadow_view(&self, frame: &Frame) -> Option<super::pack_post::ShadowView> {
         let camera = self.shadow_camera.as_ref()?;
-        Some(super::pack_post::ShadowView {
-            cull: super::pack_uniforms::shadow_culling(frame, camera),
-            light: super::pack_uniforms::shadow_light(frame, camera),
-            // The light's box culls: on the ground it reaches further than `distance` along
-            // the sun's azimuth while the sun is low.
-            distance: None,
-            unculled: None,
-            every_face: false,
-            view_casters: false,
-            depth_planes: true,
-        })
+        Some(
+            super::pack_post::ShadowView::new(
+                super::pack_uniforms::shadow_culling(frame, camera),
+                super::pack_uniforms::shadow_light(frame, camera),
+            )
+            .with_depth_planes(true),
+        )
     }
 
     fn group(

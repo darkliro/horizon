@@ -14748,15 +14748,9 @@ mod shadow_face_tests {
     }
 
     fn view(every_face: bool) -> external::ShadowView {
-        external::ShadowView {
-            cull: Mat4::IDENTITY,
-            light: Vec3::Y,
-            distance: None,
-            unculled: None,
-            every_face,
-            view_casters: true,
-            depth_planes: false,
-        }
+        external::ShadowView::new(Mat4::IDENTITY, Vec3::Y)
+            .with_every_face(every_face)
+            .with_view_casters(true)
     }
 
     /// Iris 1.11.7's shadow map holds faces turned away from the light (#9033): the block's
@@ -14949,15 +14943,12 @@ mod shadow_caster_tests {
                 ..horizon_shaders::Shadow::default()
             };
             let camera = DVec3::new(13.5, y + 1.62, -13.5);
-            let view = external::ShadowView {
-                cull: pack_uniforms::shadow_culling_at(Vec3::Y, camera, &shadow),
-                light: Vec3::Y,
-                distance: None,
-                unculled: None,
-                every_face: true,
-                view_casters: false,
-                depth_planes: depth,
-            };
+            let view = external::ShadowView::new(
+                pack_uniforms::shadow_culling_at(Vec3::Y, camera, &shadow),
+                Vec3::Y,
+            )
+            .with_every_face(true)
+            .with_depth_planes(depth);
             let cull = ShadowCull::new(shadow_box(&view));
             let min = Vec3::from(min);
             cull.intersects(min, min + 16.0)

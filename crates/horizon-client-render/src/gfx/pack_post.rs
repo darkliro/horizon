@@ -4682,19 +4682,21 @@ impl PackPost {
             return None;
         }
         let shadow = &self.uniforms.shadow;
-        Some(ShadowView {
-            cull: pack_uniforms::shadow_culling(frame, shadow),
-            light: pack_uniforms::shadow_light(frame, shadow),
-            distance: (shadow.render_mul > 0.0).then_some(shadow.distance * shadow.render_mul),
-            unculled: match self.shadow_culling {
-                horizon_shaders::ShadowCulling::On => None,
-                horizon_shaders::ShadowCulling::Off => Some(f32::INFINITY),
-                horizon_shaders::ShadowCulling::Reversed => Some(shadow.voxel_distance),
-            },
-            every_face: true,
-            view_casters: true,
-            depth_planes: false,
-        })
+        let unculled = match self.shadow_culling {
+            horizon_shaders::ShadowCulling::On => None,
+            horizon_shaders::ShadowCulling::Off => Some(f32::INFINITY),
+            horizon_shaders::ShadowCulling::Reversed => Some(shadow.voxel_distance),
+        };
+        Some(
+            ShadowView::new(
+                pack_uniforms::shadow_culling(frame, shadow),
+                pack_uniforms::shadow_light(frame, shadow),
+            )
+            .with_distance((shadow.render_mul > 0.0).then_some(shadow.distance * shadow.render_mul))
+            .with_unculled(unculled)
+            .with_every_face(true)
+            .with_view_casters(true),
+        )
     }
 
     /// Whether the buffers `pass` writes have different sizes at the current render size: then
