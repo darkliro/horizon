@@ -3,7 +3,7 @@ use super::{
     Base, ExperienceOrb, Tag, flag, float, int_value, motion, number, position, put, rotation,
 };
 
-/// `ExperienceOrb`: Health, Age, Value, Count.
+/// `ExperienceOrb`: Fire, Health, Age, Value, Count.
 pub fn orb_to_nbt(o: &ExperienceOrb, uuid: [i32; 4]) -> Tag {
     let base = Base {
         id: "minecraft:experience_orb",
@@ -16,6 +16,7 @@ pub fn orb_to_nbt(o: &ExperienceOrb, uuid: [i32; 4]) -> Tag {
     };
     let mut tag = base.tag(None);
     for (key, value) in [
+        ("Fire", Tag::Short(o.fire_ticks as i16)),
         ("Health", Tag::Short(o.health as i16)),
         ("Air", Tag::Short(o.air as i16)),
         ("Age", Tag::Short(o.age.min(i16::MAX as u32) as i16)),
@@ -56,6 +57,7 @@ pub fn orbs_from_nbt(tag: &Tag) -> Vec<ExperienceOrb> {
         // ExperienceOrb's followingPlayer is transient: never saved, so a
         // loaded orb starts without one.
         following: None,
+        fire_ticks: number(tag.get("Fire")).unwrap_or(0) as i16 as i32,
     };
     vec![orb]
 }

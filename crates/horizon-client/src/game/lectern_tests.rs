@@ -44,6 +44,7 @@ fn click(pos: [i32; 3]) -> Hit {
         pos,
         face: [0, 1, 0],
         point: [f64::from(pos[0]) + 0.5, f64::from(pos[1]), 0.5],
+        inside: false,
     }
 }
 

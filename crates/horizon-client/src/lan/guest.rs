@@ -130,6 +130,12 @@ pub struct Guest {
     /// bots do not each hold a whole view distance.
     pub fake: bool,
     pub position: [f64; 3],
+    /// Where the player's chunk tickets stay while they are not at `position`.
+    /// `None`: they are at `position`'s chunk. `Some(chunk)`: a teleport sent
+    /// the player away and they are still at the chunk it left. The hold ends
+    /// (back to `None`) at an accepted move, the teleport's ack, a passenger or
+    /// vehicle move, a camera change and a placement.
+    pub held_ticket_chunk: Option<(i32, i32)>,
     pub previous_position: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -327,6 +333,7 @@ pub struct Guest {
     pub xp_level: i32,
     pub xp_progress: f32,
     pub xp_total: i32,
+    pub score: i32,
     /// `Player.enchantmentSeed` (the enchanting table's offers).
     pub xp_seed: i32,
     /// Active status effects (`LivingEntity.activeEffects`).
@@ -341,6 +348,8 @@ pub struct Guest {
     /// `lastSentHealth`, `lastSentFood` and `lastFoodSaturationZero`.
     pub sent_health: Option<(f32, i32, bool)>,
     pub sent_xp: Option<(f32, i32, i32)>,
+    /// The score (`Player.DATA_SCORE_ID`) the player's client was last sent.
+    pub sent_score: i32,
     /// The air supply and absorption the player's client was last sent
     /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
     /// defaults until either changes.
@@ -349,6 +358,10 @@ pub struct Guest {
     /// The shared flags (Entity.DATA_SHARED_FLAGS_ID) the player's client was
     /// last sent about itself.
     pub sent_shared: i8,
+    /// `updateFallFlying` ended the glide this tick. Vanilla's ServerPlayer.doTick ends it after the level tick's
+    /// ServerEntity.sendChanges, so the cleared flag reaches the client with the next tick's data: a landing glide
+    /// lasts one more tick on its ground, and a jump then keeps the speed (the elytra hop).
+    pub glide_end_unsent: bool,
     /// Pose last delivered to this player's own entity data, initially Standing.
     pub sent_pose: Pose,
     /// The shoulder parrots (Player.DATA_SHOULDER_PARROT_LEFT and _RIGHT) the
@@ -497,6 +510,7 @@ impl Guest {
             channels: j.configured.channels,
             configuration_pack_answers: j.configured.pack_answers,
             position,
+            held_ticket_chunk: None,
             previous_position: position,
             yaw: 0.0,
             pitch: 0.0,
@@ -588,6 +602,7 @@ impl Guest {
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
+            score: 0,
             xp_seed: 0,
             effects: Default::default(),
             sent_effects: Vec::new(),
@@ -595,9 +610,11 @@ impl Guest {
             menu_state: 0,
             sent_health: None,
             sent_xp: None,
+            sent_score: 0,
             sent_air: (300, 0.0),
             sent_frozen: 0,
             sent_shared: 0,
+            glide_end_unsent: false,
             sent_pose: Pose::Standing,
             sent_shoulders: [None; 2],
             last_death: None,
@@ -759,6 +776,33 @@ impl Guest {
             self.send(p);
         }
     }
+    /// A new player at `at` (`ChunkMap.addEntity`; the tickets start there).
+    pub fn place(&mut self, at: [f64; 3]) {
+        (
+            self.position,
+            self.previous_position,
+            self.held_ticket_chunk,
+        ) = (at, at, None);
+    }
+    /// `ServerChunkCache.move` after an accepted move: the tickets follow.
+    pub fn accept_move(&mut self, to: [f64; 3]) {
+        self.previous_position = self.position;
+        (self.position, self.held_ticket_chunk) = (to, None);
+    }
+    /// The chunk the player's `DistanceManager` tickets are at. Teleporting
+    /// does not move them: `ServerChunkCache.move` does, and its callers are an
+    /// accepted move or the ack of a teleport (`handlePlayerPositionChange`),
+    /// a vehicle or passenger move (`handleMoveVehicle`) and a camera
+    /// (`ServerPlayer.setCamera` and its tick), whose chunk is `position`'s.
+    pub fn ticket_chunk(&self) -> (i32, i32) {
+        self.held_ticket_chunk
+            .filter(|_| !self.watching)
+            .unwrap_or_else(|| self.chunk())
+    }
+    /// A camera change or a passenger's move: the tickets follow `position`.
+    pub fn release_tickets(&mut self) {
+        self.held_ticket_chunk = None;
+    }
     pub fn chunk(&self) -> (i32, i32) {
         (
             (self.position[0].floor() as i32) >> 4,
@@ -806,6 +850,22 @@ impl Guest {
             f |= 8;
         }
         f
+    }
+    /// `updateFallFlying` ends the glide (`glide_end_unsent`: its end reaches the client a tick later).
+    pub fn end_glide(&mut self) {
+        self.fall_flying = false;
+        self.glide_end_unsent = true;
+    }
+    /// The pose this player's own data tells its client, where this sender owns it (standing,
+    /// crouching, gliding): a glide's pose goes too (vanilla's updatePlayerPose), and one ended this
+    /// tick still shows until the next tick's data, which this takes (`glide_end_unsent`).
+    pub fn own_pose(&mut self) -> Option<Pose> {
+        let pose = if std::mem::take(&mut self.glide_end_unsent) {
+            Pose::FallFlying
+        } else {
+            self.pose()
+        };
+        matches!(pose, Pose::Standing | Pose::Crouching | Pose::FallFlying).then_some(pose)
     }
     /// `Player.getDesiredPose`: sleeping, gliding, then the body's own pose
     /// (swimming, crawling, crouching) once its server tick has run.
@@ -1598,15 +1658,19 @@ fn network_stack(
         // a layer that has none leaves the stack without the component. An
         // ominous banner made by the raid keeps only its flag, so its layers
         // are the ones the NBT encoder synthesises from it.
-        let patterns: Vec<(&str, &str)> = if d.ominous_banner && d.banner_patterns.is_empty() {
-            crate::item_data::OMINOUS_LAYERS.to_vec()
-        } else {
-            d.banner_patterns
-                .iter()
-                .map(|layer| (&*layer.pattern, &*layer.color))
-                .collect()
-        };
+        let patterns: Option<Vec<(&str, &str)>> =
+            if d.ominous_banner && d.banner_patterns.is_empty() {
+                Some(crate::item_data::OMINOUS_LAYERS.to_vec())
+            } else {
+                // A direct holder is not in the synced registry: one in the list
+                // leaves the stack without the component, as an unknown id does.
+                d.banner_patterns
+                    .iter()
+                    .map(|layer| Some((layer.pattern.id()?, &*layer.color)))
+                    .collect()
+            };
         let layers: Option<Vec<(i32, i32)>> = patterns
+            .unwrap_or_default()
             .iter()
             .map(|(pattern, color)| {
                 let name = if pattern.contains(':') {
@@ -1820,8 +1884,13 @@ fn network_stack(
                 horizon_protocol::item::Component::Raw(w.data),
             ));
         }
-        // What a bundle holds, for its tooltip (ClientBundleTooltip).
-        if !d.bundle_contents.is_empty() {
+        // What a bundle holds, for its tooltip (ClientBundleTooltip); a
+        // bundle's removed contents stay removed (`bundle[!bundle_contents]`).
+        if d.other("!minecraft:bundle_contents").is_some() {
+            stack
+                .removed
+                .push(horizon_protocol::item::component::BUNDLE_CONTENTS);
+        } else if !d.bundle_contents.is_empty() {
             let contents = d
                 .bundle_contents
                 .iter()

@@ -12,6 +12,10 @@ use horizon_client::{
 use horizon_world::nbt::Tag;
 use winit::keyboard::KeyCode;
 
+#[cfg(test)]
+#[path = "player_score_tests.rs"]
+mod player_score_tests;
+
 impl Screen {
     /// The screens whose own `keyPressed` takes every press: the social
     /// screen, the command block and block editors, the debug options.
@@ -82,6 +86,13 @@ impl Screen {
             | Self::DebugOptions
             | Self::HudEditor => true,
         }
+    }
+    /// `Screen.isAllowedInPortal`: `LocalPlayer.handlePortalTransitionEffect`
+    /// leaves a screen that allows it open. The class default is
+    /// `isPauseScreen`, and only `ChatScreen`, `DeathScreen` and `WinScreen`
+    /// override it true (the win screen whatever its poem says).
+    pub(super) fn allowed_in_portal(self) -> bool {
+        matches!(self, Self::Chat | Self::Dead | Self::Win) || self.is_pause_screen()
     }
     /// Screen.extractBackground for non-isInGameUi screens, and
     /// PauseScreen.extractBackground only when showPauseMenu is true.
@@ -761,7 +772,7 @@ impl Game<'_> {
         let score = Text::translate(
             "deathScreen.score.value",
             &[Text::colored(
-                self.experience.total.to_string(),
+                self.experience.score.to_string(),
                 text::YELLOW,
             )],
         );

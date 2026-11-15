@@ -7,6 +7,8 @@ mod freezing;
 
 pub use feeding::takes_food;
 
+#[cfg(test)]
+use super::world::level_random;
 use super::{
     Damage, DamageKind, Mob, MobEvent, MobWorld, Species, Who, aquatic,
     control::{BodyRotation, LookControl, MoveControl},
@@ -19,17 +21,20 @@ use super::{
     undead,
 };
 use crate::blocks::Fluid;
+use crate::powder_snow::particle_velocity as powder_snow_particle_velocity;
 use horizon_core::{
     geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
-    random::{LegacyRandom, RandomSource},
+    random::{LevelRandom, RandomSource},
 };
-
 #[cfg(test)]
 #[path = "fall_flying_tests.rs"]
 mod fall_flying_tests;
 #[path = "ai_glide.rs"]
 mod glide;
 use glide::update_fall_flying;
+#[cfg(test)]
+#[path = "cramming_tests.rs"]
+mod cramming_tests;
 #[cfg(test)]
 #[path = "wet_fire_tests.rs"]
 mod wet_fire_tests;
@@ -39,8 +44,6 @@ mod step;
 mod walk_target;
 pub(crate) use step::step_sound;
 pub use walk_target::walk_target_value;
-
-use crate::powder_snow::particle_velocity as powder_snow_particle_velocity;
 
 /// The inside-block effects of fire and lava (`InsideBlockEffectType`
 /// FIRE_IGNITE and LAVA_IGNITE): ignite, then hurt. Both are collected
@@ -557,7 +560,7 @@ fn generic(m: &mut Mob) {
             // activities are not here): panic 2.0, AnimalMakeLove, tempting
             // with goat_food and baby follow at 1.25, then stroll.
             g.add(0, Float);
-            g.add(1, Panic::new(2.0));
+            g.add(1, AnimalPanic::new(2.0));
             g.add(2, Breed::new(1.0));
             g.add(3, Tempt::new(1.25, m.kind.food.clone(), false));
             g.add(4, FollowParent::new(1.25));
@@ -571,10 +574,6 @@ fn generic(m: &mut Mob) {
         g.add(5, Stroll::avoiding_water(1.0));
         g.add(6, LookAtPlayer::new(6.0));
         g.add(7, RandomLookAround::default());
-        if m.kind.species == Species::Armadillo {
-            // Armadillo's constructor: pickNextScuteDropTime.
-            m.extra.egg_time = next_scute_time(m);
-        }
     }
 }
 /// Subclasses of `net.minecraft.world.entity.monster.Monster`.
@@ -639,7 +638,7 @@ fn drop_invalid_player_target(m: &mut Mob, w: &MobWorld) {
 pub fn tick(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) -> bool {
     if m.removed {
@@ -785,6 +784,7 @@ pub fn tick(
         ai_step(m, w, level_random, events);
     }
     count_fall_fly_ticks(m);
+    super::finalize::refresh_dirty_attributes(m); // LivingEntity.tick: refreshDirtyAttributes
     effects_from_blocks(m, w, level_random, events);
     if m.alive() {
         freeze_tick(m, w, events);
@@ -799,8 +799,7 @@ pub fn tick(
     if m.species() == Species::Rabbit {
         super::rabbit::post_tick(m);
     }
-    // Mob.tickHeadTurn -> BodyRotationControl.clientTick (a frozen
-    // creaking's waits).
+    // Mob.tickHeadTurn -> BodyRotationControl.clientTick (a frozen creaking's waits).
     if m.alive()
         && (!super::creaking::is_creaking(m) || super::creaking::can_move(m))
         && !super::armadillo::scared(m)
@@ -846,7 +845,7 @@ pub fn tick(
 fn effects_from_blocks(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     // Entity.applyEffectsFromBlocks fixes the tick's movements before
@@ -1015,12 +1014,12 @@ mod powder_snow_particle_tests {
     fn a_controlled_mount_uses_its_riders_known_movement() {
         let seed = (0..1000)
             .find(|seed| {
-                let mut random = LegacyRandom::new(*seed);
+                let mut random = horizon_core::random::LegacyRandom::new(*seed);
                 random.next_boolean()
             })
             .unwrap();
         let player_movement = Vec3::new(0.2, 0.0, 0.0);
-        let mut expected_random = LegacyRandom::new(seed);
+        let mut expected_random = horizon_core::random::LegacyRandom::new(seed);
         let expected =
             powder_snow_particle_velocity(player_movement, &mut expected_random).unwrap();
 
@@ -1051,7 +1050,7 @@ mod powder_snow_particle_tests {
                 let mut horse = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
                 horse.extra.saddled = true;
                 horse.rider = Some(crate::mobs::equine::Rider::default());
-                let mut random = LegacyRandom::new(seed);
+                let mut random = level_random(seed);
                 let mut events = Vec::new();
 
                 effects_from_blocks(&mut horse, &w, &mut random, &mut events);
@@ -1071,7 +1070,7 @@ mod powder_snow_particle_tests {
 fn honey_slide(
     m: &mut Mob,
     p: [i32; 3],
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     let old_delta_y = |dy: f64| dy / f64::from(0.98_f32) + 0.08;
@@ -1546,7 +1545,7 @@ fn animal_step(m: &mut Mob, events: &mut Vec<MobEvent>) {
 fn ageable_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     // AgeableMob.aiStep: a forced age-up's particles (`sendParticles`, so the
@@ -1622,7 +1621,7 @@ fn reset_effect_fall_distance(m: &mut Mob) {
 }
 
 /// LivingEntity.aiStep (and Mob/AgeableMob/Animal additions).
-fn ai_step(m: &mut Mob, w: &MobWorld, level_random: &mut LegacyRandom, events: &mut Vec<MobEvent>) {
+fn ai_step(m: &mut Mob, w: &MobWorld, level_random: &mut LevelRandom, events: &mut Vec<MobEvent>) {
     if m.species() == Species::Parrot {
         super::parrot::ai_step(m, w, level_random, events);
     }
@@ -1738,13 +1737,15 @@ fn hurt_teleports(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
 impl Mob {
     /// LivingEntity.isPushable (and the push it takes from `Entity.push(Entity)`):
     /// bats and shulkers are never moved by others, nor is a mob on a climbable
-    /// block (`onClimbable`, cached by the last tick).
+    /// block (`onClimbable`, cached by the last tick), nor a ridden horse
+    /// (`AbstractHorse.isPushable` is `!isVehicle`).
     pub fn pushable(&self) -> bool {
         self.alive()
             && !matches!(self.species(), Species::Bat | Species::Shulker)
             && !self.on_climbable
             && (self.species() != Species::Creaking || super::creaking::can_move(self))
             && (self.species() != Species::Warden || !super::warden::digging_or_emerging(self))
+            && !(super::equine::is_equine(self.species()) && super::equine::is_vehicle(self))
     }
 }
 /// LivingEntity.onClimbable for the pusher (Spider.onClimbable: climbing a wall).
@@ -1770,13 +1771,8 @@ fn push_entities(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         return;
     }
     let bounds = m.bounds();
-    // The pusher's own isPushable, checked by `e.push(this)` before moving it.
-    let self_pushable = m.alive()
-        && m.species() != Species::Shulker
-        && !m.on_climbable
-        && (m.species() != Species::Creaking || super::creaking::can_move(m))
-        && (m.species() != Species::Warden || !super::warden::digging_or_emerging(m))
-        && !super::equine::is_vehicle(m);
+    // The pusher's own isPushable and isVehicle, checked by `e.push(this)`.
+    let self_pushable = m.pushable() && !super::equine::is_vehicle(m);
     let mut targets = super::world::take_push_targets();
     if let Some(p) = &w.player
         // Entity.push: passengers of the same vehicle never push each other.
@@ -1906,7 +1902,7 @@ fn sun_burn_tick(m: &mut Mob, w: &MobWorld) -> bool {
 pub(super) fn server_ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     m.ai.no_action_time += 1;
@@ -1994,7 +1990,7 @@ pub(super) fn server_ai_step(
     m.jump_control_tick();
 }
 /// `Armadillo.pickNextScuteDropTime`: 5 to 10 minutes.
-pub(crate) fn next_scute_time(m: &mut Mob) -> i32 {
+pub(super) fn next_scute_time(m: &mut Mob) -> i32 {
     m.random.next_int_bound(20 * 60 * 5).unwrap_or(0) + 20 * 60 * 5
 }
 /// `Armadillo.customServerAiStep`: the scute timer keeps counting down and is
@@ -2056,7 +2052,7 @@ fn custom_server_ai_step(m: &mut Mob, cx: &mut Cx) {
 fn species_ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     if family(m.species()) == Family::Aquatic {
@@ -2824,49 +2820,47 @@ pub fn custom_travel(m: &mut Mob, w: &MobWorld, input: Vec3, events: &mut Vec<Mo
 /// `Entity.applyEffectsFromBlocks` for the flowers that give an effect:
 /// `WitherRoseBlock.entityInside` (wither for 40 ticks on a living mob that
 /// can take it, not in peaceful) and `EyeblossomBlock.entityInside` (poison
-/// for 25 ticks on a bee, when the open flower attracts bees). The blocks
-/// are those the mob's box touches where it started the tick and where it
-/// ended.
+/// for 25 ticks on a bee, when the open flower attracts bees). The blocks are
+/// the ones the mob's box passes through along this tick's move, as
+/// `Entity.checkInsideBlocks` sweeps it, so a mob falling past a flower is
+/// inside it on the way.
 fn flower_contact_effects(m: &mut Mob, w: &MobWorld) {
     if !m.alive() {
         return;
     }
-    let half = f64::from(m.width()) / 2.0 - 1.0e-5;
-    let height = f64::from(m.height()) - 1.0e-5;
-    let mut visited: Vec<[i32; 3]> = Vec::new();
-    for at in [m.previous, m.position] {
-        let cells = |lo: f64, hi: f64| lo.floor() as i32..=hi.floor() as i32;
-        for x in cells(at.x - half, at.x + half) {
-            for y in cells(at.y + 1.0e-5, at.y + height) {
-                for z in cells(at.z - half, at.z + half) {
-                    let p = [x, y, z];
-                    if visited.contains(&p) {
-                        continue;
+    let inset = f64::from(1.0e-5_f32);
+    let box_at_end = m
+        .bounds_at(m.position)
+        .deflate(Vec3::new(inset, inset, inset));
+    let _ = horizon_core::geometry::sweep_intersected_blocks(
+        m.previous,
+        m.position,
+        box_at_end,
+        1 << 22,
+        |p, _| {
+            match w.block_name(p.x, p.y, p.z) {
+                "minecraft:wither_rose" => {
+                    // World difficulty, not the regional one, and
+                    // isInvulnerableTo(wither) (the invulnerable
+                    // flag, not the hit timer); a wither and a wither
+                    // skeleton refuse the effect in `addEffect`.
+                    if w.difficulty.base != 0 && !m.invulnerable_flag {
+                        m.add_effect("minecraft:wither", 40, 0);
                     }
-                    match w.block_name(x, y, z) {
-                        "minecraft:wither_rose" => {
-                            // World difficulty, not the regional one, and
-                            // isInvulnerableTo(wither) (the invulnerable
-                            // flag, not the hit timer); a wither and a wither
-                            // skeleton refuse the effect in `addEffect`.
-                            if w.difficulty.base != 0 && !m.invulnerable_flag {
-                                m.add_effect("minecraft:wither", 40, 0);
-                            }
-                        }
-                        "minecraft:open_eyeblossom"
-                            if m.species() == Species::Bee
-                                && super::bee::attracts_bees(w, p)
-                                && !m.has_effect("minecraft:poison") =>
-                        {
-                            m.add_effect("minecraft:poison", 25, 0);
-                        }
-                        _ => continue,
-                    }
-                    visited.push(p);
                 }
+                "minecraft:open_eyeblossom"
+                    if m.species() == Species::Bee
+                        && super::bee::attracts_bees(w, [p.x, p.y, p.z])
+                        && !m.has_effect("minecraft:poison") =>
+                {
+                    m.add_effect("minecraft:poison", 25, 0);
+                }
+                _ => {}
             }
-        }
-    }
+            // `checkInsideBlocks` stops the sweep once the entity is dead.
+            m.alive()
+        },
+    );
 }
 
 /// MobEffect ticking for the effects mobs receive (poison, wither,
@@ -3453,7 +3447,7 @@ mod hit_effect_tests {
                     Vec3::new(0.5, 64.0, 0.5),
                     0.0,
                 );
-                let (mut lr, mut events) = (horizon_core::random::LegacyRandom::new(0), Vec::new());
+                let (mut lr, mut events) = (crate::mobs::world::level_random(0), Vec::new());
                 let mut cx = Cx {
                     w,
                     lr: &mut lr,
@@ -3512,7 +3506,7 @@ mod hit_effect_tests {
                 Vec3::new(0.5, 64.0, 0.5),
                 0.0,
             );
-            let (mut lr, mut events) = (horizon_core::random::LegacyRandom::new(0), Vec::new());
+            let (mut lr, mut events) = (crate::mobs::world::level_random(0), Vec::new());
             let mut cx = Cx {
                 w: &easy,
                 lr: &mut lr,
@@ -3561,7 +3555,7 @@ mod attack_sound_tests {
                 0.0,
             );
             m.silent = silent;
-            let (mut lr, mut events) = (horizon_core::random::LegacyRandom::new(0), Vec::new());
+            let (mut lr, mut events) = (crate::mobs::world::level_random(0), Vec::new());
             let mut cx = Cx {
                 w,
                 lr: &mut lr,
@@ -3960,7 +3954,7 @@ mod same_vehicle_push_tests {
             Vec::<u32>::new(),
             "the cow pushes the ridden horse"
         );
-        assert!(cow.velocity.x > 0.0, "the ridden horse pushes the cow away");
+        assert_eq!(cow.velocity, Vec3::ZERO, "a ridden horse is not pushable");
 
         let (horse, mut cow) = pair(false).unwrap();
         let mut events = Vec::new();
@@ -4065,7 +4059,7 @@ mod ridden_tests {
                 client,
                 ..Default::default()
             });
-            let (mut random, mut events) = (LegacyRandom::new(0), Vec::new());
+            let (mut random, mut events) = (level_random(0), Vec::new());
             for _ in 0..5 {
                 tick(&mut m, w, &mut random, &mut events);
             }
@@ -4178,7 +4172,7 @@ mod bed_wake_tests {
                     occupied: true
                 }
             )));
-            let mut random = LegacyRandom::new(0);
+            let mut random = level_random(0);
             let mut loaded_events = Vec::new();
             for n in 1..=2 {
                 assert!(loaded.tick(w, &mut random, &mut loaded_events));
@@ -4228,7 +4222,7 @@ mod bed_wake_tests {
                 w,
                 &mut events
             ));
-            let mut random = LegacyRandom::new(0);
+            let mut random = level_random(0);
             tick(&mut m, w, &mut random, &mut events);
             out = Some(m);
         });
@@ -4292,7 +4286,7 @@ mod feed_tests {
             return;
         }
         let data = MobTypes::load(&root).unwrap();
-        let mut level = LegacyRandom::new(0);
+        let mut level = horizon_core::random::LegacyRandom::new(0);
         for id in ["minecraft:wolf", "minecraft:cat"] {
             let kind = Arc::new(data.types.get(id).unwrap().clone());
             let mut m = Mob::new(1, kind, Vec3::new(0.0, 4.0, 0.0), 0.0);
@@ -4334,7 +4328,7 @@ mod feed_tests {
             m.extra.age = age;
             m
         };
-        let mut level = LegacyRandom::new(0);
+        let mut level = level_random(0);
         let mut frog = mob("minecraft:frog", Species::Frog, -24_000);
         assert!(!frog.is_baby());
         assert!(!takes_food(&frog), "a frog is never a baby");
@@ -4360,7 +4354,7 @@ mod feed_tests {
             return;
         }
         let data = MobTypes::load(&root).unwrap();
-        let mut level = LegacyRandom::new(0);
+        let mut level = horizon_core::random::LegacyRandom::new(0);
         let kind = Arc::new(data.types.get("minecraft:turtle").unwrap().clone());
         let mut m = Mob::new(1, kind, Vec3::new(0.0, 4.0, 0.0), 0.0);
         m.extra.age = 0;
@@ -4403,7 +4397,7 @@ mod forgiveness_tests {
             golem.extra.anger = 300;
             golem.ai.last_hurt_by = Some(Who::Player);
             let mut events = Vec::new();
-            tick(&mut golem, &world, &mut LegacyRandom::new(0), &mut events);
+            tick(&mut golem, &world, &mut level_random(0), &mut events);
             assert_eq!(golem.ai.target, None);
             assert_eq!(golem.extra.anger, 0);
             assert_eq!(golem.ai.last_hurt_by, None);
@@ -4676,7 +4670,7 @@ mod age_up_tests {
                             m.persistent = true;
                             m.extra.age_locked = locked;
                             super::super::finalize::set_age(&mut m, age);
-                            let (mut random, mut events) = (LegacyRandom::new(0), Vec::new());
+                            let (mut random, mut events) = (level_random(0), Vec::new());
                             let expected = if age > 0 {
                                 [1, 0, 0, 0]
                             } else if locked {
@@ -4771,9 +4765,12 @@ mod age_up_tests {
             let kind = Arc::new(types.types["minecraft:goat"].clone());
             let mut m = Mob::new(1, kind, Vec3::ZERO, 0.0);
             // As a natural spawn leaves it, then on its last baby tick.
-            super::super::finalize::goat_spawn(&mut m);
+            super::super::finalize::goat_spawn(
+                &mut m,
+                &mut horizon_core::random::LegacyRandom::new(0),
+            );
             super::super::finalize::set_age(&mut m, -1);
-            let (mut lr, mut events) = (LegacyRandom::new(0), Vec::new());
+            let (mut lr, mut events) = (level_random(0), Vec::new());
             tick(&mut m, w, &mut lr, &mut events);
             out = Some((m.is_baby(), m.attrs.attack_damage));
         });
@@ -4869,7 +4866,7 @@ mod burn_and_rose_tests {
         let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
         register(&mut m);
         m.no_ai = true;
-        m.random = horizon_core::random::EntityRandom::own(LegacyRandom::new(3));
+        m.random = crate::mobs::EntityRandom::own(crate::mobs::LegacyRandom::new(3));
         m
     }
 
@@ -4916,7 +4913,7 @@ mod burn_and_rose_tests {
                 let mut m = zombie(types);
                 m.ignite_for_ticks(100);
                 assert!(m.is_on_fire());
-                let (mut lr, mut events) = (LegacyRandom::new(7), Vec::new());
+                let (mut lr, mut events) = (level_random(7), Vec::new());
                 assert!(tick(&mut m, &day, &mut lr, &mut events));
                 let broken: Vec<([i32; 3], bool)> = events
                     .iter()
@@ -4964,6 +4961,37 @@ mod burn_and_rose_tests {
                 let mut m = golem(types);
                 flower_contact_effects(&mut m, &peaceful);
                 assert!(!m.has_effect("minecraft:wither"), "peaceful");
+            },
+        );
+        let _ = ran;
+    }
+
+    /// `Entity.checkInsideBlocks` runs `WitherRoseBlock.entityInside` for every
+    /// block the box sweeps between the tick's start and end: a zombie falling
+    /// three blocks in one tick (about terminal speed) passes through the
+    /// rose's cell between the two boxes and gets wither, while one standing
+    /// beside it does not.
+    #[test]
+    fn a_mob_falling_past_a_wither_rose_gets_wither_and_one_beside_it_does_not() {
+        let ran = crate::mobs::world::with_built_test_world(
+            &[],
+            build_with("minecraft:wither_rose"),
+            |w, types| {
+                // Boxes 65..67 and 62..64: the rose's cell 64 is between them.
+                let mut falling = zombie(types);
+                falling.previous = Vec3::new(0.5, 65.0, 0.5);
+                falling.position = Vec3::new(0.5, 62.0, 0.5);
+                flower_contact_effects(&mut falling, w);
+                assert!(
+                    falling.has_effect("minecraft:wither"),
+                    "inside the rose on the way past it"
+                );
+
+                let mut beside = zombie(types);
+                beside.previous = Vec3::new(3.5, 64.0, 0.5);
+                beside.position = Vec3::new(3.5, 64.0, 0.5);
+                flower_contact_effects(&mut beside, w);
+                assert!(!beside.has_effect("minecraft:wither"), "beside it");
             },
         );
         let _ = ran;
@@ -5035,7 +5063,7 @@ mod wither_block_slowdown_tests {
                 let mut m = mob(types, "minecraft:cow");
                 m.fall_distance = 4.5;
                 m.stuck_multiplier = Vec3::ZERO;
-                let mut random = LegacyRandom::new(42);
+                let mut random = level_random(42);
                 let mut events = Vec::new();
                 effects_from_blocks(&mut m, w, &mut random, &mut events);
                 assert_eq!(m.fall_distance, 0.0, "cow fall distance reset");
@@ -5056,7 +5084,7 @@ mod wither_block_slowdown_tests {
             let mut m = mob(types, "minecraft:cow");
             m.fall_distance = 4.5;
             m.stuck_multiplier = Vec3::ZERO;
-            let mut random = LegacyRandom::new(42);
+            let mut random = level_random(42);
             let mut events = Vec::new();
             effects_from_blocks(&mut m, w, &mut random, &mut events);
             assert_eq!(m.fall_distance, 0.0, "cow fall distance reset");
@@ -5078,7 +5106,7 @@ mod wither_block_slowdown_tests {
                 let mut m = mob(types, "minecraft:wither");
                 m.fall_distance = 4.5;
                 m.stuck_multiplier = Vec3::ZERO;
-                let mut random = LegacyRandom::new(42);
+                let mut random = level_random(42);
                 let mut events = Vec::new();
                 effects_from_blocks(&mut m, w, &mut random, &mut events);
                 assert_eq!(m.fall_distance, 4.5, "wither fall distance preserved");
@@ -5095,7 +5123,7 @@ mod wither_block_slowdown_tests {
             let mut m = mob(types, "minecraft:wither");
             m.fall_distance = 4.5;
             m.stuck_multiplier = Vec3::ZERO;
-            let mut random = LegacyRandom::new(42);
+            let mut random = level_random(42);
             let mut events = Vec::new();
             effects_from_blocks(&mut m, w, &mut random, &mut events);
             assert_eq!(m.fall_distance, 4.5, "wither fall distance preserved");
@@ -5137,7 +5165,7 @@ mod wither_block_slowdown_tests {
                 let initial_health = m.health;
                 m.previous = Vec3::new(0.5, 64.0, 0.5);
                 m.position = Vec3::new(0.52, 64.0, 0.5);
-                let mut random = LegacyRandom::new(42);
+                let mut random = level_random(42);
                 let mut events = Vec::new();
                 effects_from_blocks(&mut m, w, &mut random, &mut events);
                 assert_eq!(
@@ -5288,7 +5316,7 @@ mod iron_golem_push_tests {
                     0.0,
                 );
                 m.extra.main_hand = hand.map(Arc::from);
-                let (mut lr, mut events) = (horizon_core::random::LegacyRandom::new(0), Vec::new());
+                let (mut lr, mut events) = (crate::mobs::world::level_random(0), Vec::new());
                 let mut cx = Cx {
                     w,
                     lr: &mut lr,
@@ -5337,7 +5365,7 @@ mod allay_healing_tests {
                     mob.extra.egg_time = 30;
                     assert_eq!(mob.attrs.max_health, 20.0);
                     assert_eq!(mob.age, 0);
-                    let mut random = LegacyRandom::new(0);
+                    let mut random = level_random(0);
                     let mut events = Vec::new();
                     for elapsed in 1..=20 {
                         assert!(tick(&mut mob, w, &mut random, &mut events));
@@ -5382,7 +5410,7 @@ mod ravager_noai_tests {
                     mob.extra.counter = initial.0;
                     mob.extra.counter2 = initial.1;
                     mob.extra.anim_ticks = initial.2;
-                    let mut random = LegacyRandom::new(0);
+                    let mut random = level_random(0);
                     let mut events = Vec::new();
                     for elapsed in 1..=22 {
                         tick(&mut mob, w, &mut random, &mut events);
@@ -5508,7 +5536,7 @@ mod flight_effect_fall_tests {
                             if let Some(effect) = effect {
                                 mob.add_effect(effect, 100, 0);
                             }
-                            let mut random = LegacyRandom::new(0);
+                            let mut random = level_random(0);
                             assert!(tick(&mut mob, world, &mut random, &mut Vec::new()));
                             // The pinned Java aiStep resets before travel. A
                             // downward move then adds 0.2F of NEW fall distance;
@@ -5690,7 +5718,7 @@ mod dolphin_noai_air_tests {
             mob.persistent = true;
             mob.attrs.speed = 0.0;
             mob.air = initial;
-            let mut random = LegacyRandom::new(0);
+            let mut random = level_random(0);
             let mut events = Vec::new();
             assert_eq!(mob.health, 10.0);
             assert_eq!(mob.max_air_supply(), 4800);
@@ -5763,7 +5791,7 @@ mod nautilus_noai_air_tests {
             mob.attrs.speed = 0.0;
             mob.health = 10.0;
             mob.air = initial;
-            let mut random = LegacyRandom::new(0);
+            let mut random = level_random(0);
             let mut events = Vec::new();
             for (index, expected) in expected.into_iter().enumerate() {
                 assert!(tick(&mut mob, w, &mut random, &mut events));
@@ -5914,7 +5942,7 @@ mod happy_ghast_ambient_tests {
                     mob.persistent = true;
                     mob.extra.age = if baby { -24000 } else { 0 };
                     let sound = super::super::happy_ghast::sounds(&mob)[0];
-                    let mut random = LegacyRandom::new(0);
+                    let mut random = level_random(0);
                     let mut heard = false;
                     // Natural scheduling: no ambient counter is forced or reset here.
                     for _ in 0..1200 {
@@ -5942,7 +5970,7 @@ mod happy_ghast_ambient_tests {
                 mob.persistent = true;
                 mob.silent = true;
                 let sound = super::super::happy_ghast::sounds(&mob)[0];
-                let mut random = LegacyRandom::new(0);
+                let mut random = level_random(0);
                 for _ in 0..1200 {
                     let mut events = Vec::new();
                     assert!(tick(&mut mob, w, &mut random, &mut events));
@@ -6117,7 +6145,7 @@ mod trader_llama_no_ai_tests {
                     for elapsed in 1..=steps {
                         let mut expected_random = mob.random.clone();
                         expected_random.next_int_bound(1000).unwrap(); // Existing Mob.baseTick ambient draw only.
-                        let mut level_random = LegacyRandom::new(0);
+                        let mut level_random = level_random(0);
                         let mut events = Vec::new();
                         tick(&mut mob, w, &mut level_random, &mut events);
                         assert_eq!(mob.age, elapsed as u32, "actual tick reached");
@@ -6147,7 +6175,7 @@ mod trader_llama_no_ai_tests {
                 normal.no_ai = false;
                 normal.health = normal.attrs.max_health;
                 let mut events = Vec::new();
-                tick(&mut normal, w, &mut LegacyRandom::new(0), &mut events);
+                tick(&mut normal, w, &mut level_random(0), &mut events);
                 assert_eq!(normal.extra.ints[0], 4);
             },
         );
@@ -6220,7 +6248,7 @@ mod hurt_teleport_contact_tests {
                 let mut teleported = 0;
                 for seed in 0..40 {
                     let mut m = enderman(types, seed);
-                    let mut random = LegacyRandom::new(42);
+                    let mut random = level_random(42);
                     let mut events = Vec::new();
                     effects_from_blocks(&mut m, w, &mut random, &mut events);
                     if m.position != Vec3::new(0.5, 64.0, 0.5) {

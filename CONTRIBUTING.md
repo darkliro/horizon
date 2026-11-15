@@ -27,7 +27,7 @@ here.
 - **Prerequisites:** Rust (stable), Python 3.11+, JDK 25, git 2.38 or newer, and on Linux the ALSA and udev headers
   (`libasound2-dev libudev-dev`).
 - **Resources:** Horizon never downloads the game; it prepares its resources from your own copy of Minecraft 26.3, as
-  described in [Build from source](README.md#build-from-source).
+  described in [Build from source](docs/native-client.md#run-from-a-checkout).
 - **Commands:**
 
   ```sh
@@ -100,6 +100,18 @@ exact random calls. It has to work together with normal Minecraft:
   default. The game may offer to turn it on when it finds a Java mod; the player decides. It is promoted out of beta
   only after MSPT and RAM benchmarks against the Java client with the same mods ([#13914](https://github.com/horizon-rust/horizon/issues/13914)).
 
+## Licence
+
+Horizon is under the GNU Lesser General Public License, version 3 or any later version ([LICENSE](LICENSE)). The
+LGPL adds permissions to the GNU GPL version 3, whose text is in [LICENSES/GPL-3.0.txt](LICENSES/GPL-3.0.txt). What
+you contribute is under the same licence. Code merged before the move from MIT stays available under the MIT licence
+([LICENSES/MIT.txt](LICENSES/MIT.txt)).
+
+Code taken from another project must be under a licence the LGPL-3.0 accepts, such as MIT, BSD, ISC, zlib,
+Apache-2.0, MPL-2.0, LGPL-3.0 or LGPL-2.1-or-later. It keeps its copyright line and licence notice, and gets an entry
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Code under the GPL or the AGPL can't go in: it would put all of
+Horizon under that licence. If you aren't sure, ask on Discord first.
+
 ## Before asking for review
 
 Run the self-check and paste the block it prints into your pull request:
@@ -119,6 +131,8 @@ including examples. The dependency scope includes optional, platform, build and 
 library, binary, integration and doc tests without building unrelated example executables. Shared Cargo
 configuration and toolchain changes select the whole workspace; CI also keeps its workspace-wide checks.
 
+For a quick check while you work, `python3 tools/check_changed.py` runs rustfmt, clippy and tests for only the crates your branch changed and the crates that depend on them (`--dry-run` lists the commands).
+
 ### Translations
 
 Most of Horizon's translations were written by machine and stay marked unreviewed until someone who speaks the
@@ -131,7 +145,8 @@ Work is tracked in GitHub issues, and an issue that is assigned is taken (so is 
 claimed on Discord with Kira's `/claim`): pick another, or ask its holder in the thread. Before you start, comment
 **`/claim`** on the issue; you are assigned at once, no role needed. No issue for your work yet? Open one (a line is
 enough), then claim it. `/unclaim` gives it back. Issues labelled `tracker`, `proposal` or `not claimable` aren't
-claimed whole: claim one of the issues a tracker lists, or open one for the part you take.
+claimed whole: claim one of the issues a tracker lists, or open one for the part you take. For the first hour after
+an issue is filed only its author can claim it, so whoever found a problem gets to fix it (issues filed by bots have no such hour).
 
 A claim with no open pull request linking the issue (`Fixes #123` in the description, or a draft) is released after
 5 days, with a comment: open a draft early. You can hold 8 open issues at a time, not counting the ones your
@@ -142,10 +157,12 @@ it (edited on every push, never repeated): talk to its author in the thread befo
 
 ## Pull requests
 
-- **Small.** One change per pull request, under about 500 lines of code where you can; split bigger work into
-  pieces that each make sense alone. Small pull requests get reviewed and merged the same day. Bigger than that:
+- **One change per pull request**, under about 3000 lines of code; split bigger work into pieces that each make
+  sense alone. Smaller pull requests get reviewed and merged faster. Bigger than that:
   [large pull requests](#large-pull-requests). What counts: lines added plus lines removed, outside Markdown (`.md`)
-  files and test files (any `tests/` or `test/` folder, and `test_*.py`). Tests written inside a source file do count.
+  files and test files (any `tests/` or `test/` folder, and `test_*.py`). Tests inside a source file
+  (`#[cfg(test)]` modules) don't count, and neither do lines moved unchanged (same text, whitespace ignored, runs of
+  3 or more lines), so a refactor that moves code can be far bigger than 3000 lines.
   pr_ready counts it the same way and warns when a pull request is over.
 - **Fill in the template**: what and why, the vanilla reference, the pr_ready block, screenshots for anything you
   can see.
@@ -176,7 +193,7 @@ How agents, checks, releases and signed updates keep this safe: [security](docs/
 
 ### Large pull requests
 
-500 lines of code ([what counts](#pull-requests)) stays the default. A pull request that can't be split below it
+3000 lines of code ([what counts](#pull-requests)) stays the default. A pull request that can't be split below it
 starts from a spec:
 
 1. **Open an issue with the spec** before the code: what changes, the files it touches, the behaviour players and

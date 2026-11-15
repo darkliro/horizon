@@ -35,6 +35,7 @@ fn cauldron_game(state: &str, level: Option<u8>, held: ItemStack) -> Game<'stati
             f64::from(POS[1]) + 1.0,
             f64::from(POS[2]) + 0.5,
         ],
+        inside: false,
     });
     game
 }

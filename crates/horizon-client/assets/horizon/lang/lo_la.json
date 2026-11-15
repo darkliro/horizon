@@ -241,10 +241,6 @@
   "Peak Brightness": "ຄວາມສະຫວ່າງສູງສຸດ",
   "Black Level": "ລະດັບສີດໍາ",
   "UI Brightness": "ຄວາມສະຫວ່າງ UI",
-  "HDR Lighting": "ແສງ HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "ແຫຼ່ງແສງ, ດວງອາທິດ ແລະ ແສງແດດສ່ອງສະຫວ່າງເກີນສີຂາວ. ປິດ: ຄືກັບ SDR ທຳມະດາ.",
-  "Smooth Gradients": "ການປ່ຽນສີລຽບ",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "ກອບ 16-bit: ທ້ອງຟ້າມືດ ແລະ ເງົາຈະບໍ່ເປັນຊັ້ນໆ. ໃຊ້ VRAM ຫຼາຍຂຶ້ນເລັກນ້ອຍ. ເລີ່ມຄັ້ງຕໍ່ໄປ.",
   "Battery Mode": "ໂໝດແບັດເຕີຣີ",
   "Graphics API": "API ກຣາຟິກ",
   "Translucent Batching": "ການຮວມແບບເຄິ່ງໂປ່ງໃສ",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "ລໍຖ້າການໂຫຼດຫນ້າຈໍຄືນຂອງຈໍສະແດງຜົນ: ບໍ່ມີ tearing, latency ເລັກນ້ອຍ.",
   "Size of menus and the HUD.": "ຂະໜາດຂອງເມນູ ແລະ HUD.",
   "Sets the options below together. Changing one makes it Custom.": "ກໍານົດທາງເລືອກຂ້າງລຸ່ມນີ້ຮ່ວມກັນ. ການປ່ຽນແປງຫນຶ່ງເຮັດໃຫ້ມັນ Custom.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "ລາວາ, ໄຟ ແລະແສງແດດສ່ອງສະຫວ່າງກວ່າສີຂາວ. ຕ້ອງການຈໍສະແດງຜົນ HDR.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "ຍົກເງົາຂຶ້ນສູ່ສີດຳທີ່ເຂັ້ມທີ່ສຸດຂອງຈໍສະແດງຜົນ. 0: ສີດຳແທ້, ບໍ່ຍົກ.",
   "How bright highlights get. Auto: the peak your system reports.": "ໄດ້ຮັບຈຸດເດັ່ນທີ່ສົດໃສແນວໃດ. ອັດຕະໂນມັດ: ລາຍງານລະບົບຂອງທ່ານສູງສຸດ.",
   "How bright white looks in the world. Auto: your desktop's white.": "ສີຂາວສະຫວ່າງແນວໃດໃນໂລກ. ອັດຕະໂນມັດ: ສີຂາວຂອງ desktop ຂອງທ່ານ.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "ເພີ່ມໝາຍ",
   "horizon.studio.topbar.clear_keyframes": "🗑 ລຶບ Keyframes",
   "horizon.studio.topbar.timeline_hud": "⏱ ໄທມ໌ລາຍ",
-  "horizon.studio.topbar.split_scene": "ແຍກສາກ"
+  "horizon.studio.topbar.split_scene": "ແຍກສາກ",
+  "horizon.options.block_vibration": "ການຕອບສະໜອງແບບສຳຜັດຈາກ Bedrock",
+  "horizon.options.split_vibration": "ການສັ່ນເມື່ອແບ່ງກອງ",
+  "horizon.options.impulse_triggers": "ທຣິກເກີອິມພັນ",
+  "A tick when you break a block, as in Bedrock.": "ເມື່ອທ່ານທຳລາຍບລັອກ ມັນຈະສັ່ນສະເທືອນ ຄືກັບໃນ Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "ສັ່ນສັ້ນໆເມື່ອແບ່ງກອງ, ຄືກັບໃນ Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "ທຣິກເກີຂອງຄອນໂທຣລເລີ Xbox One ສັ່ນສະເທືອນພ້ອມກັບດ້າມຂອງມັນ."
 }

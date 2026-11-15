@@ -612,16 +612,11 @@ impl MobWorld<'_> {
     pub fn brightness(&self, x: i32, y: i32, z: i32) -> f32 {
         let light = self.world.light(x, y, z);
         let sky = i32::from(light >> 4) - self.sky_darken();
-        let level = sky.max(i32::from(light & 15)).clamp(0, 15) as f32;
-        // DimensionType.getBrightness with ambient light 0 (overworld) / 0.1 (nether).
-        let f = level / 15.0;
-        let base = f / (4.0 - 3.0 * f);
-        // The End's ambient light (0.25) is not applied here, as before.
-        if self.level == horizon_core::LevelKey::NETHER {
-            0.1 + base * 0.9
-        } else {
-            base
-        }
+        let level = sky.max(i32::from(light & 15)).clamp(0, 15) as u8;
+        // `LevelReader.getLightLevelDependentMagicValue`: the curved level
+        // lerped with the dimension's ambient light (0 overworld, 0.1 nether,
+        // 0.25 end).
+        crate::screen_effects::lightmap_brightness(self.dimension_type.ambient_light, level)
     }
     pub fn sky_darken(&self) -> i32 {
         if self.daylight { 0 } else { 11 }
@@ -746,11 +741,45 @@ impl MobWorld<'_> {
     }
 }
 
+/// `ClipContext.Block.VISUAL`'s shape: `BlockBehaviour.getVisualShape`, the
+/// collision shape unless the block overrides it.
+pub enum VisualShape<'a> {
+    /// The default: the collision shape.
+    Collision,
+    /// `TransparentBlock` (glass, stained and tinted glass, copper grates),
+    /// `IronBarsBlock` (bars and panes) and `PowderSnowBlock`.
+    Empty,
+    /// `SoulSandBlock` and `MudBlock`.
+    Block,
+    /// `FenceBlock` and `SnowLayerBlock`: `getShape`, the outline.
+    Outline(&'a [[f64; 6]]),
+}
+
+/// The visual shape of `state`, by the block class that overrides
+/// `getVisualShape`.
+pub fn visual_shape(facts: &BlockFacts, state: BlockStateId) -> VisualShape<'_> {
+    let f = facts.get(state);
+    let name = f.name.trim_start_matches("minecraft:");
+    if name.ends_with("glass")
+        || name.ends_with("glass_pane")
+        || name.ends_with("_bars")
+        || name.ends_with("copper_grate")
+        || name == "powder_snow"
+    {
+        return VisualShape::Empty;
+    }
+    if matches!(name, "mud" | "soul_sand") {
+        return VisualShape::Block;
+    }
+    if name == "snow" || name.ends_with("_fence") {
+        return VisualShape::Outline(&f.outline);
+    }
+    VisualShape::Collision
+}
+
 /// Level.clip with VISUAL shapes and no fluids: the block the segment first
 /// hits, None inside when it hits nothing and outside when the segment is
-/// too long to walk. Glass and copper grates (`TransparentBlock`) and bars and panes
-/// (`IronBarsBlock`) have no visual shape; mud, soul sand and powder snow
-/// look like full blocks.
+/// too long to walk.
 pub fn visual_clip<W: DynamicCollisionWorld>(
     facts: &BlockFacts,
     collision: &BlockCollisionRegistry,
@@ -765,19 +794,26 @@ pub fn visual_clip<W: DynamicCollisionWorld>(
         if facts.is_air(id) {
             return None;
         }
-        let name = facts.get(id).name.trim_start_matches("minecraft:");
-        if name.ends_with("glass")
-            || name.ends_with("glass_pane")
-            || name.ends_with("_bars")
-            || name.ends_with("copper_grate")
-        {
-            return None;
-        }
-        if matches!(name, "mud" | "soul_sand" | "powder_snow") {
-            return full
-                .move_by(Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)))
-                .clip(from, to)
+        match visual_shape(facts, id) {
+            VisualShape::Empty => return None,
+            VisualShape::Block => {
+                return full
+                    .move_by(Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)))
+                    .clip(from, to)
+                    .map(|_| [p.x, p.y, p.z]);
+            }
+            VisualShape::Outline(boxes) => {
+                return VoxelShape::clip_boxes(
+                    boxes.iter().map(|b| {
+                        Aabb::new(Vec3::new(b[0], b[1], b[2]), Vec3::new(b[3], b[4], b[5]))
+                    }),
+                    from,
+                    to,
+                    p,
+                )
                 .map(|_| [p.x, p.y, p.z]);
+            }
+            VisualShape::Collision => {}
         }
         if let Ok(Some(shape)) = collision.cached_shapes().cached_shape(id) {
             return shape.clip(from, to, p).map(|_| [p.x, p.y, p.z]);
@@ -788,6 +824,10 @@ pub fn visual_clip<W: DynamicCollisionWorld>(
     result.ok()
 }
 
+#[cfg(test)]
+#[path = "end_ambient_light_tests.rs"]
+mod end_ambient_light_tests;
+
 /// Runs `f` with an empty overworld (`others` its mobs) and the mob types,
 /// both from the extracted vanilla data; false, without running it, when
 /// that data is missing.
@@ -797,6 +837,11 @@ pub(crate) fn with_test_world(
     f: impl FnOnce(&MobWorld<'_>, &super::MobTypes),
 ) -> bool {
     with_built_test_world(others, |_, _| {}, f)
+}
+/// A test's level random (`Level.random`), seeded.
+#[cfg(test)]
+pub(crate) fn level_random(seed: i64) -> horizon_core::random::LevelRandom {
+    horizon_core::random::LevelRandom::for_level(horizon_core::random::LegacyRandom::new(seed))
 }
 /// `with_test_world` with `build` placing blocks first.
 #[cfg(test)]
@@ -1050,3 +1095,7 @@ mod scaffolding_sight_tests {
         let _ = ran;
     }
 }
+
+#[cfg(test)]
+#[path = "visual_sight_tests.rs"]
+mod visual_sight_tests;

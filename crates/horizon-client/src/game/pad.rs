@@ -86,6 +86,8 @@ pub(super) struct Pads {
     pub(super) device: Option<Device>,
     /// Controllers that came and went at this game's own reader since the last poll.
     connections: Vec<Connection>,
+    /// The right stick's turn still easing out under the cinematic camera.
+    look: gamepad::SmoothLook,
     /// The cursor the pad drives in menus.
     pub(super) menu: super::pad_menu::MenuCursor,
     /// The radial menu while its opener is held, and the page it stays on.
@@ -225,7 +227,14 @@ mod hardware {
         }
         pub(in crate::game) fn lend_output(&mut self, _: &mut Pads, _: PadId) {}
         pub(in crate::game) fn reclaim_output(&mut self, _: &mut Pads) {}
-        pub(in crate::game) fn play_rumbles(&mut self, _: &mut Pads, _: Option<PadId>) {}
+        pub(in crate::game) fn play_rumbles(
+            &mut self,
+            _: &mut Pads,
+            _: Option<PadId>,
+            _: bool,
+            _: bool,
+        ) {
+        }
         pub(in crate::game) fn report_status(&self, _: &mut Pads, _: Option<PadId>) {}
         pub(in crate::game) fn connected(&self, _: PadId) -> bool {
             false
@@ -817,16 +826,19 @@ impl Game<'_> {
             return;
         }
         // A long frame (a hitch) must not spin the view.
-        let (yaw, pitch) = gamepad::look_delta(
+        let seconds = seconds.min(0.1);
+        let turn = gamepad::look_delta(
             self.pad.state.right,
             settings,
-            seconds.min(0.1),
-            self.scoping(),
+            seconds,
+            self.camera_type.first_person() && self.scoping(),
         );
+        // The cinematic camera eases the stick's turn in and out, as it does the mouse's.
+        let (yaw, pitch) = self.pad.look.turn(turn, seconds, self.smooth_camera);
         if yaw == 0.0 && pitch == 0.0 {
             return;
         }
-        self.look_turn(f64::from(yaw / 0.15), f64::from(pitch / 0.15));
+        self.look_turn(yaw / 0.15, pitch / 0.15);
     }
 
     /// Vibrate the active pad, when vibration is on and the pad is the one
@@ -835,6 +847,13 @@ impl Game<'_> {
         let settings = &self.settings.controller;
         if !settings.enabled || !settings.vibration || !self.pad.in_use {
             return;
+        }
+        // Bedrock's own switch, off for a player who doesn't want every block to tick; the
+        // split's tick has its own, so either can be off without the other.
+        match rumble {
+            Rumble::BlockBroken if !settings.block_vibration => return,
+            Rumble::ItemStackSplit if !settings.split_vibration => return,
+            _ => {}
         }
         let Some(pulse) = rumble.pulse() else {
             return;
@@ -910,7 +929,8 @@ impl Game<'_> {
                     "enabled": self.settings.controller.enabled,
                     "glyphs": self.pad.style.name(),
                     "last_rumble": self.pad.last_rumble.map(|(why, p)| json!({
-                        "reason": why, "strong": p.strong, "weak": p.weak, "ms": p.millis,
+                        "reason": why, "strong": p.strong, "weak": p.weak,
+                        "triggers": p.triggers, "ms": p.millis,
                     })),
                     "in_use": self.pad.in_use,
                     "notice": self.split_hud.notice.showing().map(|(title, body)| {

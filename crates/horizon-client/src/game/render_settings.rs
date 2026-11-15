@@ -10,7 +10,7 @@ pub(super) struct FrameAttempt<K = FrameKey>(Option<K>);
 type FrameKey = (
     Option<horizon_client::gfx::FrameConfiguration>,
     PathBuf,
-    Option<Option<horizon_shader_api::Api>>,
+    Option<bool>,
 );
 
 impl<K: PartialEq> FrameAttempt<K> {
@@ -51,15 +51,11 @@ impl Game<'_> {
             ),
         )
     }
-    /// Under `HORIZON_HDR_FRAME=float` the frame follows what draws the picture
-    /// (docs/design/hdr-linear-light.md, "When it changes"): when HDR, Smooth Gradients or the
-    /// pick (unless refused) call for another frame than the renderer's, it is made again before
-    /// this frame draws. Without the switch a frame stays until the next start, as before.
+    /// The frame follows what draws the picture (docs/design/hdr-linear-light.md, "When it
+    /// changes"): when HDR or the pick (unless refused) call for another frame than the
+    /// renderer's, it is made again before this frame draws.
     pub(super) fn follow_frame(&mut self) {
-        if !native_shaders::linear_frame_switch()
-            || self.options.paced_by_split
-            || self.options.split_guest
-        {
+        if self.options.paced_by_split || self.options.split_guest {
             return;
         }
         let picked = shader_packs::picked_pack(&self.settings);
@@ -75,7 +71,7 @@ impl Game<'_> {
         let outcome = if available {
             native_shaders::outcome(&path)
         } else {
-            Some(None)
+            Some(false)
         };
         // The renderer's offer can change while the game runs (Vulkan's formats follow desktop
         // HDR and the window's output), and the frame with it.
@@ -100,7 +96,8 @@ impl Game<'_> {
     }
 
     /// The renderer made again on the same device from the resources loaded, keeping the
-    /// pipelines that come out the same (`adopt_renderer`, as after a lost device).
+    /// pipelines that come out the same and the world the old one holds (`Renderer::take_world`):
+    /// only what draws in the frame is made again, and no section is meshed again.
     fn rebuild_renderer(&mut self) -> Result<()> {
         let Some(window) = self.window.clone() else {
             return Ok(());
@@ -118,12 +115,14 @@ impl Game<'_> {
                 return Err(error);
             }
         };
+        let mut world_kept = false;
         if let Some(old) = &mut self.renderer {
             renderer.resize(old.config.width, old.config.height);
             renderer.screenshot = old.screenshot.take();
             renderer.screenshot_result = old.screenshot_result.take();
+            world_kept = renderer.take_world(old);
         }
-        self.adopt_renderer(renderer);
+        self.adopt(renderer, world_kept);
         log::info!(
             "Horizon: the renderer was made again for the frame the settings call for in {} ms",
             started.elapsed().as_millis()
@@ -242,16 +241,27 @@ impl Game<'_> {
     /// A renderer made again from the resources loaded takes over: what named the old one's
     /// atlas slots is forgotten, the world is meshed again, and the shader pack and the
     /// settings are applied again.
-    pub(super) fn adopt_renderer(&mut self, mut renderer: Renderer) {
-        // A new renderer starts with the vanilla column and without the world border's wall.
-        renderer.clear_sections(self.world.layout());
+    pub(super) fn adopt_renderer(&mut self, renderer: Renderer) {
+        self.adopt(renderer, false);
+    }
+
+    /// `adopt_renderer`; with `world_kept`, a renderer that took the old one's sections and far
+    /// tiles (`Renderer::take_world`): they and the meshes on their way stay.
+    fn adopt(&mut self, mut renderer: Renderer, world_kept: bool) {
+        if !world_kept {
+            // A new renderer starts with the vanilla column.
+            renderer.clear_sections(self.world.layout());
+        }
+        // And has no wall for the world border.
         self.border_renderer.invalidate();
         self.renderer = Some(renderer);
         self.forget_atlas_slots();
-        self.clear_lod();
-        self.pending_uploads.clear();
-        let context = self.worker_context();
-        self.streaming.reload_resources(&mut self.world, context);
+        if !world_kept {
+            self.clear_lod();
+            self.pending_uploads.clear();
+            let context = self.worker_context();
+            self.streaming.reload_resources(&mut self.world, context);
+        }
         self.native_shaders = native_shaders::NativeShaders::picking(&std::mem::take(
             &mut self.native_shaders.picked,
         ));
@@ -273,7 +283,6 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::FrameAttempt;
-    use horizon_shader_api::Api;
 
     #[test]
     fn failed_frame_attempt_waits_for_a_policy_or_setting_change() {
@@ -285,10 +294,10 @@ mod tests {
             ("8-bit", "p", None),
             // HDR output offered later, with HDR On: the frame is looked at again.
             ("float", "p", None),
-            ("float", "p", Some(Some(Api::V0_2))),
-            ("float", "p", Some(Some(Api::V0_2))),
-            ("float", "p", Some(None)),
-            ("float", "p", Some(None)),
+            ("float", "p", Some(true)),
+            ("float", "p", Some(true)),
+            ("float", "p", Some(false)),
+            ("float", "p", Some(false)),
             ("float", "q", None),
             ("8-bit", "q", None),
         ] {

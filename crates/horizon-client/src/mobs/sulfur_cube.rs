@@ -400,7 +400,6 @@ mod knockback_sync_tests {
     fn an_invisible_player_tempts_a_sulfur_cube_only_within_two_blocks() {
         use crate::mobs::goals::Cx;
         use crate::mobs::world::{test_player, with_test_world};
-        use horizon_core::random::LegacyRandom;
         let mut outcomes = Vec::new();
         if !with_test_world(&[], |w, _| {
             for invisible in [false, true] {
@@ -414,7 +413,7 @@ mod knockback_sync_tests {
                 kind.tempt = Arc::from(vec!["minecraft:iron_ingot".to_string()]);
                 let mut m = Mob::new(1, Arc::new(kind), Vec3::new(0.5, 64.0, 0.5), 0.0);
                 m.ai.goals.add(1, SulfurTempt { player: None });
-                let mut lr = LegacyRandom::new(0);
+                let mut lr = crate::mobs::world::level_random(0);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w: &world,
@@ -1513,7 +1512,9 @@ pub fn from_nbt(m: &mut Mob, tag: &horizon_world::nbt::Tag) {
     }
     // The saved Health, not the one the living load's Health Boost clamp cut
     // to the unsized maximum: vanilla sizes the cube before `setHealth`.
-    m.health = crate::save::float(tag.get("Health")).map_or(m.attrs.max_health, |h| h as f32);
+    m.health = crate::save::float(tag.get("Health"))
+        .map_or(m.attrs.max_health, |h| h as f32)
+        .min(super::finalize::loaded_max_health(m));
     m.extra.flag2 = int("wasOnGround").unwrap_or(0) != 0;
     m.extra.ints[3] = int("pickup_timer").unwrap_or(0);
     m.extra.scratch[3] = int("from_bucket").unwrap_or(0);
@@ -1550,7 +1551,7 @@ mod tnt_rule_tests {
                 m.extra.counter2 = 4; // loaded fuse 3
                 m.extra.ints[3] = 100;
                 m.extra.scratch[2] = 10;
-                let mut random = horizon_core::random::LegacyRandom::new(0);
+                let mut random = crate::mobs::world::level_random(0);
                 let mut events = Vec::new();
                 for remaining in [2, 1] {
                     assert!(m.tick(w, &mut random, &mut events));
@@ -1897,7 +1898,7 @@ mod mob_contact_tests {
                     m.no_gravity = true;
                     m.persistent = true;
                     m.extra.body = body.map(Into::into);
-                    let mut random = horizon_core::random::LegacyRandom::new(0);
+                    let mut random = crate::mobs::world::level_random(0);
                     let mut events = Vec::new();
                     assert!(m.tick(w, &mut random, &mut events));
                     let hits: Vec<_> = events

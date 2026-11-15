@@ -156,7 +156,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Čeka osvežavanje ekrana: nema kidanja, malo kašnjenja.",
   "Size of menus and the HUD.": "Veličina menija i HUD-a.",
   "Sets the options below together. Changing one makes it Custom.": "Zajedno postavlja opcije ispod. Promena jednog čini ga prilagođenim.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, vatra i sunčeva svetlost sijaju jače od belog. Potreban je HDR ekran.",
   "How bright highlights get. Auto: the peak your system reports.": "Kako svetli naglasci dobijaju. Automatski: vrhunac koji vaš sistem izveštava.",
   "How far mobs, crops and machines keep working. CPU time.": "Dokle rulje, usevi i mašine nastavljaju da rade. CPU vreme.",
   "How far away mobs and items are drawn, as a share of normal.": "Koliko su udaljene rulje i predmeti, kao udeo normalnog.",
@@ -491,5 +490,11 @@
   "Pack settings": "Podešavanja paketa",
   "Built-in settings": "Ugrađena podešavanja",
   "%s settings": "Podešavanja za %s",
-  "Settings made by the pack's author: they change only this pack.": "Podešavanja koja je napravio autor paketa: menjaju samo ovaj paket."
+  "Settings made by the pack's author: they change only this pack.": "Podešavanja koja je napravio autor paketa: menjaju samo ovaj paket.",
+  "horizon.options.block_vibration": "Хаптичка повратна информација из Bedrock-а",
+  "horizon.options.split_vibration": "Вибрација при дељењу гомиле",
+  "horizon.options.impulse_triggers": "Импулсни окидачи",
+  "A tick when you break a block, as in Bedrock.": "Када разбијете блок, он вибрира, као у Bedrock-у.",
+  "A short buzz when you split a stack, as in Bedrock.": "Кратка вибрација када поделите гомилу, као у Bedrock-у.",
+  "An Xbox One controller's triggers buzz with its handles.": "Окидачи Xbox One контролера вибрирају заједно са његовим ручкама."
 }

@@ -30,7 +30,7 @@ pub struct NativeSky {
 /// terrain.wgsl's sky with every name it declares (and `globals`) prefixed.
 fn vanilla_sky() -> String {
     let text = [
-        include_str!("../hdr_light.wgsl"),
+        super::wgsl_prefix::HDR_LIGHT,
         section(TERRAIN, "struct Globals {", "@group(0) @binding(1)"),
         section(TERRAIN, "fn linear_fog(", "fn apply_fog("),
         section(TERRAIN, "struct SkyOut {", "// rendertype_lines"),
@@ -39,13 +39,13 @@ fn vanilla_sky() -> String {
     prefixed(&text, PREFIX)
 }
 
-/// The sky shader for the pack's sky stage `source`, of the line `api`, onto a frame that holds
-/// linear light when `linear`.
-fn shader_source(source: &str, (api, linear): (horizon_shader_api::Api, bool)) -> String {
+/// The sky shader for the pack's sky stage `source`, onto a frame that holds linear light when
+/// `linear`.
+fn shader_source(source: &str, linear: bool) -> String {
     format!(
         "{source}\n// Horizon's sky (terrain.wgsl)\n{}{}{PACK_ENTRY}",
         vanilla_sky(),
-        super::native_post::line_helpers(api, linear)
+        super::native_post::line_helpers(linear)
     )
 }
 
@@ -103,7 +103,7 @@ fn build(
     frame: &NativeFrame,
     stage: &CheckedStage,
 ) -> Result<(naga::Module, wgpu::PipelineLayout), String> {
-    let text = shader_source(&stage.source, (frame.api, frame.linear));
+    let text = shader_source(&stage.source, frame.linear);
     let module = naga::front::wgsl::parse_str(&text)
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))?;
     let mut groups: [Option<&wgpu::BindGroupLayout>; GROUP as usize + 1] = Default::default();
@@ -132,7 +132,7 @@ impl NativeSky {
         let present = present_constants(&module, constants);
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&stage.label),
+            label: Some(&super::dx12_compiler::module_label(&stage.label)),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
         });
         let pipeline = pipeline(
@@ -160,13 +160,91 @@ impl NativeSky {
     }
 }
 
+/// What the renderer hands the pack for its sky's pass of its own (`NativePack::draw_sky_pass`).
+pub struct SkyPass<'a> {
+    pub device: &'a wgpu::Device,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// The world's colour and depth, and the colour's format.
+    pub target: super::timing::Target<'a>,
+    pub depth: &'a wgpu::TextureView,
+    /// The world's clear colour.
+    pub clear: wgpu::Color,
+    /// The terrain's group 0.
+    pub globals: &'a wgpu::BindGroup,
+}
+
+impl super::native_pack::NativePack {
+    /// In a timed frame (`start_frame` said so), the pack's sky in a pass of its own, which
+    /// clears the world's colour and depth first so that the world pass loads them.
+    pub fn draw_sky_pass(&mut self, sky_pass: SkyPass<'_>) {
+        let SkyPass {
+            device,
+            encoder,
+            target: (view, format),
+            depth,
+            clear,
+            globals,
+        } = sky_pass;
+        let Some(sky) = &self.sky else {
+            return;
+        };
+        if let Some(t) = &mut self.timing {
+            t.mark(device, encoder, (view, format));
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(&sky.label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: self.timing.as_mut().and_then(|t| t.writes(&sky.label)),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, globals, &[]);
+        sky.draw(&mut pass, &self.frame);
+    }
+
+    /// The pack's sky inside the world pass, whose group 0 is the terrain's. False when the
+    /// pack has no sky stage, for the renderer's own.
+    pub fn draw_sky(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(sky) = &self.sky else {
+            return false;
+        };
+        sky.draw(pass, &self.frame);
+        true
+    }
+
+    /// The pack's sky stage draws the sun itself, so the renderer leaves out vanilla's.
+    pub fn hides_sun(&self) -> bool {
+        self.sky.is_some() && !self.vanilla_sun
+    }
+
+    /// The pack's sky stage draws the stars itself, so the renderer leaves out vanilla's.
+    pub fn hides_stars(&self) -> bool {
+        self.sky.is_some() && !self.vanilla_stars
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use horizon_shader_api::{Frame as FrameInputs, MANIFEST, Pack, StageKind, check};
 
     fn stage(sky: &str) -> CheckedStage {
-        let mut manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.1\"\n\
+        let mut manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
             [sky]\nfile = \"sky.wgsl\"\n"
             .to_owned();
         if sky.contains("gain") {
@@ -199,7 +277,7 @@ mod tests {
         // A pack may use the renderer's names for its own things.
         let own = "override gain: f32;\nconst PI: f32 = 3.0;\nfn view_ray() -> f32 { return PI; }\n\
             fn sky(input: SkyInput) -> vec4<f32> { return input.color * gain * view_ray(); }\n";
-        let text = shader_source(&stage(own).source, (horizon_shader_api::Api::V0_1, false));
+        let text = shader_source(&stage(own).source, false);
         let module = naga::front::wgsl::parse_str(&text).unwrap_or_else(|e| {
             panic!("{}", e.emit_to_string(&text));
         });
@@ -211,18 +289,9 @@ mod tests {
         .unwrap();
     }
 
-    /// Vanilla's sky and two packs over the same globals: one that returns its input draws
-    /// vanilla's pixels, one that inverts them draws the inverse (and stays opaque).
-    #[test]
-    fn a_pack_gets_vanilla_s_colour_and_draws_opaque() {
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
-            return;
-        };
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    /// The terrain's group 0, the globals a sky reads.
+    fn globals_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -234,7 +303,77 @@ mod tests {
                 },
                 count: None,
             }],
-        });
+        })
+    }
+
+    fn frame(device: &wgpu::Device) -> NativeFrame {
+        NativeFrame::new(device, None, Vec::new(), Default::default(), None, false)
+    }
+
+    /// A pack names its stages, and the module's label comes from that name: one with a
+    /// colon, or one starting like a command-line option, still compiles on Vulkan and on
+    /// DirectX 12 with both its compilers (#16258). DXC needs `dxcompiler.dll` beside the
+    /// test or on `PATH`; a device this machine lacks is skipped.
+    #[test]
+    fn a_stage_s_name_does_not_stop_it_compiling() {
+        for (backends, compiler, name) in [
+            (wgpu::Backends::VULKAN, Default::default(), "Vulkan"),
+            (
+                wgpu::Backends::DX12,
+                wgpu::Dx12Compiler::Fxc,
+                "DirectX 12, FXC",
+            ),
+            (
+                wgpu::Backends::DX12,
+                wgpu::Dx12Compiler::default_dynamic_dxc(),
+                "DirectX 12, DXC",
+            ),
+        ] {
+            let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+            desc.backends = backends;
+            desc.backend_options.dx12.shader_compiler = compiler;
+            let instance = wgpu::Instance::new(desc);
+            let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default()))
+            else {
+                eprintln!("{name}: skipped");
+                continue;
+            };
+            let (device, _) =
+                pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+            let (globals, frame) = (globals_layout(&device), frame(&device));
+            for (i, label) in ["Sky: dusk", "-dusk", "/E"].into_iter().enumerate() {
+                // A shader of its own each: a device compiles the same shader only once.
+                let mut stage = stage(&format!(
+                    "fn sky(input: SkyInput) -> vec4<f32> {{ return input.color * {i}.0; }}\n"
+                ));
+                stage.label = label.to_owned();
+                let format = wgpu::TextureFormat::Rgba8Unorm;
+                let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+                let sky = NativeSky::new(&device, &globals, &frame, &stage, &[], format);
+                let internal = pollster::block_on(internal.pop());
+                assert!(
+                    sky.is_ok() && internal.is_none(),
+                    "{name}, {label:?}: {internal:?}"
+                );
+                assert_eq!(sky.unwrap().label, label);
+            }
+            eprintln!("{name}: compiled");
+        }
+    }
+
+    /// Vanilla's sky and two packs over the same globals: one that returns its input draws
+    /// vanilla's pixels within an 8-bit step (decoded on the way in, encoded on the way out), one
+    /// that halves their light draws that (and stays opaque).
+    #[test]
+    fn a_pack_gets_vanilla_s_colour_and_draws_opaque() {
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let globals_layout = globals_layout(&device);
         let mut globals: super::super::Globals = bytemuck::Zeroable::zeroed();
         globals.inverse_view = glam::Mat4::IDENTITY.to_cols_array_2d();
         globals.misc = [0.0, 0.0, 1.0, 1.0];
@@ -256,14 +395,7 @@ mod tests {
                 resource: globals_buffer.as_entire_binding(),
             }],
         });
-        let frame = NativeFrame::new(
-            &device,
-            None,
-            Vec::new(),
-            Default::default(),
-            None,
-            (horizon_shader_api::Api::V0_1, false),
-        );
+        let frame = frame(&device);
         queue.write_buffer(
             &frame.buffer,
             0,
@@ -373,17 +505,22 @@ mod tests {
         };
         let same = stage("fn sky(input: SkyInput) -> vec4<f32> { return input.color; }\n");
         let vanilla = draw(&same, true);
-        assert_eq!(draw(&same, false), vanilla);
+        for (got, want) in draw(&same, false).iter().zip(&vanilla) {
+            assert!(got.abs_diff(*want) <= 1, "{got} {want}");
+        }
         // The top row looks up into the sky disc, the bottom one down into the fog.
         assert_ne!(vanilla[..4], vanilla[vanilla.len() - 4..]);
-        let inverse = stage(
-            "override gain: f32;\nfn sky(input: SkyInput) -> vec4<f32> { return vec4(vec3(gain) - input.color.rgb, 0.25); }\n",
+        let half = stage(
+            "override gain: f32;\nfn sky(input: SkyInput) -> vec4<f32> { return vec4(input.color.rgb * gain * 0.5, 0.25); }\n",
         );
-        let inverted = draw(&inverse, false);
-        for (got, want) in inverted.chunks(4).zip(vanilla.chunks(4)) {
+        let halved = draw(&half, false);
+        // Half the light is 0.5^(1/2.2) of the encoded value.
+        let encoded_half = 0.5f32.powf(1.0 / 2.2);
+        for (got, want) in halved.chunks(4).zip(vanilla.chunks(4)) {
             assert_eq!(got[3], 255);
             for i in 0..3 {
-                assert!(got[i].abs_diff(255 - want[i]) <= 1, "{got:?} {want:?}");
+                let want = (f32::from(want[i]) * encoded_half).round() as u8;
+                assert!(got[i].abs_diff(want) <= 1, "{got:?} {want}");
             }
         }
     }

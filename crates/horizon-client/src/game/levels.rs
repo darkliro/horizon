@@ -71,6 +71,9 @@ pub(super) struct Parked {
     rockets: horizon_client::join_seq::JoinList<fireworks::Rocket>,
     ominous_spawners: Vec<ominous_item_spawner::OminousItemSpawner>,
     tnts: horizon_client::join_seq::JoinList<tnt::PrimedTnt>,
+    /// Its orbs', TNT's and falling blocks' place in the tick order beyond
+    /// their joins (`ordered_tick::TickRestarts`).
+    tick_restarts: super::ordered_tick::TickRestarts,
     hoppers: HashMap<(i32, i32, i32), machines::HopperState>,
     pub(super) mobs: horizon_client::join_seq::JoinList<Mob>,
     /// The entity ids of the level's fence knots (`knot_ids`).
@@ -143,9 +146,26 @@ pub(super) struct Levels {
     /// The levels whose open the mods heard (`native_level_load`), each to
     /// be told closed once.
     heard_open: Vec<Dim>,
+    /// `max-chained-neighbor-updates` of a dedicated server, for the levels it opens;
+    /// `None` is the default every other server runs with.
+    max_chained_neighbor_updates: Option<i32>,
 }
 
 impl Levels {
+    /// Sets the neighbour update chain limit of the levels made from now on.
+    pub(super) fn set_max_chained_neighbor_updates(&mut self, max: i32) {
+        self.max_chained_neighbor_updates = Some(max);
+    }
+
+    /// The block ticks of a new level, with the server's neighbour update chain limit.
+    pub(super) fn new_ticks(&self, random_tick_seed: i32) -> Ticks {
+        let mut ticks = Ticks::new(random_tick_seed);
+        if let Some(max) = self.max_chained_neighbor_updates {
+            ticks.set_max_chained_neighbor_updates(max);
+        }
+        ticks
+    }
+
     /// Clear every parked level and dimensions recorded as heard open.
     pub(super) fn clear(&mut self) {
         self.parked.clear();
@@ -269,7 +289,7 @@ impl Game<'_> {
             streaming,
             locator,
             save,
-            block_ticks: Ticks::new(self.level.seed as i32),
+            block_ticks: self.levels.new_ticks(self.level.seed as i32),
             tick_chunks: Default::default(),
             tickets,
             random_tick_sections: Default::default(),
@@ -293,6 +313,7 @@ impl Game<'_> {
             rockets: Default::default(),
             ominous_spawners: Vec::new(),
             tnts: Default::default(),
+            tick_restarts: Default::default(),
             hoppers: HashMap::new(),
             mobs: Default::default(),
             knot_ids: HashMap::new(),
@@ -443,6 +464,7 @@ impl Game<'_> {
         swap(&mut self.rockets, &mut p.rockets);
         swap(&mut self.ominous_spawners, &mut p.ominous_spawners);
         swap(&mut self.tnts, &mut p.tnts);
+        swap(&mut self.ordered.restarts, &mut p.tick_restarts);
         swap(&mut self.hoppers, &mut p.hoppers);
         swap(&mut self.mobs, &mut p.mobs);
         swap(&mut self.knot_ids, &mut p.knot_ids);

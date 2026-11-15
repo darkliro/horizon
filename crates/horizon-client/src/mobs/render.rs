@@ -12,6 +12,11 @@ use horizon_core::geometry::trig::Mth;
 use std::borrow::Cow;
 use std::f32::consts::PI;
 
+// The invisible body a viewer still sees (`Entity.isInvisibleTo`), beside this file.
+#[path = "invisible_body.rs"]
+mod invisible_body;
+pub use invisible_body::render_seen_invisible;
+
 /// A texture lookup into the shared atlas (name without namespace -> uv rect).
 pub type Atlas<'a> = &'a dyn Fn(&str) -> Option<[f32; 4]>;
 
@@ -1512,6 +1517,7 @@ pub fn render_with(
     extra: &[(&Part, [f32; 4], u32, u32, bool)],
     out: &mut Vec<Vertex>,
 ) {
+    let paint = Some(body_color(m, alpha));
     // The invisibility effect hides the model (a drinking wandering trader);
     // an illusioner shows its four mirror images instead.
     if super::trader::is_invisible(m) {
@@ -1522,23 +1528,13 @@ pub fn render_with(
                 let shifted =
                     camera - glam::DVec3::new(off[0] + w[0], off[1] + w[1], off[2] + w[2]);
                 let base = base_transform(m, alpha, shifted);
-                render_visible(m, alpha, base, atlas, light, data, extra, true, out, None);
+                render_visible(m, alpha, base, atlas, light, data, extra, paint, out, None);
             }
         }
         return;
     }
-    render_visible(
-        m,
-        alpha,
-        base_transform(m, alpha, camera),
-        atlas,
-        light,
-        data,
-        extra,
-        true,
-        out,
-        None,
-    );
+    let base = base_transform(m, alpha, camera);
+    render_visible(m, alpha, base, atlas, light, data, extra, paint, out, None);
 }
 /// `render` with the model's ordinary draws posed on the GPU when the mob
 /// allows it (`super::skin`): the same picture, no vertices on the CPU.
@@ -1565,7 +1561,7 @@ pub fn render_skinned(
         light,
         data,
         &[],
-        true,
+        Some(body_color(m, alpha)),
         out,
         Some(skin),
     );
@@ -1825,7 +1821,7 @@ pub fn render_layers(
     out: &mut Vec<Vertex>,
 ) {
     let base = base_transform(m, alpha, camera);
-    render_visible(m, alpha, base, atlas, light, data, extra, false, out, None);
+    render_visible(m, alpha, base, atlas, light, data, extra, None, out, None);
 }
 /// A mob drawn under `origin` instead of at its position (the spinning mob
 /// of `SpawnerRenderer.submitEntityInSpawner`).
@@ -1839,7 +1835,8 @@ pub fn render_posed(
     out: &mut Vec<Vertex>,
 ) {
     let base = base_transform_at(m, alpha, origin);
-    render_visible(m, alpha, base, atlas, light, data, &[], true, out, None);
+    let paint = Some(body_color(m, alpha));
+    render_visible(m, alpha, base, atlas, light, data, &[], paint, out, None);
 }
 /// The custom model's key of a body model: `main` is the wide player model, `kind.model`.
 fn cem_key(model_key: &str) -> &str {
@@ -1955,7 +1952,8 @@ fn render_visible(
     light: u32,
     data: &MobData,
     extra: &[(&Part, [f32; 4], u32, u32, bool)],
-    body_visible: bool,
+    // `submit`'s `tintedColor` to draw the body in, or `None` for its layers only.
+    paint: Option<u32>,
     out: &mut Vec<Vertex>,
     skin: Option<&mut super::skin::Skin>,
 ) {
@@ -2087,7 +2085,7 @@ fn render_visible(
                 None
             }
         });
-        if body_visible && let Some(uv) = uv {
+        if let (Some(tint), Some(uv)) = (paint, uv) {
             let start = out.len();
             put(
                 skin,
@@ -2096,7 +2094,7 @@ fn render_visible(
                 &poses,
                 uv,
                 0.0,
-                body_color(m, alpha),
+                tint,
                 light,
                 body_overlay(m, alpha),
                 out,
@@ -2109,13 +2107,14 @@ fn render_visible(
                     &poses,
                     glow,
                     0.0,
-                    body_color(m, alpha),
+                    tint,
                     FULL_BRIGHT,
                     0,
                     out,
                 );
             }
-            if translucent_body(m) {
+            // A body below full alpha (`forceTransparent`'s 654311423) blends too.
+            if translucent_body(m) || tint >> 24 != 0xFF {
                 mark_oit(&mut out[start..]);
             }
         }
@@ -2236,7 +2235,7 @@ fn render_visible(
             }
         }
         // The eyes render type's glowing eyes also shine in HDR output, at
-        // `EYES_TIER` in the overlay's high bits (entity.wgsl fs_hdr_mark).
+        // `EYES_TIER` in the overlay's high bits (entity.wgsl hdr_entity_mark).
         if layer.full_bright && m.species() != Species::Warden {
             for vertex in &mut out[start..] {
                 vertex.normal = [0; 4];

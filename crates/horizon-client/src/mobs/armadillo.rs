@@ -8,8 +8,8 @@
 use super::{
     Damage, DamageKind, Mob, MobEvent, MobWorld, Species, Who,
     goals::{
-        Breed, Cx, Float, Goal, LOOK, LookAtPlayer, MOVE, Panic, RandomLookAround, Stroll, Tempt,
-        goal_clone,
+        AnimalPanic, Breed, Cx, Float, Goal, LOOK, LookAtPlayer, MOVE, RandomLookAround, Stroll,
+        Tempt, goal_clone,
     },
 };
 use horizon_core::{geometry::Vec3, random::RandomSource};
@@ -55,7 +55,7 @@ pub struct State {
 }
 
 pub fn register(m: &mut Mob) {
-    let mut panic = Panic::new(2.0);
+    let mut panic = AnimalPanic::new(2.0);
     panic.environmental = true;
     let g = &mut m.ai.goals;
     g.add(0, Float);
@@ -70,6 +70,40 @@ pub fn register(m: &mut Mob) {
     g.add(5, Stroll::avoiding_water(1.0));
     g.add(6, LookAtPlayer::new(6.0));
     g.add(7, RandomLookAround::default());
+    // LivingEntity(): `makeBrain` after the yaw; then Armadillo(), after
+    // `setCanFloat`, `scuteTime = pickNextScuteDropTime()`. All from the
+    // armadillo's own random.
+    delay_sensors(m);
+    m.extra.egg_time = super::ai::next_scute_time(m);
+}
+
+/// `Armadillo.readAdditionalSaveData`, after `LivingEntity`'s, which makes the
+/// brain again (its sensors delayed) when the tag has a `Brain`: the saved
+/// state through `switchToState` (`onSyncedDataUpdated` then restarts the time
+/// in that state), idle for a save that names none; then the time to the next
+/// scute when saved. Absent, it stays the constructor's draw: no second draw
+/// from the armadillo's random.
+pub fn load(m: &mut Mob, brain: bool, state: Option<&str>, scute_time: Option<i32>) {
+    if brain {
+        delay_sensors(m);
+    }
+    set_state(m, state_by_name(state));
+    if let Some(t) = scute_time {
+        m.extra.egg_time = t;
+    }
+}
+
+/// `Brain.Provider.makeBrain`: `Sensor.randomlyDelayStart` for each sensor of
+/// `BRAIN_PROVIDER`, in its order, from the armadillo's own random: nearest
+/// living entities, hurt by, food temptations and nearest adult (`nextInt(20)`
+/// each), then the scare sensor (`nextInt(5)`), whose draw is the time to its
+/// first scan. The constructor runs it, and a load whose tag has a `Brain`
+/// (`LivingEntity.readAdditionalSaveData` makes the brain again).
+pub fn delay_sensors(m: &mut Mob) {
+    for _ in 0..4 {
+        let _ = m.random.next_int_bound(20);
+    }
+    m.extra.armadillo.sensor = m.random.next_int_bound(5).unwrap_or(0);
 }
 
 /// `AdultSensor` and `BabyFollowAdult.create(5..16, 1.25)`: a baby with no walk
@@ -503,7 +537,7 @@ fn animate(m: &mut Mob) {
 
 /// `ArmadilloAi.ArmadilloPanic`: it unrolls, then runs.
 #[derive(Clone, Debug)]
-struct ArmadilloPanic(Panic);
+struct ArmadilloPanic(AnimalPanic);
 impl Goal for ArmadilloPanic {
     goal_clone!();
     fn flags(&self) -> u8 {
@@ -522,8 +556,14 @@ impl Goal for ArmadilloPanic {
         roll_out(m, cx.events);
         self.0.start(m, cx);
     }
+    fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.0.tick(m, cx);
+    }
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.0.stop(m, cx);
+    }
+    fn every_tick(&self) -> bool {
+        self.0.every_tick()
     }
 }
 /// A behaviour of the IDLE activity: `ArmadilloAi.updateActivity` picks
@@ -685,7 +725,7 @@ mod tests {
     fn run_goals(m: &mut Mob, w: &MobWorld, ticks: u32) -> Vec<MobEvent> {
         let mut events = Vec::new();
         let mut goals = std::mem::take(&mut m.ai.goals);
-        let mut lr = horizon_core::random::LegacyRandom::new(0);
+        let mut lr = crate::mobs::world::level_random(0);
         let mut cx = Cx {
             w,
             lr: &mut lr,
@@ -825,7 +865,7 @@ mod tests {
         baby.extra.age = -24000;
         crate::mobs::world::with_test_world(&[], |w, _| {
             let mut events = Vec::new();
-            let mut lr = horizon_core::random::LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut cx = Cx {
                 w,
                 lr: &mut lr,
@@ -948,5 +988,63 @@ mod panic_environmental_tests {
             assert!(environmental(kind), "{id}");
         }
         assert!(!environmental(DamageKind::Drown));
+    }
+}
+
+#[cfg(test)]
+mod armadillo_scute_time_tests {
+    use crate::entity_nbt::mob_from_nbt_with_random;
+    use crate::mobs::{Mob, MobType};
+    use horizon_core::{
+        geometry::Vec3,
+        random::{EntityRandom, LegacyRandom, RandomSource},
+    };
+    use horizon_world::nbt::Tag;
+    use std::{collections::HashMap, sync::Arc};
+
+    /// #15784: `Armadillo`'s constructor draws `scuteTime` from its own random, and
+    /// `readAdditionalSaveData` replaces it only with a saved `scute_time`. A load without the
+    /// key keeps the constructor's draw (never 0, #12559) and draws nothing more.
+    #[test]
+    fn an_armadillo_loaded_without_scute_time_keeps_the_constructors_draw() {
+        let ran = crate::mobs::world::with_test_world(&[], |_, all| {
+            check(Arc::new(all.types["minecraft:armadillo"].clone()));
+        });
+        if !ran {
+            eprintln!("Prepared mob data unavailable; the armadillo load did not run");
+        }
+    }
+
+    fn check(armadillo: Arc<MobType>) {
+        let types: HashMap<String, Arc<MobType>> =
+            [("minecraft:armadillo".to_string(), armadillo.clone())].into();
+        let random = || EntityRandom::own(LegacyRandom::new(15_784));
+        let built = Mob::with_random(1, armadillo, Vec3::ZERO, 0.0, random());
+        assert!(
+            (6000..12000).contains(&built.extra.egg_time),
+            "the constructor's pickNextScuteDropTime: {}",
+            built.extra.egg_time
+        );
+        for (saved, expected) in [(None, built.extra.egg_time), (Some(4321), 4321)] {
+            let mut tag = Tag::compound([
+                ("id", Tag::String("minecraft:armadillo".into())),
+                (
+                    "Pos",
+                    Tag::List([0.5f64, 64.0, 0.5].map(|v| Tag::Double(v.to_bits())).into()),
+                ),
+            ]);
+            if let (Some(t), Tag::Compound(map)) = (saved, &mut tag) {
+                map.insert("scute_time".into(), Tag::Int(t));
+            }
+            let mut loaded = mob_from_nbt_with_random(&tag, &types, 1, None, random()).unwrap();
+            assert_eq!(loaded.extra.egg_time, expected, "saved {saved:?}");
+            // The random is where the constructor left it: the load drew nothing more.
+            let mut after = built.random.clone();
+            assert_eq!(
+                loaded.random.next_int(),
+                after.next_int(),
+                "saved {saved:?}"
+            );
+        }
     }
 }

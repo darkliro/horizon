@@ -241,10 +241,6 @@
   "Peak Brightness": "Peak Hellegkeet",
   "Black Level": "Black Niveau",
   "UI Brightness": "UI Hellegkeet",
-  "HDR Lighting": "HDR-Beliichtung",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Liichtquellen, d'Sonn a Sonneliicht strahlen iwwer Wäiss eraus. Aus: just wéi SDR.",
-  "Smooth Gradients": "Glat Gradiente",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-Bit-Frame: däischter Himmel a Schatten bilden keng Bänner. E bësse méi VRAM. Nächsten Start.",
   "Battery Mode": "Batterie Modus",
   "Graphics API": "Grafik API",
   "Translucent Batching": "Duerchsichteg Batching",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Waart op d'Erfrëschung vum Display: kee räissen, e bësse latency.",
   "Size of menus and the HUD.": "Gréisst vun de Menüen an den HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Setzt d'Optiounen hei ënnen zesummen. Änneren engem mécht et Benotzerdefinéiert.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, Feier a Sonneliicht blénken méi hell wéi wäiss. Braucht en HDR Display.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Hieft Schatten op d'däischste Schwaarz vun Ärem Display. 0: richtegt Schwaarz, keen Hiewen.",
   "How bright highlights get. Auto: the peak your system reports.": "Wéi hell Highlights kréien. Auto: den Héichpunkt Äre System bericht.",
   "How bright white looks in the world. Auto: your desktop's white.": "Wéi hell Wäiss an der Welt ausgesäit. Auto: d'Wäiss vun Ärem Desktop.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Markéierer dobäisetzen",
   "horizon.studio.topbar.clear_keyframes": "🗑 Keyframen läschen",
   "horizon.studio.topbar.timeline_hud": "⏱ Zäitachs",
-  "horizon.studio.topbar.split_scene": "Szen splécken"
+  "horizon.studio.topbar.split_scene": "Szen splécken",
+  "horizon.options.block_vibration": "Haptesche Rückmeldung vum Bedrock",
+  "horizon.options.split_vibration": "Vibratioun beim Deelen vun engem Stack",
+  "horizon.options.impulse_triggers": "Impulstrigger",
+  "A tick when you break a block, as in Bedrock.": "Wann s du e Block ofbaust, vibréiert en, wéi am Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Eng kuerz Vibratioun, wann Dir e Stack deelt, wéi am Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "D'Triggere vun engem Xbox One Controller vibréieren zesumme mat senge Grëffer."
 }

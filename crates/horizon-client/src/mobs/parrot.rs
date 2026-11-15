@@ -6,7 +6,7 @@
 use super::{Mob, MobEvent, MobWorld, Species, control::MoveKind, nav::NavKind, path::PathType};
 use horizon_core::{
     geometry::Vec3,
-    random::{LegacyRandom, RandomSource},
+    random::{LevelRandom, RandomSource},
 };
 
 /// `Parrot.MOB_SOUND_MAP` (the happy ghast's is `SoundEvents.EMPTY`: "").
@@ -71,7 +71,7 @@ fn imitation(species: Species) -> Option<&'static str> {
 }
 
 /// `Parrot.getPitch`.
-fn pitch(random: &mut LegacyRandom) -> f32 {
+fn pitch(random: &mut impl RandomSource) -> f32 {
     (random.next_float() - random.next_float()) * 0.2 + 1.0
 }
 
@@ -81,7 +81,7 @@ fn pitch(random: &mut LegacyRandom) -> f32 {
 pub fn ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     if let Some(at) = m.extra.party_jukebox {
@@ -102,7 +102,7 @@ pub fn ai_step(
 fn imitate_nearby_mobs(
     m: &Mob,
     w: &MobWorld,
-    random: &mut LegacyRandom,
+    random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     if !m.alive() || m.silent || random.next_int_bound(2).unwrap_or(1) != 0 {
@@ -135,7 +135,7 @@ fn imitate_nearby_mobs(
 /// from in vanilla's order. Returns the sound, its volume and its pitch; the
 /// happy ghast's imitation is silent (`""`).
 pub fn shoulder_sound(
-    random: &mut LegacyRandom,
+    random: &mut impl RandomSource,
     player_alive: bool,
     player_silent: bool,
     peaceful: bool,
@@ -283,6 +283,7 @@ fn tree_pos(m: &Mob, w: &MobWorld) -> Option<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::mobs::sensor_scan_tests::kind;
+    use horizon_core::random::LegacyRandom;
     use std::sync::Arc;
 
     fn parrot() -> Mob {

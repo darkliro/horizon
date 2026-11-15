@@ -241,10 +241,6 @@
   "Peak Brightness": "Яктылык",
   "Black Level": "Кара дәрәҗә",
   "UI Brightness": "UI яктылыгы",
-  "HDR Lighting": "HDR яктырту",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Яктылык чыганаклары, кояш һәм кояш нуры актан артык яктыра. Сүнгән: SDR кебек үк.",
-  "Smooth Gradients": "Шома градиентлар",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-бит кадр: караңгы күк һәм күләгәләр полосалар ясамый. Бераз күбрәк VRAM. Киләсе җибәрүдә.",
   "Battery Mode": "Батарея режимы",
   "Graphics API": "Графика API",
   "Translucent Batching": "Трансценталь бәйләү",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Дисплейның яңарышын көтә: ертылмый, бераз тоткарлык.",
   "Size of menus and the HUD.": "Меню һәм HUD күләме.",
   "Sets the options below together. Changing one makes it Custom.": "Түбәндәге вариантларны бергә куя. Берсен үзгәртү аны гадәтләндерә.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Лава, ут һәм кояш нурлары акка караганда яктырак балкый. HDR дисплей кирәк.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Күләгәләрне дисплейыгызның иң караңгы карасына күтәрә. 0: чын кара, күтәрү юк.",
   "How bright highlights get. Auto: the peak your system reports.": "Нинди якты күренешләр. Авто: сезнең система хәбәр итә.",
   "How bright white looks in the world. Auto: your desktop's white.": "Дөньяда ак төснең никадәр якты күренүе. Авто: эш өстәлегезнең аклыгы.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Маркер өстәү",
   "horizon.studio.topbar.clear_keyframes": "🗑 Көйләү нокталарын чистарту",
   "horizon.studio.topbar.timeline_hud": "⏱ Вакыт сызыгы",
-  "horizon.studio.topbar.split_scene": "Күренешне бүлү"
+  "horizon.studio.topbar.split_scene": "Күренешне бүлү",
+  "horizon.options.block_vibration": "Bedrockтан хаптик кире элемтә",
+  "horizon.options.split_vibration": "Өемне бүлү тибрәнүе",
+  "horizon.options.impulse_triggers": "Импульс триггерлары",
+  "A tick when you break a block, as in Bedrock.": "Блок ватканда ул Bedrock кебек тибрәнә.",
+  "A short buzz when you split a stack, as in Bedrock.": "Өемне бүлгәндә кыска гына тибрәнә, Bedrockтагы кебек.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One контроллеры триггерлары аның тоткычлары белән бергә тибрәнә."
 }

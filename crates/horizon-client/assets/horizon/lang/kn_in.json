@@ -241,10 +241,6 @@
   "Peak Brightness": "ಗರಿಷ್ಠ ಹೊಳಪು",
   "Black Level": "ಕಪ್ಪು ಮಟ್ಟ",
   "UI Brightness": "UI ಪ್ರಕಾಶಮಾನ",
-  "HDR Lighting": "HDR ಲೈಟಿಂಗ್",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "ಬೆಳಕಿನ ಮೂಲಗಳು, ಸೂರ್ಯ ಮತ್ತು ಸೂರ್ಯನ ಬೆಳಕು ಬಿಳಿಯನ್ನು ಮೀರಿ ಹೊಳೆಯುತ್ತವೆ. ಆಫ್: SDR ನಂತೆಯೇ.",
-  "Smooth Gradients": "ನಯವಾದ ಗ್ರೇಡಿಯಂಟ್‌ಗಳು",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-ಬಿಟ್ ಫ್ರೇಮ್: ಕಪ್ಪು ಆಕಾಶ ಮತ್ತು ನೆರಳುಗಳಲ್ಲಿ ಪಟ್ಟಿಗಳು ಕಾಣುವುದಿಲ್ಲ. ಸ್ವಲ್ಪ ಹೆಚ್ಚು VRAM. ಮುಂದಿನ ಪ್ರಾರಂಭ.",
   "Battery Mode": "ಬ್ಯಾಟರಿ ಮೋಡ್",
   "Graphics API": "ಗ್ರಾಫಿಕ್ಸ್ API",
   "Translucent Batching": "ಅರೆಪಾರದರ್ಶಕ ಬ್ಯಾಚಿಂಗ್",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "ಡಿಸ್‌ಪ್ಲೇಯ ರಿಫ್ರೆಶ್‌ಗಾಗಿ ಕಾಯುತ್ತಿದೆ: ಯಾವುದೇ ಹರಿದಿಲ್ಲ, ಸ್ವಲ್ಪ ಸುಪ್ತತೆ.",
   "Size of menus and the HUD.": "ಮೆನುಗಳ ಗಾತ್ರ ಮತ್ತು HUD.",
   "Sets the options below together. Changing one makes it Custom.": "ಕೆಳಗಿನ ಆಯ್ಕೆಗಳನ್ನು ಒಟ್ಟಿಗೆ ಹೊಂದಿಸುತ್ತದೆ. ಒಂದನ್ನು ಬದಲಾಯಿಸುವುದು ಅದನ್ನು ಕಸ್ಟಮ್ ಮಾಡುತ್ತದೆ.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "ಲಾವಾ, ಬೆಂಕಿ ಮತ್ತು ಸೂರ್ಯನ ಬೆಳಕು ಬಿಳಿಗಿಂತ ಪ್ರಕಾಶಮಾನವಾಗಿ ಹೊಳೆಯುತ್ತದೆ. HDR ಡಿಸ್ಪ್ಲೇ ಅಗತ್ಯವಿದೆ.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "ನೆರಳುಗಳನ್ನು ನಿಮ್ಮ ಡಿಸ್‌ಪ್ಲೇಯ ಕಪ್ಪು ಮಟ್ಟಕ್ಕೆ ಎತ್ತುತ್ತದೆ. 0: ನಿಜವಾದ ಕಪ್ಪು, ಎತ್ತುವಿಕೆ ಇಲ್ಲ.",
   "How bright highlights get. Auto: the peak your system reports.": "ಪ್ರಕಾಶಮಾನವಾದ ಮುಖ್ಯಾಂಶಗಳು ಹೇಗೆ ಸಿಗುತ್ತವೆ. ಸ್ವಯಂ: ನಿಮ್ಮ ಸಿಸ್ಟಂ ವರದಿಗಳ ಗರಿಷ್ಠ.",
   "How bright white looks in the world. Auto: your desktop's white.": "ಜಗತ್ತಿನಲ್ಲಿ ಬಿಳಿ ಎಷ್ಟು ಪ್ರಕಾಶಮಾನವಾಗಿ ಕಾಣುತ್ತದೆ. ಆಟೋ: ನಿಮ್ಮ ಡೆಸ್ಕ್‌ಟಾಪ್‌ನ ಬಿಳಿ.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "ಮಾರ್ಕರ್ ಸೇರಿಸಿ",
   "horizon.studio.topbar.clear_keyframes": "🗑 ಕೀಫ್ರೇಮ್‌ಗಳು ತೆರವು",
   "horizon.studio.topbar.timeline_hud": "⏱ ಟೈಮ್‌ಲೈನ್",
-  "horizon.studio.topbar.split_scene": "ದೃಶ್ಯ ವಿಭಜಿಸಿ"
+  "horizon.studio.topbar.split_scene": "ದೃಶ್ಯ ವಿಭಜಿಸಿ",
+  "horizon.options.block_vibration": "Bedrock ನಿಂದ ಹ್ಯಾಪ್ಟಿಕ್ ಪ್ರತಿಕ್ರಿಯೆ",
+  "horizon.options.split_vibration": "ಸ್ಟ್ಯಾಕ್ ವಿಭಜನೆಯ ಕಂಪನ",
+  "horizon.options.impulse_triggers": "ಇಂಪಲ್ಸ್ ಟ್ರಿಗರ್ಗಳು",
+  "A tick when you break a block, as in Bedrock.": "ನೀವು ಬ್ಲಾಕ್ ಮುರಿದಾಗ ಅದು ಕಂಪಿಸುತ್ತದೆ, Bedrockನಲ್ಲಿರುವಂತೆ.",
+  "A short buzz when you split a stack, as in Bedrock.": "ಸ್ಟ್ಯಾಕ್ ವಿಭಜಿಸಿದಾಗ ಸಣ್ಣ ಕಂಪನ, Bedrock ನಂತೆ.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One ನಿಯಂತ್ರಕದ ಟ್ರಿಗರ್ಗಳು ಅದರ ಹಿಡಿಕೆಗಳೊಂದಿಗೆ ಕಂಪಿಸುತ್ತವೆ."
 }

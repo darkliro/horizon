@@ -241,10 +241,6 @@
   "Peak Brightness": "Пикова яркост",
   "Black Level": "Черно ниво",
   "UI Brightness": "Яркост на потребителския интерфейс",
-  "HDR Lighting": "HDR осветление",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Източниците на светлина, слънцето и слънчевата светлина блестят отвъд бялото. Изкл.: точно като SDR.",
-  "Smooth Gradients": "Плавни градиенти",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-битов кадър: тъмните небеса и сенки не се разслояват. Малко повече VRAM. Следващ старт.",
   "Battery Mode": "Режим на батерия",
   "Graphics API": "Графичен API",
   "Translucent Batching": "Полупрозрачно пакетиране",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Изчаква опресняване на дисплея: без разкъсване, малко забавяне.",
   "Size of menus and the HUD.": "Размер на менютата и HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Задава заедно опциите по-долу. Промяната на един го прави персонализиран.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Лавата, огънят и слънчевата светлина блестят по-ярко от бялото. Има нужда от HDR дисплей.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Повдига сенките до най-тъмното черно на вашия дисплей. 0: истинско черно, без повдигане.",
   "How bright highlights get. Auto: the peak your system reports.": "Колко ярки стават акцентите. Автоматично: пикът, който вашата система отчита.",
   "How bright white looks in the world. Auto: your desktop's white.": "Колко ярко изглежда бялото в света. Авто: бялото на вашия работен плот.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Добави маркер",
   "horizon.studio.topbar.clear_keyframes": "🗑 Изчисти ключовите кадри",
   "horizon.studio.topbar.timeline_hud": "⏱ Времева линия",
-  "horizon.studio.topbar.split_scene": "Раздели сцената"
+  "horizon.studio.topbar.split_scene": "Раздели сцената",
+  "horizon.options.block_vibration": "Хаптична обратна връзка от Bedrock",
+  "horizon.options.split_vibration": "Вибрация при разделяне на купчина",
+  "horizon.options.impulse_triggers": "Импулсни спусъци",
+  "A tick when you break a block, as in Bedrock.": "Когато разрушите блок, той вибрира, както в Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Кратко вибриране при разделяне на купчина, както в Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Спусковите бутони на контролер Xbox One вибрират заедно с дръжките му."
 }

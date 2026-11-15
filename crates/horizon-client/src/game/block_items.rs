@@ -8,7 +8,7 @@ use horizon_client::{
     items::ItemStack, save,
 };
 use horizon_world::{
-    level::{Behaviours, classes::Class},
+    level::{Behaviours, classes::Class, flags},
     nbt::{Compound, JavaString, Tag},
     registry::BlockStateId,
 };
@@ -292,7 +292,8 @@ impl Game<'_> {
         let props: Vec<(&str, &str)> = props.iter().map(|(k, v)| (&**k, &**v)).collect();
         match self.with_props(state, &props) {
             Some(new) if !props.is_empty() && new != state => {
-                self.level_set(pos, new)?;
+                // `level.setBlock(pos, modifiedState, 2)`: no neighbour pass.
+                self.level_set_with_flags(pos, new, flags::UPDATE_CLIENTS)?;
                 Ok(new)
             }
             _ => Ok(state),
@@ -733,3 +734,7 @@ mod styled_name_model_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "item_block_state_tests.rs"]
+mod item_block_state_tests;

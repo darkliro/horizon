@@ -83,6 +83,21 @@ pub fn painting_from_nbt(tag: &Tag) -> Option<([i32; 3], u8, Option<String>)> {
     let (pos, facing) = painting_placement_from_nbt(tag)?;
     Some((pos, facing, text(tag.get("variant"))))
 }
+/// `ItemFrame.setDirection`: a frame on a wall turns to face away from it
+/// (`yRot` = the 2D data value times 90, `xRot` 0); one on a floor or a
+/// ceiling looks straight down or up (`xRot` = -90 times the axis step).
+/// `facing` is the 3D data value (down, up, north, south, west, east).
+fn frame_rotation(facing: u8) -> [f32; 2] {
+    match facing {
+        0 => [0.0, 90.0],
+        1 => [0.0, -90.0],
+        2 => [180.0, 0.0],
+        3 => [0.0, 0.0],
+        4 => [90.0, 0.0],
+        _ => [270.0, 0.0],
+    }
+}
+
 /// ItemFrame.addAdditionalSaveData.
 pub fn item_frame_to_nbt(f: &ItemFrame, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
     let (lo, hi) = f.bounds();
@@ -97,7 +112,7 @@ pub fn item_frame_to_nbt(f: &ItemFrame, uuid: [i32; 4], raw: Option<&Tag>) -> Ta
         // BlockAttachedEntity.tick never runs super.tick, so the Motion, onGround and
         // fallDistance that Entity.load read stay.
         motion: raw.map_or(Vec3::ZERO, loaded_motion),
-        rotation: [0.0, 0.0],
+        rotation: frame_rotation(f.facing),
         on_ground: raw.is_some_and(|raw| flag(raw, "OnGround")),
         fall_distance: raw
             .and_then(|raw| float(raw.get("fall_distance")))
@@ -128,7 +143,9 @@ pub fn item_frame_to_nbt(f: &ItemFrame, uuid: [i32; 4], raw: Option<&Tag>) -> Ta
     }
     tag
 }
-/// `ItemFrame.readAdditionalSaveData`: an absent Facing defaults to Direction.DOWN.
+/// `ItemFrame.readAdditionalSaveData`: an absent Facing defaults to Direction.DOWN;
+/// `Direction.LEGACY_ID_CODEC` reads a byte and `from3DDataValue` takes
+/// `Mth.abs(data % 6)`, so 7 is up and -1 is up too.
 pub fn item_frame_from_nbt(tag: &Tag, id: u32) -> Option<ItemFrame> {
     let pos = attached_block_pos(tag)?;
     Some(ItemFrame {
@@ -147,7 +164,7 @@ pub fn item_frame_from_nbt(tag: &Tag, id: u32) -> Option<ItemFrame> {
         invisible: flag(tag, "Invisible"),
         check_interval: 0,
         custom_name: tag.get("CustomName").cloned(),
-        random: crate::random_source::entity(),
+        random: horizon_core::random::EntityRandom::own(crate::random_source::entity()),
     })
 }
 

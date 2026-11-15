@@ -390,6 +390,25 @@ fn slot_in_group(slot: &str, group: &str) -> bool {
         _ => slot == group,
     }
 }
+/// `SlotRanges`' equipment ranges, as the `LootEntity.equipment` names they
+/// cover. The container, ender chest, mob and horse inventories and a
+/// player's cursor and crafting grid are slots a loot context's entity does
+/// not expose, so a range naming those matches nothing.
+fn slot_range_equipment(range: &str) -> &'static [&'static str] {
+    match range {
+        "weapon" | "weapon.mainhand" => &["mainhand"],
+        "weapon.offhand" => &["offhand"],
+        "weapon.*" => &["mainhand", "offhand"],
+        "armor.head" => &["head"],
+        "armor.chest" => &["chest"],
+        "armor.legs" => &["legs"],
+        "armor.feet" => &["feet"],
+        "armor.body" => &["body"],
+        "armor.*" => &["head", "chest", "legs", "feet", "body"],
+        "saddle" => &["saddle"],
+        _ => &[],
+    }
+}
 /// The item a recipe's `result` names. `ItemStackTemplate.CODEC` and `TransmuteResult.CODEC`
 /// read a stack's fields (`id`, `count`, `components`) or, as their alternative, a bare item id
 /// (`Item.CODEC`): `"result": {"id": "mod:item"}` and `"result": "mod:item"` are the same item.
@@ -524,17 +543,34 @@ fn int_bounds(v: &Value, value: i32) -> bool {
 fn list_operation<T: Clone>(
     spec: &Value,
     existing: Vec<T>,
+    draw: impl FnMut(&Value) -> T,
+) -> Vec<T> {
+    list_operation_capped(spec, existing, usize::MAX, draw)
+}
+
+/// The same with the codec max size (`ListOperation.codec`): the values are
+/// limited to it, and an append, insert or section replacement that would
+/// grow the list past it is logged and ignored in vanilla, so the original
+/// list is returned here.
+fn list_operation_capped<T: Clone>(
+    spec: &Value,
+    existing: Vec<T>,
+    max_size: usize,
     mut draw: impl FnMut(&Value) -> T,
 ) -> Vec<T> {
     let values: Vec<T> = (spec["values"].as_array().into_iter().flatten())
+        .take(max_size)
         .map(&mut draw)
         .collect();
     let offset = spec["offset"].as_i64().unwrap_or(0).max(0) as usize;
     // A section replacement or an insertion past the end is logged and ignored.
     let fits = offset <= existing.len();
     match spec["mode"].as_str().unwrap_or("replace_all") {
-        "append" => existing.into_iter().chain(values).collect(),
-        "insert" if fits => {
+        "append" if existing.len().saturating_add(values.len()) <= max_size => {
+            existing.into_iter().chain(values).collect()
+        }
+        "append" => existing,
+        "insert" if fits && existing.len().saturating_add(values.len()) <= max_size => {
             let mut out = existing;
             let tail = out.split_off(offset);
             out.extend(values);
@@ -542,13 +578,22 @@ fn list_operation<T: Clone>(
             out
         }
         "replace_section" if fits => {
-            let mut out = existing;
             let size = (spec["size"].as_i64()).map_or(values.len(), |s| s.max(0) as usize);
-            let tail = out.split_off((offset + size).min(out.len()));
-            out.truncate(offset);
-            out.extend(values);
-            out.extend(tail);
-            out
+            let tail_at = (offset + size).min(existing.len());
+            if offset
+                .saturating_add(values.len())
+                .saturating_add(existing.len() - tail_at)
+                > max_size
+            {
+                existing
+            } else {
+                let mut out = existing;
+                let tail = out.split_off(tail_at);
+                out.truncate(offset);
+                out.extend(values);
+                out.extend(tail);
+                out
+            }
         }
         "insert" | "replace_section" => existing,
         // `replace_all`, and a mode the codec refuses
@@ -610,6 +655,8 @@ fn overlay_map(overlay: &PackOverlay, kind: &str, out: &mut HashMap<String, Valu
 
 mod odds;
 pub use odds::LootOdds;
+mod predicates;
+pub use predicates::load_predicates;
 
 /// Loot tables by id. Each is kept as its JSON text and read into a [`Value`]
 /// the first time it is rolled: of vanilla's ~1,450 tables a game rolls a
@@ -807,9 +854,7 @@ impl LootData {
         let mut modifiers = HashMap::new();
         load_kind(&all, "item_modifier", &mut modifiers)?;
         overlay_map(overlay, "item_modifier", &mut modifiers);
-        let mut predicates = HashMap::new();
-        load_kind(&all, "predicate", &mut predicates)?;
-        overlay_map(overlay, "predicate", &mut predicates);
+        let predicates = load_predicates(root, overlay)?;
         let raw = crate::item_defaults::shared(root)?;
         let items = raw
             .iter()
@@ -1905,6 +1950,33 @@ impl<R: RandomSource> Context<'_, R> {
                 stack.components.retain(|(k, _)| k != id);
                 stack.components.push((id.to_owned(), content));
             }
+            // SetWritableBookPagesFunction: the pages go through the
+            // function's `ListOperation` over the writable book content the
+            // stack already has (`WritableBookContent.EMPTY` when it has
+            // none), keeping the stack's other components. The item layer
+            // reads the content into the book's editable pages
+            // (`item_data::decode_components` -> `writable_pages`).
+            "minecraft:set_writable_book_pages" => {
+                let id = "minecraft:writable_book_content";
+                let mut content = stack
+                    .components
+                    .iter()
+                    .find(|(k, _)| k == id)
+                    .map(|(_, v)| v.clone())
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                let old = content["pages"].as_array().cloned().unwrap_or_default();
+                let mut spec = f.clone();
+                spec["values"] = f["pages"].clone();
+                // `WritableBookContent.MAX_PAGES`: the page codec limits the
+                // replacement list, and append or insert past 100 is ignored.
+                let pages = list_operation_capped(&spec, old, 100, Value::clone);
+                if let Value::Object(map) = &mut content {
+                    map.insert("pages".to_owned(), Value::Array(pages));
+                }
+                stack.components.retain(|(k, _)| k != id);
+                stack.components.push((id.to_owned(), content));
+            }
             // SetComponentsFunction: the patch's components, applied when the
             // stack becomes an item (trim on worn armour, see `mobs::finalize`).
             "minecraft:set_components" => {
@@ -2590,6 +2662,71 @@ mod namespace_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `SetWritableBookPagesFunction`: the function's pages go through its
+    /// `ListOperation` over the writable book content an earlier function
+    /// wrote, keeping it when the mode appends and replacing it otherwise;
+    /// an insert past the end leaves the pages as they were. The item layer
+    /// reads the content into the book's editable pages.
+    #[test]
+    fn set_writable_book_pages_applies_the_page_operation() {
+        let root = std::env::temp_dir().join(format!(
+            "horizon-loot-writable-pages-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/loot_table/chests")).unwrap();
+        fs::write(
+            root.join("items.json"),
+            r#"{"minecraft:writable_book": {}}"#,
+        )
+        .unwrap();
+        let pages = |function: &str| {
+            let table = format!(
+                r#"{{"pools": [{{"rolls": 1, "entries": [{{"type": "minecraft:item", "name": "minecraft:writable_book",
+                    "modifier": [
+                        {{"type": "minecraft:set_components", "components": {{"minecraft:writable_book_content": {{"pages": [{{"raw": "page one"}}]}}}}}},
+                        {function}
+                    ]}}]}}]}}"#
+            );
+            fs::write(
+                root.join("data/minecraft/loot_table/chests/writable.json"),
+                table,
+            )
+            .unwrap();
+            let data = LootData::load(&root, &PackOverlay::NONE).unwrap();
+            let filled = data.fill("minecraft:chests/writable", 5, 27, None);
+            let book = filled.iter().flatten().next().expect("a book");
+            let content: Vec<_> = book
+                .components
+                .iter()
+                .filter(|(k, _)| k == "minecraft:writable_book_content")
+                .collect();
+            assert_eq!(content.len(), 1, "{:?}", book.components);
+            content[0].1["pages"].clone()
+        };
+        assert_eq!(
+            pages(
+                r#"{"type": "minecraft:set_writable_book_pages", "mode": "append", "pages": [{"raw": "page two"}]}"#
+            ),
+            serde_json::json!([{"raw": "page one"}, {"raw": "page two"}])
+        );
+        assert_eq!(
+            pages(
+                r#"{"type": "minecraft:set_writable_book_pages", "mode": "replace_all", "pages": [{"raw": "page three"}]}"#
+            ),
+            serde_json::json!([{"raw": "page three"}])
+        );
+        // An insert past the end is logged and ignored in vanilla, so the
+        // earlier content is still the book's content.
+        assert_eq!(
+            pages(
+                r#"{"type": "minecraft:set_writable_book_pages", "mode": "insert", "offset": 9, "pages": [{"raw": "page four"}]}"#
+            ),
+            serde_json::json!([{"raw": "page one"}])
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// `SetInstrumentFunction`: a goat horn from a loot table gets one of the options as its instrument.
     #[test]
     fn set_instrument_picks_one_of_its_options() {
@@ -3081,6 +3218,14 @@ impl LootData {
                             .is_some_and(|stack| self.item_matches(item, stack))
                     })
             }
+            // SlotsPredicate (EntitySlotsPredicate): every range must have an
+            // item matching its predicate.
+            "minecraft:slots" => v.as_object().into_iter().flatten().all(|(range, item)| {
+                slot_range_equipment(range).iter().any(|slot| {
+                    e.item(slot)
+                        .is_some_and(|stack| self.item_matches(item, stack))
+                })
+            }),
             "minecraft:components" => v.as_object().into_iter().flatten().all(|(c, want)| match c
                 .as_str()
             {
@@ -3242,5 +3387,65 @@ mod custom_data_predicate_tests {
         assert_eq!(doubled(Some("{h:1}")), ["orange", "light_gray"]);
         assert_eq!(doubled(Some("{entries:[]}")), ["lime", "light_gray"]);
         assert_eq!(doubled(None), ["light_gray"]);
+    }
+}
+
+#[cfg(test)]
+mod slots_predicate_tests {
+    use super::*;
+
+    /// A one-pool table whose stone entry asks for `predicate` on `this`.
+    fn table(name: &str, predicate: &str) -> LootData {
+        let root = std::env::temp_dir().join(format!("loot-slots-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("data/minecraft/loot_table");
+        fs::create_dir_all(&dir).unwrap();
+        let json = format!(
+            r#"{{"pools":[{{"rolls":1,"entries":[{{"type":"minecraft:item","name":"minecraft:stone",
+                "condition":{{"type":"minecraft:entity_properties","entity":"this","predicate":{predicate}}}}}]}}]}}"#
+        );
+        fs::write(dir.join("test.json"), json).unwrap();
+        fs::write(root.join("items.json"), "{}").unwrap();
+        let data = LootData::load(&root, &PackOverlay::NONE).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        data
+    }
+
+    fn drops(data: &LootData, this: LootEntity) -> bool {
+        let params = EntityLootParams {
+            this,
+            ..Default::default()
+        };
+        !data
+            .roll_entity("minecraft:test", &mut LegacyRandom::new(1), &params)
+            .is_empty()
+    }
+
+    /// `SlotsPredicate` (the `minecraft:slots` entity predicate): every
+    /// range must hold an item matching its predicate, so a worn diamond
+    /// sword satisfies `weapon.mainhand` and an empty head fails
+    /// `armor.head`.
+    #[test]
+    fn a_slot_range_matches_its_equipment() {
+        let mut this = LootEntity::new("minecraft:zombie");
+        this.equipment = vec![(
+            "mainhand".to_owned(),
+            LootStack::new("minecraft:diamond_sword"),
+        )];
+        let sword = table(
+            "sword",
+            r#"{"minecraft:slots":{"weapon.mainhand":{"items":"minecraft:diamond_sword"}}}"#,
+        );
+        assert!(drops(&sword, this.clone()));
+        let axe = table(
+            "axe",
+            r#"{"minecraft:slots":{"weapon.mainhand":{"items":"minecraft:diamond_axe"}}}"#,
+        );
+        assert!(!drops(&axe, this.clone()));
+        let helmet = table(
+            "helmet",
+            r#"{"minecraft:slots":{"armor.head":{"items":"minecraft:diamond_helmet"}}}"#,
+        );
+        assert!(!drops(&helmet, this));
     }
 }

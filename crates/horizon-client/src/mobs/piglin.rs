@@ -4,14 +4,14 @@
 use super::{
     Mob, MobEvent, MobWorld, Seen, Species, Who,
     anim::{Poses, State},
-    brain::{Ttl, living_near},
+    brain::{Ttl, living_near, melee_attack, melee_attack_by_age},
     goals::{
-        Cx, Float, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, MeleeAttack, NearestTarget, Prey,
+        Cx, Float, Goal, HurtByTarget, LOOK, LookAtPlayer, MOVE, NearestTarget, Prey,
         RandomLookAround, Stroll, TARGET, TargetState, goal_clone, target_continue,
     },
 };
 use horizon_core::geometry::{Vec3, trig::Mth};
-use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_core::random::{LegacyRandom, LevelRandom, RandomSource};
 use std::f32::consts::PI;
 
 /// `PiglinAi.ADMIRE_DURATION`.
@@ -28,7 +28,7 @@ const CELEBRATION: i32 = 300;
 /// `ZombifiedPiglin.populateDefaultEquipmentSlots`: a golden sword, or one
 /// time in 20 a golden spear, off `random` (`Pig.thunderHit` passes the pig's
 /// own, `this.getRandom()`).
-pub fn default_equipment(random: &mut LegacyRandom) -> &'static str {
+pub fn default_equipment(random: &mut impl RandomSource) -> &'static str {
     if random.next_int_bound(20).unwrap_or(1) == 0 {
         "minecraft:golden_spear"
     } else {
@@ -493,7 +493,7 @@ fn play_brute_sound(m: &mut Mob, events: &mut Vec<MobEvent>) {
 }
 /// `PiglinBruteAi.maybePlayActivitySound`: the level random is drawn on every
 /// tick, fighting or not; a hit only growls in a fight.
-fn maybe_play_brute_sound(m: &mut Mob, lr: &mut LegacyRandom, events: &mut Vec<MobEvent>) {
+fn maybe_play_brute_sound(m: &mut Mob, lr: &mut LevelRandom, events: &mut Vec<MobEvent>) {
     if lr.next_float() < 0.0125 {
         play_brute_sound(m, events);
     }
@@ -510,7 +510,7 @@ fn remember_avoid(m: &mut Mob, who: Who, at: Vec3, ticks: i32) {
 }
 /// `TimeUtil.rangeOfSeconds(5, 7)` of `PiglinAi.AVOID_ZOMBIFIED_DURATION` and
 /// `BABY_AVOID_NEMESIS_DURATION`, sampled from the level random.
-fn avoid_duration(lr: &mut LegacyRandom) -> i32 {
+fn avoid_duration(lr: &mut LevelRandom) -> i32 {
     lr.next_int_between_inclusive(100, 140).unwrap_or(100)
 }
 /// `PiglinAi.isNearZombified`: the nearest visible zombified piglin or zoglin
@@ -540,7 +540,7 @@ fn copy_to_avoid(m: &mut Mob, cx: &mut Cx) {
 /// `SetEntityLookTargetSometimes.Ticker.tickDownAndCheck`: with nothing left
 /// to wait for, draw the next wait from `interval` and say no; otherwise
 /// count down and say yes when it reaches nothing.
-fn tick_down_and_check(wait: &mut i32, lr: &mut LegacyRandom, interval: (i32, i32)) -> bool {
+fn tick_down_and_check(wait: &mut i32, lr: &mut LevelRandom, interval: (i32, i32)) -> bool {
     if *wait == 0 {
         *wait = lr
             .next_int_between_inclusive(interval.0, interval.1)
@@ -709,17 +709,17 @@ fn wants_to_stop_fleeing(m: &Mob, w: &MobWorld) -> bool {
 }
 /// `PiglinAi.RETREAT_DURATION` and `HoglinAi.RETREAT_DURATION`:
 /// `TimeUtil.rangeOfSeconds(5, 20)`, sampled from the level random.
-fn retreat_duration(lr: &mut LegacyRandom) -> i32 {
+fn retreat_duration(lr: &mut LevelRandom) -> i32 {
     lr.next_int_between_inclusive(100, 400).unwrap_or(100)
 }
 /// `PiglinAi.TIME_BETWEEN_HUNTS` (30 to 120 seconds) sampled from the level
 /// random.
-fn hunt_wait(lr: &mut LegacyRandom) -> i32 {
+fn hunt_wait(lr: &mut LevelRandom) -> i32 {
     lr.next_int_between_inclusive(600, 2400).unwrap_or(600)
 }
 /// `HoglinAi.setAvoidTarget`: forget the attack target and the walk, and
 /// avoid `who`, standing at `at`, for a while.
-pub fn set_avoid_target(m: &mut Mob, lr: &mut LegacyRandom, who: Who, at: Vec3) {
+pub fn set_avoid_target(m: &mut Mob, lr: &mut LevelRandom, who: Who, at: Vec3) {
     m.ai.target = None;
     m.nav_stop();
     let ticks = retreat_duration(lr);
@@ -728,7 +728,7 @@ pub fn set_avoid_target(m: &mut Mob, lr: &mut LegacyRandom, who: Who, at: Vec3) 
 /// `PiglinAi.setAvoidTargetAndDontHuntForAWhile`: forget the anger, the
 /// attack target and the walk, avoid `who` for a while and start the
 /// `HUNTED_RECENTLY` wait (`dontKillAnyMoreHoglinsForAWhile`).
-pub fn set_avoid_target_and_dont_hunt(m: &mut Mob, lr: &mut LegacyRandom, who: Who, at: Vec3) {
+pub fn set_avoid_target_and_dont_hunt(m: &mut Mob, lr: &mut LevelRandom, who: Who, at: Vec3) {
     m.extra.anger = 0;
     set_avoid_target(m, lr, who, at);
     m.extra.ints[0] = hunt_wait(lr);
@@ -737,7 +737,7 @@ pub fn set_avoid_target_and_dont_hunt(m: &mut Mob, lr: &mut LegacyRandom, who: W
 /// retreat from the nearest of the new target, the avoid target and the
 /// attack target (`BehaviorUtils.getNearestTarget`: the first one only when
 /// it is strictly closer).
-pub fn retreat_from_nearest(m: &mut Mob, w: &MobWorld, lr: &mut LegacyRandom, who: Who, at: Vec3) {
+pub fn retreat_from_nearest(m: &mut Mob, w: &MobWorld, lr: &mut LevelRandom, who: Who, at: Vec3) {
     let mut nearest = (who, at);
     let avoid = m.extra.piglin.avoid.map(|a| (a.who, a.at));
     let attack =
@@ -827,7 +827,7 @@ fn hoglin_retaliates(m: &mut Mob, w: &MobWorld, by: Who, at: Vec3) -> bool {
 fn hoglin_hurt(
     m: &mut Mob,
     w: &MobWorld,
-    lr: &mut LegacyRandom,
+    lr: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
     by: Who,
 ) {
@@ -942,7 +942,7 @@ fn piglin_retaliates(m: &mut Mob, w: &MobWorld, by: Who, at: Vec3) -> bool {
 fn piglin_hurt(
     m: &mut Mob,
     w: &MobWorld,
-    lr: &mut LegacyRandom,
+    lr: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
     by: Who,
 ) {
@@ -997,7 +997,7 @@ fn piglin_hurt(
 /// What a piglin or hoglin handles before its goals run: the retreats other
 /// mobs broadcast to it, the hit `wasHurtBy` reacts to and, for a piglin,
 /// its celebration.
-pub fn before_goals(m: &mut Mob, w: &MobWorld, lr: &mut LegacyRandom, events: &mut Vec<MobEvent>) {
+pub fn before_goals(m: &mut Mob, w: &MobWorld, lr: &mut LevelRandom, events: &mut Vec<MobEvent>) {
     for (from, at) in std::mem::take(&mut m.extra.piglin.retreats) {
         retreat_from_nearest(m, w, lr, from, at);
     }
@@ -1320,12 +1320,10 @@ pub fn register_piglin(m: &mut Mob) {
     // held item itself (it only starts while a crossbow is in the main hand).
     g.add(3, super::illager::crossbow_goal(1.0, 8.0));
     g.add(3, BackUpIfTooClose);
-    // `PiglinAi.initFightActivity`: the spear behaviours come before the melee one.
+    // `PiglinAi.initFightActivity`: the spear behaviours come before the melee
+    // one, which is `create(20)`.
     g.add(3, super::spear_use::PiglinSpear::new());
-    g.add(
-        3,
-        super::spear_use::NoMeleeWithSpear(MeleeAttack::new(1.0, true)),
-    );
+    g.add(3, super::spear_use::NoMeleeWithSpear(melee_attack(20)));
     g.add(4, NotRiding(PiglinAvoidRepellent));
     g.add(4, GoToWantedItem);
     g.add(4, Celebrate);
@@ -1437,7 +1435,8 @@ impl Goal for HuntHoglin {
 pub fn register_brute(m: &mut Mob) {
     let g = &mut m.ai.goals;
     g.add(0, Float);
-    g.add(2, MeleeAttack::new(1.0, true));
+    // `PiglinBruteAi.initFightActivity`: `MeleeAttack.create(20)`.
+    g.add(2, melee_attack(20));
     // `PiglinBruteAi.createIdleMovementBehaviors`: `StrollToPoi(HOME, 0.6, 2,
     // 100)` ahead of the plain stroll, so a brute that drifts off walks back to
     // the spot `PiglinBruteAi.initMemories` remembered for it.
@@ -1519,7 +1518,7 @@ pub fn register_hoglin(m: &mut Mob) {
     // HoglinAi: MeleeAttack.create(40) for adults, 15 for babies, in the
     // fight activity. Its `ATTACK_COOLING_DOWN` lives 40 brain ticks and
     // `MemorySlot.tick` erases it on the 41st, so hits come 41 (16) apart.
-    g.add(2, InFight(MeleeAttack::new(1.0, true).intervals(41, 16)));
+    g.add(2, InFight(melee_attack_by_age(40, 15)));
     g.add(3, NotRetreating(super::goals::Breed::new(1.0)));
     g.add(3, HoglinAvoidRepellent);
     // `HoglinAi.initIdleActivity`: an adult keeps away from the nearest adult
@@ -1542,8 +1541,8 @@ pub fn register_hoglin(m: &mut Mob) {
 pub fn register_zoglin(m: &mut Mob) {
     let g = &mut m.ai.goals;
     g.add(0, Float);
-    // Zoglin.initMemories: MeleeAttack.create(40) for adults, 15 for babies.
-    g.add(2, MeleeAttack::new(1.0, true).intervals(40, 15));
+    // `Zoglin.initFightActivity`: `create(40)` for adults, 15 for babies.
+    g.add(2, melee_attack_by_age(40, 15));
     g.add(5, Stroll::avoiding_water(0.4));
     g.add(6, LookAtPlayer::new(8.0));
     m.ai.targets.add(1, HurtByTarget::new());
@@ -1883,7 +1882,7 @@ pub fn client_converting(m: &mut Mob, nether: bool) {
 pub fn ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     if m.extra.anim_ticks > 0 {
@@ -2394,7 +2393,7 @@ mod brute_sound_tests {
     #[test]
     fn the_growl_roll_draws_every_tick_and_only_sounds_in_a_fight() {
         let mut brute = mob(Species::PiglinBrute);
-        let mut lr = LegacyRandom::new(7);
+        let mut lr = crate::mobs::world::level_random(7);
         let mut control = LegacyRandom::new(7);
         let mut events = Vec::new();
         let mut growls = 0;
@@ -2444,7 +2443,7 @@ mod hurt_broadcast_tests {
             let piglin = mob(2, Species::Piglin, Vec3::new(3.0, 64.0, 0.0));
             let others = [piglin.seen(None)];
             w.others = &others;
-            let mut lr = LegacyRandom::new(1);
+            let mut lr = crate::mobs::world::level_random(1);
             before_goals(&mut brute, &w, &mut lr, &mut events);
         });
         if !ran {
@@ -2467,6 +2466,7 @@ mod hurt_broadcast_tests {
 mod crossbow_tests {
     use super::*;
     use crate::mobs::sensor_scan_tests::kind;
+    use crate::mobs::world::level_random;
     use horizon_core::geometry::Vec3;
     use std::sync::Arc;
 
@@ -2510,7 +2510,7 @@ mod crossbow_tests {
             &mut m,
             &death,
             &mut RandomSequences::default(),
-            &mut LegacyRandom::new(7),
+            &mut level_random(7),
         );
         assert!(
             drops.iter().any(
@@ -2583,7 +2583,7 @@ mod crossbow_tests {
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
-    use crate::mobs::world::with_test_world;
+    use crate::mobs::world::{level_random, with_test_world};
 
     #[test]
     fn converting_piglin_drops_its_inventory_before_conversion() {
@@ -2614,7 +2614,7 @@ mod conversion_tests {
             m.extra.using_item = 60;
             m.extra.counter2 = CONVERSION + 1;
             let mut events = Vec::new();
-            ai_step(&mut m, w, &mut LegacyRandom::new(0), &mut events);
+            ai_step(&mut m, w, &mut level_random(0), &mut events);
             let relevant: Vec<_> = events
                 .iter()
                 .filter(|e| {
@@ -2660,7 +2660,7 @@ mod conversion_tests {
             m.extra.off_hand = Some("minecraft:gold_ingot".into());
             m.extra.using_item = 60;
             m.extra.counter2 = CONVERSION + 1;
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = level_random(0);
             let mut events = Vec::new();
             ai_step(&mut m, w, &mut lr, &mut events);
             assert!(
@@ -2783,7 +2783,7 @@ mod brute_home_tests {
     #[test]
     fn a_brute_that_wanders_off_walks_back_home() {
         with_built_test_world(&[], build, |w, _| {
-            let mut lr = LegacyRandom::new(3);
+            let mut lr = crate::mobs::world::level_random(3);
             let mut events = Vec::new();
             for (label, home, walks) in [
                 ("far enough to walk back", Some([24, 0, 0]), true),
@@ -2814,7 +2814,7 @@ mod brute_home_tests {
     #[test]
     fn a_brute_tries_the_way_home_once_every_80_ticks() {
         with_built_test_world(&[], build, |w, _| {
-            let mut lr = LegacyRandom::new(3);
+            let mut lr = crate::mobs::world::level_random(3);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w,
@@ -2838,7 +2838,7 @@ mod brute_home_tests {
     #[test]
     fn a_hit_leaves_the_brutes_home_alone() {
         with_built_test_world(&[], build, |w, _| {
-            let mut lr = LegacyRandom::new(5);
+            let mut lr = crate::mobs::world::level_random(5);
             let mut events = Vec::new();
             let mut m = brute(Vec3::new(0.5, 0.0, 0.5), Some([24, 0, 0]));
             piglin_hurt(&mut m, w, &mut lr, &mut events, Who::Mob(999));

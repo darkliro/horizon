@@ -16,7 +16,7 @@ use horizon_client::{
 use horizon_core::{
     geometry::{Aabb, Vec3, traverse_blocks},
     position::BlockPos,
-    random::RandomSource,
+    random::{EntityRandom, LegacyRandom, RandomSource},
 };
 
 pub(super) struct ThrownTrident {
@@ -61,7 +61,7 @@ pub(super) struct ThrownTrident {
     /// Water membership from the preceding `baseTick` (not updated while stuck).
     was_touching_water: bool,
     /// `Entity.random`, used for the extinguishing sound and a breeze's turn.
-    random: horizon_core::random::LegacyRandom,
+    random: EntityRandom,
     /// `AbstractArrow.lastState`: the block it stuck in; not saved.
     pub(super) last_state: Option<horizon_world::registry::BlockStateId>,
     /// `Projectile.lastDeflectedBy`: the breeze that already turned this trident.
@@ -208,7 +208,7 @@ impl ThrownTrident {
             fall_distance: 0.0,
             sound_event: horizon_client::entity_nbt::TRIDENT_HIT_GROUND.to_owned(),
             was_touching_water: false,
-            random: horizon_core::random::LegacyRandom::new(i64::from(id)),
+            random: EntityRandom::own(LegacyRandom::new(i64::from(id))),
             age: 0,
             owner: 0,
             guest: None,
@@ -267,6 +267,16 @@ impl ThrownTrident {
         let at = self.position;
         self.in_ground
             && scene.no_block_collision(Aabb::new(at, at).inflate(Vec3::new(0.06, 0.06, 0.06)))
+    }
+    /// `ThrownTrident.tickDespawn`: a Loyalty trident that can be picked up never
+    /// counts; any other adds one to `life` (`AbstractArrow.tickDespawn`) and
+    /// is discarded at 1200. True when it is discarded.
+    fn tick_despawn(&mut self) -> bool {
+        if self.loyalty > 0 && self.pickup == Pickup::Allowed {
+            return false;
+        }
+        self.life += 1;
+        self.life >= 1200
     }
     /// `AbstractArrow.startFalling`: unstick, scaling the velocity by three
     /// draws of `nextFloat() * 0.2F` in x, y, z order.
@@ -353,13 +363,17 @@ impl ThrownTrident {
 }
 const HALF: f64 = 0.25;
 /// `Breeze.PROJECTILE_DEFLECTION`: `ProjectileDeflection.REVERSE` at power
-/// `(1, 1, 1)`. Each axis is multiplied by `-0.5`, and the yaw turns by
-/// `170 + nextFloat * 20`.
-fn breeze_deflect(velocity: Vec3, yaw: f32, jitter: f32) -> (Vec3, f32) {
-    (
-        Vec3::new(velocity.x * -0.5, velocity.y * -0.5, velocity.z * -0.5),
-        yaw + 170.0 + jitter * 20.0,
-    )
+/// `(1, 1, 1)`. Each axis is multiplied by `-0.5`, the yaw turns by
+/// `170 + nextFloat * 20`, and `needsSync` sends that at once. A trident is
+/// no `AbstractHurtingProjectile`, so `onDeflection` has no power to halve.
+fn breeze_deflect(t: &mut ThrownTrident, jitter: f32) {
+    t.velocity = Vec3::new(
+        t.velocity.x * -0.5,
+        t.velocity.y * -0.5,
+        t.velocity.z * -0.5,
+    );
+    t.yaw += 170.0 + jitter * 20.0;
+    t.needs_sync = true;
 }
 /// The entry distance of a segment into a box, if it crosses it.
 fn segment_box(from: Vec3, d: Vec3, b: Aabb) -> Option<f64> {
@@ -628,7 +642,7 @@ impl Game<'_> {
             fall_distance: 0.0,
             sound_event: horizon_client::entity_nbt::TRIDENT_HIT_GROUND.to_owned(),
             was_touching_water: false,
-            random: horizon_core::random::LegacyRandom::new(i64::from(id)),
+            random: EntityRandom::own(LegacyRandom::new(i64::from(id))),
             age: 0,
             owner: 0,
             guest: self.lan_acting,
@@ -911,9 +925,9 @@ impl Game<'_> {
             if t.in_ground {
                 // AbstractArrow.tick: `if (lastState != blockState && shouldFall())
                 // startFalling();` (`blockState` is the block at its position).
-                // Its `else tickDespawn()` counts `life` (`ThrownTrident.tickDespawn`:
-                // not for a Loyalty trident that can be picked up); the discard
-                // at 1200 has no counterpart here.
+                // Its `else tickDespawn()` counts `life` and discards at 1200
+                // (`ThrownTrident.tickDespawn`: not for a Loyalty trident that
+                // can be picked up).
                 let mut falls = false;
                 if !t.no_physics {
                     let rain = self.arrow_rain();
@@ -923,8 +937,10 @@ impl Game<'_> {
                 }
                 if falls {
                     t.start_falling();
-                } else if t.loyalty == 0 || t.pickup != Pickup::Allowed {
-                    t.life += 1;
+                } else if t.tick_despawn() {
+                    // `discard()`: gone for everything after, so no block
+                    // effects (`isAlive`) and no pickup this tick.
+                    continue;
                 }
                 t.in_ground_time += 1;
                 if !t.no_physics {
@@ -1023,9 +1039,7 @@ impl Game<'_> {
                                 1.0,
                             );
                             let jitter = t.random.next_float();
-                            let (velocity, yaw) = breeze_deflect(t.velocity, t.yaw, jitter);
-                            t.velocity = velocity;
-                            t.yaw = yaw;
+                            breeze_deflect(&mut t, jitter);
                             t.deflected_by = Some(id);
                         }
                     } else {
@@ -1093,8 +1107,12 @@ impl Game<'_> {
                         // VehicleEntity.hurtServer takes the damage; an item
                         // frame's ItemFrame.hurtServer.
                         let creative = t.guest.is_none() && self.creative;
+                        let by = Some(t.guest.map_or(
+                            super::commands::Target::Player,
+                            super::commands::Target::Guest,
+                        ));
                         if let Some(i) = self.boats.iter().position(|b| b.id == id) {
-                            self.hurt_boat(i, damage, creative);
+                            self.hurt_boat_by(i, damage, creative, by);
                         } else if let Some(i) = self.carts.iter().position(|c| c.id == id) {
                             // `damageSources().trident(this, owner)`: the
                             // trident is the direct entity, so no piglin anger.
@@ -1297,9 +1315,10 @@ impl Game<'_> {
         let live = self
             .tridents
             .iter()
-            .filter(|t| {
-                // EntityRenderer.shouldRender; ThrownTridentRenderer grows the box by 1.5.
-                self.standing_entity_in_view(
+            .filter_map(|t| {
+                // EntityRenderer.shouldRender; ThrownTridentRenderer grows the box by 1.5. One
+                // only the ray scene's entity layer reaches is its alone (`ray_only`).
+                let sight = self.standing_entity_sight(
                     camera,
                     super::entity_culling::at(t.previous),
                     super::entity_culling::at(t.position),
@@ -1308,23 +1327,26 @@ impl Game<'_> {
                     2.0 * HALF,
                     range,
                     1.5,
-                )
+                )?;
+                Some((t, sight.camera))
             })
-            .map(|t| {
+            .map(|(t, seen)| {
                 let at = [
                     t.previous.x + (t.position.x - t.previous.x) * alpha,
                     t.previous.y + (t.position.y - t.previous.y) * alpha,
                     t.previous.z + (t.position.z - t.previous.z) * alpha,
                 ];
-                (t, at)
+                (t, at, seen)
             });
         // ItemPickupParticle: a picked-up trident flying to its collector,
         // drawn with the render state extracted at partial tick 1.
         let taken = self.pickups.live.iter().filter_map(|p| match &p.taken {
-            super::pickups::Taken::Trident(t) => Some((&**t, super::pickups::position(p, alpha))),
+            super::pickups::Taken::Trident(t) => {
+                Some((&**t, super::pickups::position(p, alpha), true))
+            }
             _ => None,
         });
-        for (t, at) in live.chain(taken) {
+        for (t, at, seen) in live.chain(taken) {
             // Frame generation and temporal upscaling follow its own flight and spin.
             self.mark_motion(out.len(), Self::MOTION_OBJECT | u64::from(t.id));
             let p = glam::DVec3::from_array(at) - camera;
@@ -1336,7 +1358,7 @@ impl Game<'_> {
                 t.position.y.floor() as i32,
                 t.position.z.floor() as i32,
             );
-            if t.fire_ticks > 0 {
+            if t.fire_ticks > 0 && seen {
                 // The flames face the camera, turned round in the front view.
                 let fire_yaw =
                     if self.camera_type == super::perspective::CameraType::ThirdPersonFront {
@@ -1357,6 +1379,7 @@ impl Game<'_> {
             }
             let packed = (u32::from(l >> 4) * 16) | ((u32::from(l & 15) * 16) << 8);
             let poses = Poses::new(model);
+            let start = out.len();
             horizon_client::mobs::render::draw(
                 model,
                 base,
@@ -1379,6 +1402,11 @@ impl Game<'_> {
                     0,
                     out,
                 );
+            }
+            if seen {
+                self.lit_entity(start..out.len());
+            } else {
+                self.ray_only(out, start);
             }
         }
         self.mark_motion(out.len(), 0);
@@ -1420,6 +1448,44 @@ mod tests {
         up.velocity = Vec3::new(0.0, 0.5, 0.0);
         up.turn_towards_movement();
         assert_eq!(up.pitch, 17.999998);
+    }
+
+    /// `AbstractArrow.tickDespawn` through `ThrownTrident.tickDespawn`: the tick
+    /// that brings `life` to 1200 discards a stuck trident, one loaded past
+    /// 1200 goes on its first count, and a Loyalty trident that can be picked
+    /// up never counts.
+    #[test]
+    fn a_stuck_trident_is_discarded_when_life_reaches_1200() {
+        use horizon_client::arrows::Pickup;
+        let mut t = ThrownTrident::remote(1, Vec3::ZERO, 0.0, 0.0);
+        t.life = 1198;
+        assert!(!t.tick_despawn());
+        assert_eq!(t.life, 1199);
+        assert!(t.tick_despawn());
+        assert_eq!(t.life, 1200);
+        let mut loaded = ThrownTrident::remote(2, Vec3::ZERO, 0.0, 0.0);
+        loaded.life = 5000;
+        assert!(loaded.tick_despawn());
+        // Loyalty only exempts a trident that can be picked up.
+        let mut loyal = ThrownTrident::remote(3, Vec3::ZERO, 0.0, 0.0);
+        (loyal.loyalty, loyal.pickup, loyal.life) = (3, Pickup::Allowed, 1199);
+        assert!(!loyal.tick_despawn());
+        assert_eq!(loyal.life, 1199);
+        loyal.pickup = Pickup::CreativeOnly;
+        assert!(loyal.tick_despawn());
+        loyal.pickup = Pickup::Allowed;
+        loyal.loyalty = 0;
+        assert!(loyal.tick_despawn());
+    }
+
+    /// `AbstractArrow.startFalling` sets `life = 0`: a block removed under a
+    /// trident that was about to despawn starts the count over.
+    #[test]
+    fn a_trident_that_starts_falling_restarts_its_life() {
+        let mut t = ThrownTrident::remote(1, Vec3::ZERO, 0.0, 0.0);
+        (t.in_ground, t.life) = (true, 1199);
+        t.start_falling();
+        assert_eq!((t.in_ground, t.life), (false, 0));
     }
 
     /// A block registry with air and stone, for save round trips.
@@ -1565,12 +1631,18 @@ mod tests {
     }
 
     /// `ProjectileDeflection.REVERSE` at power 1: half speed, the other way,
-    /// and a turn of 170 degrees plus a fifth of the random draw.
+    /// a turn of 170 degrees plus a fifth of the random draw, and the turn
+    /// sent at once instead of at the trident's next update interval.
     #[test]
     fn a_breeze_turns_a_trident_around_at_half_speed() {
-        let (velocity, yaw) = breeze_deflect(Vec3::new(4.0, -2.0, 1.0), 10.0, 0.25);
-        assert_eq!(velocity, Vec3::new(-2.0, 1.0, -0.5));
-        assert_eq!(yaw, 185.0);
+        let mut t = ThrownTrident::remote(42, Vec3::ZERO, 0.0, 0.0);
+        t.velocity = Vec3::new(4.0, -2.0, 1.0);
+        t.yaw = 10.0;
+        assert!(!t.needs_sync);
+        breeze_deflect(&mut t, 0.25);
+        assert_eq!(t.velocity, Vec3::new(-2.0, 1.0, -0.5));
+        assert_eq!(t.yaw, 185.0);
+        assert!(t.needs_sync, "the turn goes out at once");
     }
 
     #[test]

@@ -241,10 +241,6 @@
   "Peak Brightness": "Luminüsità massima",
   "Black Level": "Livel neger",
   "UI Brightness": "Luminosità UI",
-  "HDR Lighting": "Illuminaziun HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "I surgent de lüs, el sul e la lüs del sul brillen de là del bianch. Spent: istess che SDR.",
-  "Smooth Gradients": "Gradient lisc",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Quadern a 16 bit: i ciel scüri e i ombre fann minga bande. Un pooch püsee de VRAM. Al prossim inizzi.",
   "Battery Mode": "Modalità bateria",
   "Graphics API": "API grafich",
   "Translucent Batching": "Lote traslucent",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Aspetta el rinfresc del schermu: nissun stracc, un pooch de latenza.",
   "Size of menus and the HUD.": "Dimensiun di menù e del HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Imposta insema i opziun sotta. Cambià un el rend Personalizà.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "La lava, el fœg e la lux del sol brillen plussee fort del bianc. Bisogna de un schermo HDR.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "El porta sü i ombre fin al neger püsee scür del tò schermu. 0: neger ver, senza alzament.",
   "How bright highlights get. Auto: the peak your system reports.": "Come diventan i punt culminant. Auto: el massim che el voster segnalaziun del sistèm.",
   "How bright white looks in the world. Auto: your desktop's white.": "Quant lüminus el par el bianch in del mund. Auto: el bianch del tò scrivania.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Giunta marcha",
   "horizon.studio.topbar.clear_keyframes": "🗑 Netta i fotogramm ciaf",
   "horizon.studio.topbar.timeline_hud": "⏱ Cronologia",
-  "horizon.studio.topbar.split_scene": "Divid la scena"
+  "horizon.studio.topbar.split_scene": "Divid la scena",
+  "horizon.options.block_vibration": "Risposta atica de Bedrock",
+  "horizon.options.split_vibration": "Vibrazion quand se divid un mucc",
+  "horizon.options.impulse_triggers": "Grillet a impuls",
+  "A tick when you break a block, as in Bedrock.": "Quand te rompet un bloc, el vibra, come in Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Una vibrazion curta quand se divid un mucc, come in Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "I grillet de un controller Xbox One i vibren insema ai sò manich."
 }

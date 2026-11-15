@@ -135,6 +135,8 @@ mod weather;
 #[cfg(test)]
 mod growth_tests;
 #[cfg(test)]
+mod sculk_vein_water_tests;
+#[cfg(test)]
 mod tests;
 
 pub use bonemeal::TemplateSettings;

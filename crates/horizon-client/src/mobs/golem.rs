@@ -238,7 +238,8 @@ impl Goal for DefendVillage {
         }
         // The box around the golem: 10 across, 8 up and down.
         let b = m.bounds().inflate(Vec3::new(10.0, 8.0, 10.0));
-        if !b.intersects(p.bounds) || m.position.distance_squared(p.position) > 64.0 * 64.0 {
+        let range = (64.0 * p.visibility_percent(Some(m.kind.id.as_str()), cx.w.items)).max(2.0);
+        if !b.intersects(p.bounds) || m.position.distance_squared(p.position) > range * range {
             return false;
         }
         // A position inside `b` puts the box's bottom face there (one block
@@ -894,7 +895,7 @@ mod tests {
                     wanted: [0.0; 3],
                 };
                 let mut events = Vec::new();
-                let mut lr = horizon_core::random::LegacyRandom::new(0);
+                let mut lr = crate::mobs::world::level_random(0);
                 let mut cx = Cx {
                     w: &w,
                     lr: &mut lr,
@@ -942,7 +943,7 @@ mod tests {
                 golem.ai.last_hurt_by_time = 10;
                 let mut goal = ResetUniversalAnger::default();
                 let mut events = Vec::new();
-                let mut lr = horizon_core::random::LegacyRandom::new(0);
+                let mut lr = crate::mobs::world::level_random(0);
                 let mut cx = Cx {
                     w: &w,
                     lr: &mut lr,
@@ -993,7 +994,7 @@ mod tests {
             let mut golem = mob(1, Species::IronGolem, Vec3::new(0.5, 64.0, 0.5));
             let mut goal = HurtByTarget::new();
             let mut events = Vec::new();
-            let mut lr = horizon_core::random::LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut cx = Cx {
                 w,
                 lr: &mut lr,
@@ -1024,7 +1025,7 @@ mod tests {
             golem.extra.anger = 100;
             golem.extra.angry_at = Some(Who::Player);
             let mut events = Vec::new();
-            let mut lr = horizon_core::random::LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut cx = Cx {
                 w: &w,
                 lr: &mut lr,
@@ -1038,6 +1039,54 @@ mod tests {
             assert_eq!(golem.ai.target, Some(Who::Player));
         });
     }
+    /// `DefendVillageTargetGoal` finds players with
+    /// `TargetingConditions.forCombat().range(64)`, whose range is scaled by
+    /// visibility: an invisible player at 9.5 blocks is out of reach.
+    #[test]
+    fn an_invisible_player_does_not_make_a_golem_defend_the_village() {
+        use crate::gossip::{GossipType, Gossips};
+        let mut outcomes = Vec::new();
+        if !with_test_world(&[], |w, _| {
+            for invisible in [false, true] {
+                let mut world = w.clone();
+                let mut p = test_player(Vec3::new(9.5, 64.0, 0.5));
+                p.invisible = invisible;
+                world.player = Some(p.clone());
+                let mut villager = mob(2, Species::Villager, Vec3::new(2.5, 64.0, 0.5));
+                let mut gossips = Gossips::default();
+                gossips.add(p.uuid, GossipType::MajorNegative, 100);
+                villager.extra.villager = Some(Box::new(crate::mobs::villager::Ext {
+                    gossips,
+                    ..Default::default()
+                }));
+                let seen = [villager.seen(None)];
+                let world = crate::mobs::MobWorld {
+                    others: &seen,
+                    ..world
+                };
+                let mut golem = mob(1, Species::IronGolem, Vec3::new(0.5, 64.0, 0.5));
+                golem.ai.targets.add(1, DefendVillage);
+                let mut lr = crate::mobs::world::level_random(0);
+                let mut events = Vec::new();
+                let mut cx = Cx {
+                    w: &world,
+                    lr: &mut lr,
+                    events: &mut events,
+                };
+                let mut goals = std::mem::take(&mut golem.ai.targets);
+                goals.tick(&mut golem, &mut cx);
+                outcomes.push(goals.is_running("DefendVillage"));
+                golem.ai.targets = goals;
+            }
+        }) {
+            return;
+        }
+        assert_eq!(
+            outcomes,
+            vec![true, false],
+            "a visible hostile player is defended against; an invisible one is not"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1049,7 +1098,7 @@ mod created_golem_tests {
     /// The target `m`'s target goals pick over `ticks` ticks in `w`.
     fn target(m: &mut Mob, w: &MobWorld<'_>, ticks: u32) -> Option<Who> {
         let mut events = Vec::new();
-        let mut lr = horizon_core::random::LegacyRandom::new(0);
+        let mut lr = crate::mobs::world::level_random(0);
         let mut goals = std::mem::take(&mut m.ai.targets);
         {
             let mut cx = Cx {

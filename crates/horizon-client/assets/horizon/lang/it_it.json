@@ -241,10 +241,6 @@
   "Peak Brightness": "Luminosità massima",
   "Black Level": "Livello nero",
   "UI Brightness": "Luminosità dell'interfaccia utente",
-  "HDR Lighting": "Illuminazione HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Le fonti di luce, il sole e la luce solare brillano oltre il bianco. Spento: come in SDR.",
-  "Smooth Gradients": "Gradienti uniformi",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Fotogramma a 16 bit: i cieli scuri e le ombre non mostrano bande. Un po' più di VRAM. Al prossimo avvio.",
   "Battery Mode": "Modalità batteria",
   "Graphics API": "API grafica",
   "Translucent Batching": "Dosaggio traslucido",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Attende il refresh del display: niente strappi, poca latenza.",
   "Size of menus and the HUD.": "Dimensioni dei menu e dell'HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Imposta insieme le opzioni seguenti. Cambiarne uno lo rende personalizzato.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "La lava, il fuoco e la luce del sole brillano più del bianco. Necessita di un display HDR.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Solleva le ombre fino al nero più cupo del tuo schermo. 0: nero reale, nessun sollevamento.",
   "How bright highlights get. Auto: the peak your system reports.": "Come diventano brillanti le luci. Auto: il picco segnalato dal sistema.",
   "How bright white looks in the world. Auto: your desktop's white.": "Quanto luminoso appare il bianco nel mondo. Auto: il bianco del tuo desktop.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Aggiungi marcatore",
   "horizon.studio.topbar.clear_keyframes": "🗑 Cancella fotogrammi chiave",
   "horizon.studio.topbar.timeline_hud": "⏱ Linea temporale",
-  "horizon.studio.topbar.split_scene": "Dividi scena"
+  "horizon.studio.topbar.split_scene": "Dividi scena",
+  "horizon.options.block_vibration": "Risposta aptica da Bedrock",
+  "horizon.options.split_vibration": "Vibrazione quando si divide una pila",
+  "horizon.options.impulse_triggers": "Grilletto a impulso",
+  "A tick when you break a block, as in Bedrock.": "Quando rompi un blocco, vibra, come in Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Una breve vibrazione quando dividi una pila, come in Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "I grilletti di un controller Xbox One vibrano insieme alle impugnature."
 }

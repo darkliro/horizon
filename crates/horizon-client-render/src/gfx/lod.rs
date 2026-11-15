@@ -179,6 +179,11 @@ impl Tile {
             ]
         })
     }
+    /// Whether either mesh it holds is in the compact layout: a stand-in drawn in its place can
+    /// hide a compact replacement (`Renderer::follow_packed_layout`).
+    pub fn holds_packed(&self) -> bool {
+        self.mesh.packed || self.previous.as_ref().is_some_and(|p| p.0.packed)
+    }
     /// Both meshes it holds in the arena: its own and the stand-in, if any.
     pub fn meshes_mut(&mut self) -> impl Iterator<Item = &mut SectionGpu> {
         std::iter::once(&mut *self.mesh).chain(self.previous.as_deref_mut().map(|(mesh, _)| mesh))
@@ -285,7 +290,17 @@ impl Renderer {
             copies.clear_tiles();
         }
         self.lod_pending = None;
-        // No far terrain left to fade out over.
+        for (_, tile) in std::mem::take(&mut self.lods) {
+            self.release_tile(tile);
+        }
+        self.lod_cull_free.clear();
+        self.lod_cull_next = 0;
+        self.set_lod_cutout(Default::default());
+        // No far terrain left to fade out over. Drained after `set_lod_cutout`, which
+        // moves the sections far terrain still held (`lod_retiring`) onto this list:
+        // `release_left` runs only from `upload_lods`, and the game stops calling that
+        // once far terrain is off, so a section left here would draw its unloaded
+        // column past the render distance for the rest of the renderer's life.
         for (key, since) in std::mem::take(&mut self.lod_leaving) {
             if self
                 .sections
@@ -295,12 +310,6 @@ impl Renderer {
                 self.release_section(key);
             }
         }
-        for (_, tile) in std::mem::take(&mut self.lods) {
-            self.release_tile(tile);
-        }
-        self.lod_cull_free.clear();
-        self.lod_cull_next = 0;
-        self.set_lod_cutout(Default::default());
     }
 
     /// Queues a finished mesh job (`Lod::update`, `Lod::removed`,
@@ -584,12 +593,10 @@ mod tests {
         let bounds = Bounds::mesh(&mesh).unwrap();
         assert_eq!(bounds.min, Vec3::new(0.0, -64.0, 0.0));
         assert_eq!(bounds.max, Vec3::new(1024.0, 120.0, 1024.0));
-        let view = Frustum {
-            planes: super::super::frustum(
-                super::super::world_projection(70.0, 16.0 / 9.0, 8192.0)
-                    * crate::camera::view_matrix(0.0, 0.0),
-            ),
-        };
+        let view = Frustum::from_planes(super::super::frustum(
+            super::super::world_projection(70.0, 16.0 / 9.0, 8192.0)
+                * crate::camera::view_matrix(0.0, 0.0),
+        ));
         // The tile origin is far behind, but its far edge reaches the camera.
         // Negative world origins therefore remain visible.
         assert!(

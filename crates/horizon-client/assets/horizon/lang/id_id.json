@@ -241,10 +241,6 @@
   "Peak Brightness": "Kecerahan Puncak",
   "Black Level": "Level Hitam",
   "UI Brightness": "Kecerahan UI",
-  "HDR Lighting": "Pencahayaan HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Sumber cahaya, matahari, dan sinar matahari bersinar melewati warna putih. Nonaktif: sama seperti SDR.",
-  "Smooth Gradients": "Gradasi Halus",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Bingkai 16-bit: langit dan bayangan gelap tidak bergaris. Sedikit lebih banyak VRAM. Mulai peluncuran berikutnya.",
   "Battery Mode": "Mode Baterai",
   "Graphics API": "API Grafis",
   "Translucent Batching": "Pemrosesan Kelompok Tembus Cahaya",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Menunggu penyegaran layar: tanpa robekan gambar (tearing), namun ada sedikit latensi.",
   "Size of menus and the HUD.": "Ukuran menu dan HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Mengatur opsi di bawah ini secara bersamaan. Mengubah salah satunya akan menjadikannya Kustom.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, api, dan cahaya matahari bersinar lebih terang dari warna putih. Memerlukan layar HDR.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Mengangkat bayangan ke hitam tergelap layar Anda. 0: hitam sejati, tanpa pengangkatan.",
   "How bright highlights get. Auto: the peak your system reports.": "Seberapa terang sorotan cahaya. Otomatis: puncak yang dilaporkan oleh sistem Anda.",
   "How bright white looks in the world. Auto: your desktop's white.": "Seberapa terang warna putih di dunia. Otomatis: putih desktop Anda.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Tambah Penanda",
   "horizon.studio.topbar.clear_keyframes": "🗑 Hapus Keyframe",
   "horizon.studio.topbar.timeline_hud": "⏱ Linimasa",
-  "horizon.studio.topbar.split_scene": "Pisahkan Adegan"
+  "horizon.studio.topbar.split_scene": "Pisahkan Adegan",
+  "horizon.options.block_vibration": "Umpan balik haptik dari Bedrock",
+  "horizon.options.split_vibration": "Getaran saat membagi tumpukan",
+  "horizon.options.impulse_triggers": "Pemicu impuls",
+  "A tick when you break a block, as in Bedrock.": "Saat kamu memecahkan blok, blok itu bergetar, seperti di Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Getaran singkat saat membagi tumpukan, seperti di Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Pemicu pengontrol Xbox One bergetar bersama gagangnya."
 }

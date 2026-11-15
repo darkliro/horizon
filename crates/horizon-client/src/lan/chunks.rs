@@ -1314,7 +1314,7 @@ pub fn entity_tag(entity: &BlockEntity, trial_active: bool) -> Option<Tag> {
                 entries.push(("patterns", crate::banner::layers_to_nbt(&b.layers)));
             }
             if let Some(name) = &b.name {
-                entries.push(("CustomName", Tag::String(name.as_str().into())));
+                entries.push(("CustomName", name.clone()));
             }
             entries.push(("components", Tag::Compound(b.components.clone())));
             Some(Tag::compound(entries))
@@ -1376,6 +1376,12 @@ pub fn entity_tag(entity: &BlockEntity, trial_active: bool) -> Option<Tag> {
         BlockEntity::CreakingHeart(h) => Some(Tag::compound(
             h.creaking
                 .map(|(_, uuid)| ("creaking", crate::save::uuid_tag(uuid))),
+        )),
+        // ConduitBlockEntity.getUpdateTag: saveCustomOnly, which for a conduit
+        // is its `Target` alone. The empty tag of a conduit that stopped
+        // hunting still goes out (remote.rs loads it): it clears the target.
+        BlockEntity::Conduit(target) => Some(Tag::compound(
+            target.map(|uuid| ("Target", Tag::IntArray(uuid.to_vec()))),
         )),
         // No getUpdatePacket: these, chests, hives, command blocks and the rest.
         BlockEntity::Jukebox(_) | BlockEntity::Lectern(_) => None,

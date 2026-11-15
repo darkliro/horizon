@@ -29,6 +29,8 @@ const EYE_Y: usize = 4;
 pub fn is_elder(m: &Mob) -> bool {
     m.species() == Species::ElderGuardian
 }
+/// `Guardian.class` for `LookAtPlayerGoal`: an elder guardian is a guardian.
+const GUARDIAN_CLASS: &[Species] = &[Species::Guardian, Species::ElderGuardian];
 fn attack_duration(m: &Mob) -> i32 {
     if is_elder(m) { 60 } else { 80 }
 }
@@ -48,6 +50,12 @@ pub fn register(m: &mut Mob) {
     g.add(5, MoveTowardsRestriction::new(1.0).looking());
     g.add(7, Stroll::new(1.0).interval(if elder { 400 } else { 80 }));
     g.add(8, LookAtPlayer::new(8.0));
+    // `LookAtPlayerGoal(this, Guardian.class, 12.0F, 0.01F)`: the elder
+    // guardians inherit the goal, so its class matches them too.
+    g.add(
+        8,
+        LookAtPlayer::species(GUARDIAN_CLASS, 12.0).probability(0.01),
+    );
     g.add(9, RandomLookAround::default());
     // GuardianAttackSelector: players, squid and axolotls beyond 3 blocks.
     m.ai.targets.add(
@@ -376,7 +384,6 @@ pub fn elder_server_ai_step(m: &mut Mob, cx: &mut Cx) {
 mod elder_home_tests {
     use super::*;
     use crate::mobs::world::with_test_world;
-    use horizon_core::random::LegacyRandom;
     use std::sync::Arc;
 
     /// `ElderGuardian.customServerAiStep`: with no home yet, `setHomeTo(blockPosition(), 16)`,
@@ -385,7 +392,7 @@ mod elder_home_tests {
     fn an_elder_guardian_homes_where_it_stands() {
         with_test_world(&[], |w, types| {
             let kind = Arc::new(types.types["minecraft:elder_guardian"].clone());
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             let mut m = Mob::new(1, kind.clone(), Vec3::new(10.7, 64.2, -20.9), 0.0);
             elder_server_ai_step(
@@ -421,7 +428,7 @@ mod elder_home_tests {
     fn a_silent_elder_guardian_curses_without_the_sound() {
         with_test_world(&[], |w, types| {
             let kind = Arc::new(types.types["minecraft:elder_guardian"].clone());
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             for silent in [false, true] {
                 let mut events = Vec::new();
                 let mut m = Mob::new(1200, kind.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0);

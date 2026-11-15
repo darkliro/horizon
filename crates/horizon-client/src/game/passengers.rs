@@ -3,6 +3,7 @@
 //! jockeys, strider jockeys, zombie horsemen) and the skeleton horse trap.
 //! Saving riders under `Passengers` lives in `persist.rs`.
 use super::Game;
+mod mob_seating;
 use horizon_client::mobs::{Species, riders};
 use horizon_core::{
     geometry::{Aabb, Vec3},
@@ -67,9 +68,25 @@ impl Game<'_> {
             return false;
         }
         riders::link(&mut self.mobs, rider, vehicle);
-        // sendEventAndTriggers: the server players already on the vehicle.
-        self.note_started_riding(vehicle);
+        self.boarded_mob(rider, vehicle);
         true
+    }
+    /// `Mob.startRiding` from a brain event, which `riders::start_riding`
+    /// decides (`canAddPassenger` and the boarding cooldown): false when the
+    /// mob did not board.
+    pub(super) fn start_riding_mob(&mut self, rider: u32, vehicle: u32) -> bool {
+        if !riders::start_riding(&mut self.mobs, rider, vehicle) {
+            return false;
+        }
+        self.boarded_mob(rider, vehicle);
+        true
+    }
+    /// The tail of `Mob.startRiding` for a mob that boarded: `startRiding`'s
+    /// `sendEventAndTriggers` (the server players already on the vehicle),
+    /// then `Mob.startRiding`'s `dropLeash()`.
+    fn boarded_mob(&mut self, rider: u32, vehicle: u32) {
+        self.note_started_riding(vehicle);
+        self.break_leash(rider, true, false);
     }
     /// Riders sit on their vehicles (`Entity.positionRider`), mobs or boats,
     /// and let go when the vehicle dies or is gone.
@@ -120,6 +137,7 @@ impl Game<'_> {
                     || tnts.contains(&v)
                     || cushions.contains(&v)
                     || self.seat(v).is_some()
+                    || self.passenger_present(v)
                     || index
                         .get(&v)
                         .is_some_and(|&j| self.mobs[j].alive() && !self.mobs[j].removed));
@@ -135,6 +153,9 @@ impl Game<'_> {
             m.extra.rider = riding.get(&m.id).copied();
         }
         self.position_riders();
+        if self.remote.is_none() {
+            self.position_saved_passengers();
+        }
     }
     /// `Entity.positionRider` for every mob passenger: in its boat, then on
     /// its mob. A server's client places them itself too, as the server sends
@@ -163,124 +184,7 @@ impl Game<'_> {
         // Riders of riders settle over a few passes.
         for _ in 0..3 {
             for i in 0..self.mobs.len() {
-                let Some(v) = self.mobs[i].extra.mount else {
-                    continue;
-                };
-                let Some(&j) = index.get(&v) else {
-                    // Boats, minecarts, primed TNT and cushions seated their
-                    // riders above, each in its own seat and from the
-                    // vehicle's drawn position; re-seating them here from the
-                    // shared seat 0 yanked boat riders between two places.
-                    if self.seats_own_riders(v) {
-                        continue;
-                    }
-                    // A mob on a text display: NPC plugins seat their sitting
-                    // NPCs on one. The server's position for a passenger
-                    // gives way to its seat, as `rideTick` places it.
-                    let me = self.remote.as_ref().map(|r| r.entity_id as u32);
-                    let own_seat = self.player.as_ref().map(|p| {
-                        p.position
-                            .add_vector(Vec3::new(0.0, f64::from(p.dimensions.height), 0.0))
-                    });
-                    let Some(at) = self.passenger_riding_position(v, me, own_seat, &index) else {
-                        continue;
-                    };
-                    let before = self
-                        .text_displays
-                        .get(&(v as i32))
-                        .map(|d| d.seat().1)
-                        .unwrap_or_else(|| {
-                            let old = self.mobs[i].previous;
-                            glam::DVec3::new(
-                                old.x,
-                                old.y + riders::vehicle_attachment(&self.mobs[i], 0.0),
-                                old.z,
-                            )
-                        });
-                    let m = &mut self.mobs[i];
-                    // EntityType.TEXT_DISPLAY's box is zero wide.
-                    let offset = riders::vehicle_attachment(m, 0.0);
-                    // EntityType.TEXT_DISPLAY's box is a point at the seat.
-                    let seat = Vec3::new(at.x, at.y, at.z);
-                    m.seated(v, offset, Aabb::new(seat, seat));
-                    m.position = Vec3::new(at.x, at.y - offset, at.z);
-                    m.previous = Vec3::new(before.x, before.y - offset, before.z);
-                    m.velocity = Vec3::ZERO;
-                    m.fall_distance = 0.0;
-                    m.on_ground = false;
-                    m.extra.passenger = true;
-                    m.ai.nav.stop();
-                    continue;
-                };
-                let vehicle = &self.mobs[j];
-                let mut attach = riders::passenger_attachment(vehicle);
-                if horizon_client::mobs::camel::is_camel(vehicle.species()) {
-                    // Camel.getPassengerAttachmentPoint: the seat follows the
-                    // rider's place in `getPassengers` (load order).
-                    let mut aboard: Vec<usize> = (0..self.mobs.len())
-                        .filter(|&k| self.mobs[k].extra.mount == Some(v))
-                        .collect();
-                    let player_aboard = vehicle.rider.is_some() || self.riding == Some(v);
-                    let (seat, count) = if player_aboard {
-                        let mob_seat = aboard.iter().position(|&k| k == i).unwrap_or(0);
-                        (mob_seat + 1, aboard.len() + 1)
-                    } else {
-                        if let Some(driver) = vehicle.extra.rider
-                            && let Some(pos) =
-                                aboard.iter().position(|&k| self.mobs[k].id == driver)
-                            && pos != 0
-                        {
-                            let driver_idx = aboard.remove(pos);
-                            aboard.insert(0, driver_idx);
-                        }
-                        let seat = aboard.iter().position(|&k| k == i).unwrap_or(0);
-                        (seat, aboard.len())
-                    };
-                    let animal = horizon_client::mobs::drops::is_animal(self.mobs[i].species());
-                    attach = horizon_client::mobs::camel::passenger_attachment_at(
-                        vehicle, seat, count, animal,
-                    );
-                }
-                if vehicle.species() == horizon_client::mobs::Species::HappyGhast {
-                    // EntityType.HAPPY_GHAST: four seats, by the rider's place
-                    // in `getPassengers`.
-                    let seat = self.mobs[..i]
-                        .iter()
-                        .filter(|r| r.extra.mount == Some(v))
-                        .count();
-                    attach = riders::happy_ghast_attachment(seat);
-                }
-                let (pos, prev) = (vehicle.position, vehicle.previous);
-                let (yaw, prev_yaw) = (vehicle.yaw, vehicle.previous_yaw);
-                let (body, prev_body) = (vehicle.body_yaw, vehicle.previous_body_yaw);
-                let rider = &self.mobs[i];
-                let controlling = riders::controls_vehicle(
-                    vehicle,
-                    rider,
-                    vehicle.rider.is_some() || self.riding == Some(v),
-                    self.res
-                        .mob_data()
-                        .entity_has("minecraft:non_controlling_rider", &rider.kind.id),
-                );
-                let takes_body = riders::takes_vehicle_body(vehicle, rider, controlling);
-                let vehicle_width = vehicle.width();
-                let vehicle_box = vehicle.bounds();
-                let m = &mut self.mobs[i];
-                let offset = riders::vehicle_attachment(m, vehicle_width);
-                m.seated(v, offset, vehicle_box);
-                m.position = riders::seat(attach, offset, pos, yaw);
-                m.previous = riders::seat(attach, offset, prev, prev_yaw);
-                m.velocity = Vec3::ZERO;
-                m.fall_distance = 0.0;
-                m.on_ground = false;
-                if takes_body {
-                    m.body_yaw = body;
-                    m.previous_body_yaw = prev_body;
-                }
-                m.extra.vehicle_body = Some((v, prev_body, body));
-                m.extra.passenger = true;
-                // A rider never walks off on its own.
-                m.ai.nav.stop();
+                self.position_mob_rider(i, &index);
             }
         }
         // Displays and interaction boxes riding anything the client tracks,
@@ -471,6 +375,12 @@ impl Game<'_> {
             };
             return Some(at + glam::DVec3::Y * height);
         }
+        if self.remote.is_none() {
+            let bounds = self.local_passenger_vehicle_bounds(vehicle)?;
+            let target = self.level_entity(vehicle as i32)?;
+            let at = self.target_position(target)?;
+            return Some(glam::DVec3::new(at[0], bounds.max_position().y, at[2]));
+        }
         // Any other tracked entity sits on its feet; an area effect cloud is
         // 0.5 tall, and ModelEngine parks a model's pivot half a block below
         // its feet for exactly that.
@@ -498,6 +408,28 @@ impl Game<'_> {
     /// chickens, skeletons on spiders, piglins and baby striders on striders,
     /// zombies on zombie horses.
     pub(super) fn spawn_jockeys(&mut self, id: u32, natural: bool) {
+        self.spawn_jockeys_on(id, natural, false)
+    }
+    /// A jockey's mount or rider. `own` finalizes it on its own random, as
+    /// a natural pack's mobs still are until #11574 ports them.
+    fn spawn_rider(&mut self, kind: &str, at: [f64; 3], own: bool) -> Option<u32> {
+        if !own {
+            return self.spawn_mob(kind, at, false);
+        }
+        let id = self.spawn_mob_raw(kind, at, false)?;
+        let [x, y, z] = at.map(|v| v.floor() as i32);
+        let (facts, difficulty) = (self.biome_facts(x, y, z), self.local_difficulty(at));
+        let m = self.mobs.iter_mut().find(|m| m.id == id)?;
+        horizon_client::mobs::spawning::finalize_on_own_random(m, &facts, &difficulty);
+        horizon_client::mobs::raider::finalize(m, horizon_client::mobs::raider::Reason::Natural);
+        self.enchant_spawn_equipment(id);
+        self.halloween_spawn_head(id);
+        self.spawn_jockeys_on(id, true, true);
+        Some(id)
+    }
+    /// `spawn_jockeys`; `own` finalizes the mounts and riders on their own
+    /// random, as a natural pack's mobs still are.
+    pub(super) fn spawn_jockeys_on(&mut self, id: u32, natural: bool, own: bool) {
         let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
             return;
         };
@@ -512,7 +444,7 @@ impl Game<'_> {
                         self.mount_mob(id, chicken);
                     }
                 } else if self.world.random.next_float() < CHICKEN_JOCKEY_ODDS
-                    && let Some(chicken) = self.spawn_mob("minecraft:chicken", at, false)
+                    && let Some(chicken) = self.spawn_rider("minecraft:chicken", at, own)
                 {
                     self.make_chicken_jockey(chicken);
                     self.mount_mob(id, chicken);
@@ -520,11 +452,11 @@ impl Game<'_> {
             }
             // Spider.finalizeSpawn: one in a hundred carries a skeleton.
             Species::Spider if self.world.random.next_int_bound(100).unwrap_or(1) == 0 => {
-                if let Some(skeleton) = self.spawn_mob("minecraft:skeleton", at, false) {
+                if let Some(skeleton) = self.spawn_rider("minecraft:skeleton", at, own) {
                     self.mount_mob(skeleton, id);
                 }
             }
-            Species::Strider if !baby => self.spawn_strider_jockey(id, at),
+            Species::Strider if !baby => self.spawn_strider_jockey(id, at, own),
             // ZombieHorse.finalizeSpawn: a zombie with an iron spear. The rider
             // comes from EntityType.create, which makes no zombie in peaceful
             // (canSpawn), so a peaceful zombie horse spawns without one.
@@ -535,7 +467,7 @@ impl Game<'_> {
                             Species::Zombie,
                         )) =>
             {
-                if let Some(zombie) = self.spawn_mob("minecraft:zombie", at, false) {
+                if let Some(zombie) = self.spawn_rider("minecraft:zombie", at, own) {
                     if let Some(z) = self.mobs.iter_mut().find(|m| m.id == zombie) {
                         z.extra.set_main_hand(Some("minecraft:iron_spear".into()));
                     }
@@ -546,14 +478,14 @@ impl Game<'_> {
         }
         // After Zombie.finalizeSpawn's chickens: Husk and Drowned mounts.
         match species {
-            Species::Husk if mounts.camel_husk => self.spawn_camel_husk_jockey(id, at),
-            Species::Drowned if mounts.nautilus => self.spawn_zombie_nautilus_jockey(id, at),
+            Species::Husk if mounts.camel_husk => self.spawn_camel_husk_jockey(id, at, own),
+            Species::Drowned if mounts.nautilus => self.spawn_zombie_nautilus_jockey(id, at, own),
             _ => {}
         }
     }
     /// `Husk.finalizeSpawn`: where a camel husk fits, one natural husk in ten
     /// takes an iron spear and rides one, with a parched in its second seat.
-    fn spawn_camel_husk_jockey(&mut self, id: u32, at: [f64; 3]) {
+    fn spawn_camel_husk_jockey(&mut self, id: u32, at: [f64; 3], own: bool) {
         let (bx, by, bz) = (at[0].floor(), at[1].floor(), at[2].floor());
         let room = {
             let w = self.mob_world_base(&[]);
@@ -568,18 +500,18 @@ impl Game<'_> {
         if let Some(h) = self.mobs.iter_mut().find(|m| m.id == id) {
             h.extra.set_main_hand(Some("minecraft:iron_spear".into()));
         }
-        let Some(camel) = self.spawn_mob("minecraft:camel_husk", at, false) else {
+        let Some(camel) = self.spawn_rider("minecraft:camel_husk", at, own) else {
             return;
         };
         self.mount_mob(id, camel);
-        if let Some(parched) = self.spawn_mob("minecraft:parched", at, false) {
+        if let Some(parched) = self.spawn_rider("minecraft:parched", at, own) {
             self.mount_mob(parched, camel);
         }
     }
     /// `Drowned.finalizeSpawn`: half the natural drowned holding a trident,
     /// outside the rivers and oceans that breed more drowned, ride a zombie
     /// nautilus.
-    fn spawn_zombie_nautilus_jockey(&mut self, id: u32, at: [f64; 3]) {
+    fn spawn_zombie_nautilus_jockey(&mut self, id: u32, at: [f64; 3], own: bool) {
         let Some(d) = self.mobs.iter().find(|m| m.id == id) else {
             return;
         };
@@ -602,7 +534,7 @@ impl Game<'_> {
         if frequent {
             return;
         }
-        if let Some(n) = self.spawn_mob("minecraft:zombie_nautilus", at, false) {
+        if let Some(n) = self.spawn_rider("minecraft:zombie_nautilus", at, own) {
             self.mount_mob(id, n);
         }
     }
@@ -628,12 +560,12 @@ impl Game<'_> {
     /// `Strider.finalizeSpawn`: one strider in thirty carries a zombified
     /// piglin holding a warped fungus on a stick (and wears a saddle), one in
     /// ten of the rest a baby strider.
-    fn spawn_strider_jockey(&mut self, id: u32, at: [f64; 3]) {
+    fn spawn_strider_jockey(&mut self, id: u32, at: [f64; 3], own: bool) {
         if self.world.random.next_int_bound(30).unwrap_or(1) == 0 {
             if !self.ui.rules.bool("spawn_mobs") {
                 return;
             }
-            if let Some(piglin) = self.spawn_mob("minecraft:zombified_piglin", at, false) {
+            if let Some(piglin) = self.spawn_rider("minecraft:zombified_piglin", at, own) {
                 let baby = self.world.random.next_float() < CHICKEN_JOCKEY_ODDS;
                 if let Some(p) = self.mobs.iter_mut().find(|m| m.id == piglin) {
                     p.extra
@@ -646,7 +578,7 @@ impl Game<'_> {
                 self.mount_mob(piglin, id);
             }
         } else if self.world.random.next_int_bound(10).unwrap_or(1) == 0
-            && let Some(baby) = self.spawn_mob("minecraft:strider", at, false)
+            && let Some(baby) = self.spawn_rider("minecraft:strider", at, own)
         {
             if let Some(b) = self.mobs.iter_mut().find(|m| m.id == baby) {
                 b.extra.age = -24000;

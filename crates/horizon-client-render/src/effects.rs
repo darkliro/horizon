@@ -421,6 +421,7 @@ impl PlayerEffects {
             fire_resistance: self.get("fire_resistance").is_some(),
             dolphins_grace: self.get("dolphins_grace").is_some(),
             weaving: self.get("weaving").is_some(),
+            infested: self.get("infested").is_some(),
             water_breathing: self.get("water_breathing").is_some()
                 || self.get("conduit_power").is_some(),
             breath_of_the_nautilus: self.get("breath_of_the_nautilus").is_some(),
@@ -461,6 +462,8 @@ pub struct StatusFlags {
     pub dolphins_grace: bool,
     /// Weaving: cobwebs hold half as much (`WebBlock.entityInside`).
     pub weaving: bool,
+    /// Infested: a hit that is not blocked rolls `InfestedMobEffect.onMobHurt`.
+    pub infested: bool,
     pub water_breathing: bool,
     pub breath_of_the_nautilus: bool,
     /// Armor enchantment protection per damage type id (`EnchantmentHelper.getDamageProtection`).

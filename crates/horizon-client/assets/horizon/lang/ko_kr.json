@@ -182,10 +182,6 @@
   "horizon.mods.switch.restart": "%s을(를) 적용하려면 게임을 다시 시작하세요. 블록, 아이템 또는 월드 생성을 추가하기 때문입니다.",
   "GPU Culling": "GPU 컬링",
   "Upscaling Sharpness": "업스케일링 선명도",
-  "HDR Lighting": "HDR 조명",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "광원, 태양, 햇빛이 흰색보다 밝게 빛납니다. 끔: SDR과 동일합니다.",
-  "Smooth Gradients": "부드러운 그라데이션",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16비트 프레임: 어두운 하늘과 그림자에 계단 현상이 생기지 않습니다. VRAM 사용이 약간 늘어납니다. 다음 시작 시 적용됩니다.",
   "FIFO": "FIFO",
   "Vulkan": "Vulkan",
   "DirectX 12": "DirectX 12",
@@ -312,7 +308,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "디스플레이 새로 고침을 기다립니다: 화면 찢김이 없지만 약간의 지연 시간이 발생합니다.",
   "Size of menus and the HUD.": "메뉴 및 HUD의 크기입니다.",
   "Sets the options below together. Changing one makes it Custom.": "아래 옵션들을 함께 설정합니다. 하나라도 변경하면 사용자 지정으로 전환됩니다.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "용암, 불, 햇빛이 흰색보다 더 밝게 빛납니다. HDR 디스플레이가 필요합니다.",
   "How bright highlights get. Auto: the peak your system reports.": "하라이트의 최대 밝기입니다. 자동: 시스템이 보고하는 최고 값입니다.",
   "How far mobs, crops and machines keep working. CPU time.": "몹, 농작물, 기계가 계속 작동하는 거리입니다. CPU 시간이 소모됩니다.",
   "How far away mobs and items are drawn, as a share of normal.": "정상 대비 몹과 아이템이 그려지는 거리 비율입니다.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "마커 추가",
   "horizon.studio.topbar.clear_keyframes": "🗑 키프레임 지우기",
   "horizon.studio.topbar.timeline_hud": "⏱ 타임라인",
-  "horizon.studio.topbar.split_scene": "장면 분할"
+  "horizon.studio.topbar.split_scene": "장면 분할",
+  "horizon.options.block_vibration": "Bedrock의 햅틱 피드백",
+  "horizon.options.split_vibration": "스택 나누기 진동",
+  "horizon.options.impulse_triggers": "임펄스 트리거",
+  "A tick when you break a block, as in Bedrock.": "블록을 부수면 Bedrock처럼 진동합니다.",
+  "A short buzz when you split a stack, as in Bedrock.": "Bedrock처럼 스택을 나눌 때 짧게 진동합니다.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One 컨트롤러의 트리거가 그립과 함께 진동합니다."
 }

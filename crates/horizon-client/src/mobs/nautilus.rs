@@ -7,7 +7,7 @@ use super::{
     Mob, MobEvent, MobWorld, Species, Who,
     anim::{Poses, State},
     control::{LookKind, MoveKind, Operation},
-    goals::{Breed, Cx, Goal, LOOK, LookAtPlayer, MOVE, Panic, Stroll, Tempt, goal_clone},
+    goals::{AnimalPanic, Breed, Cx, Goal, LOOK, MOVE, Stroll, Tempt, goal_clone},
     keyframes::Animation,
     nav::NavKind,
 };
@@ -57,22 +57,20 @@ pub fn register(m: &mut Mob) {
         g.add(1, t);
         g.add(2, Charge::new(0.5));
         g.add(3, Stroll::swimming(1.0, 1));
-        g.add(3, LookAtPlayer::new(6.0));
     } else {
-        g.add(0, Panic::new(1.6));
+        g.add(0, AnimalPanic::new(1.6));
         g.add(1, Breed::new(0.4));
         let mut t = Tempt::new(1.3, tempt, false);
         t.stop_distance = stop;
         g.add(2, t);
         g.add(3, Charge::new(0.6));
         g.add(4, Stroll::swimming(1.0, 1));
-        g.add(4, LookAtPlayer::new(6.0));
     }
 }
 /// `finalizeSpawn`: `NautilusAi.initMemories` (2400 to 3600 ticks before it
 /// first looks for prey) and the zombie's variant by biome.
-pub fn finalize(m: &mut Mob, warm_ocean: bool) {
-    m.extra.counter = 2400 + m.random.next_int_bound(1201).unwrap_or(0);
+pub fn finalize(m: &mut Mob, warm_ocean: bool, r: &mut impl RandomSource) {
+    m.extra.counter = 2400 + r.next_int_bound(1201).unwrap_or(0);
     m.extra.nautilus_attack_cooldown_ttl = Some(i64::MAX);
     if zombie(m) {
         m.extra.variant = u8::from(warm_ocean);
@@ -286,7 +284,7 @@ fn check_restriction(m: &mut Mob) {
 pub fn ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut horizon_core::random::LegacyRandom,
+    level_random: &mut horizon_core::random::LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     // customServerAiStep: the home is kept before the rest of the step.
@@ -409,7 +407,7 @@ pub fn aggravated(m: &Mob) -> bool {
 fn find_target(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut horizon_core::random::LegacyRandom,
+    level_random: &mut horizon_core::random::LevelRandom,
 ) -> Option<Who> {
     if m.extra.in_love > 0 || !m.fluids.in_water || m.is_baby() || m.extra.tame {
         return None;
@@ -747,6 +745,26 @@ mod tests {
         }
     }
 
+    /// `NautilusAi` and `ZombieNautilusAi` have no `LookAtPlayerGoal`: the
+    /// idle activity's walk from a look target never runs (no sensor writes
+    /// `LOOK_TARGET`), so a nautilus never turns to stare at a player.
+    #[test]
+    fn neither_brain_looks_at_a_player() {
+        for (id, species) in [
+            ("minecraft:nautilus", Species::Nautilus),
+            ("minecraft:zombie_nautilus", Species::ZombieNautilus),
+        ] {
+            let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+            kind.id = id.into();
+            kind.species = species;
+            let mut m = Mob::new(1, Arc::new(kind), Vec3::ZERO, 0.0);
+            register(&mut m);
+            // The stroll is there, so the list is the brain's own.
+            assert!(m.ai.goals.has("RandomSwimming"), "{id} strolls");
+            assert!(!m.ai.goals.has("LookAtPlayer"), "{id} looks at players");
+        }
+    }
+
     /// `ChargeAttack.dealKnockBack` is `causeExtraKnockback`: `LivingEntity.knockback`
     /// on the target, away from (sin(yaw), -cos(yaw)), not a raw push of its motion.
     #[test]
@@ -764,7 +782,7 @@ mod tests {
             );
             m.ai.target = Some(Who::Player);
             let mut goal = Charge::new(0.5);
-            let mut lr = horizon_core::random::LegacyRandom::new(1);
+            let mut lr = crate::mobs::world::level_random(1);
             let mut cx = Cx {
                 w: &w,
                 lr: &mut lr,
@@ -898,7 +916,7 @@ mod hostile_target_tests {
                 .map(|seed| {
                     let mut m = Mob::new(1, kind.clone(), Vec3::new(0.5, 62.0, 0.5), 270.0);
                     m.fluids.in_water = true;
-                    let mut level = horizon_core::random::LegacyRandom::new(seed);
+                    let mut level = crate::mobs::world::level_random(seed);
                     find_target(&mut m, w, &mut level)
                 })
                 .collect();
@@ -1083,7 +1101,7 @@ mod cooldown_memory_tests {
                         let tag = raw(id, state, no_ai);
                         let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 7, None).unwrap();
                         m.attrs.speed = 0.0;
-                        let mut level_random = horizon_core::random::LegacyRandom::new(140);
+                        let mut level_random = crate::mobs::world::level_random(140);
                         let mut events = Vec::new();
                         for elapsed in 0..=6 {
                             if elapsed > 0 {

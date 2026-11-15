@@ -104,13 +104,13 @@ impl PrimedTnt {
     }
     /// Entity.checkFallDamage after a move that stepped `moved_y`: out of
     /// water, each step down is narrowed to a float before it adds to the
-    /// fall; landing forgets it. Returns whether it landed after a fall, when
-    /// the caller posts HIT_GROUND.
-    pub(super) fn check_fall_damage(&mut self, moved_y: f64) -> bool {
+    /// fall; landing forgets it. Returns the fall it landed with, when the
+    /// caller runs the block's fallOn and posts HIT_GROUND.
+    pub(super) fn check_fall_damage(&mut self, moved_y: f64) -> Option<f64> {
         if !self.in_water && moved_y < 0.0 {
             self.fall_distance -= f64::from(moved_y as f32);
         }
-        let landed = self.on_ground && self.fall_distance > 0.0;
+        let landed = (self.on_ground && self.fall_distance > 0.0).then_some(self.fall_distance);
         if self.on_ground {
             self.fall_distance = 0.0;
         }
@@ -183,7 +183,7 @@ impl PrimedTnt {
     }
     /// [`Self::tick`], its move also stopped by `entities`: the boxes of the
     /// entities that `canBeCollidedWith` it (`EntityGetter.getEntityCollisions`).
-    /// Also says whether it landed after a fall.
+    /// Also gives the fall it landed with, if it landed after one.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn tick_among(
         &mut self,
@@ -195,7 +195,7 @@ impl PrimedTnt {
         border: Option<&horizon_core::geometry::border::BorderGeometry>,
         blocks: Option<&horizon_world::movement_properties::BoundMovementProperties>,
         entities: &[Aabb],
-    ) -> Result<(Vec<BlockPos>, bool)> {
+    ) -> Result<(Vec<BlockPos>, Option<f64>)> {
         self.previous = self.position;
         self.velocity.y -= self.get_gravity();
         let mut wanted = self.velocity;
@@ -409,8 +409,9 @@ impl Game<'_> {
     /// so powder snow it was pushed into makes it stuck.
     pub(super) fn finish_tnt_piston_move(&mut self, i: usize, from: Vec3, moved: Vec3) {
         let t = &mut self.tnts[i];
-        if t.check_fall_damage(moved.y) {
-            let (position, bounds) = (t.position, t.bounds());
+        if let Some(fall) = t.check_fall_damage(moved.y) {
+            let (id, position, bounds) = (t.id, t.position, t.bounds());
+            self.non_living_fall_on(id, position, bounds, fall);
             self.post_landing_event(position, bounds, false);
         }
         let t = &mut self.tnts[i];
@@ -461,8 +462,10 @@ impl Game<'_> {
             entities,
         )?;
         let snow = (t.previous, t.position, t.bounds(), t.velocity);
-        // Entity.checkFallDamage: HIT_GROUND after a fall, during the move.
-        if landed {
+        // Entity.checkFallDamage: fallOn and HIT_GROUND after a fall, during the move.
+        if let Some(fall) = landed {
+            let id = self.tnts[i].id;
+            self.non_living_fall_on(id, snow.1, snow.2, fall);
             self.post_landing_event(snow.1, snow.2, false);
         }
         self.entity_powder_snow_particles(snow.0, snow.1, snow.2, snow.3, false);
@@ -477,7 +480,8 @@ impl Game<'_> {
                 t.position.z,
             ];
             let bounds = t.bounds();
-            let (id, owner, guest, power) = (t.id, t.owner, t.guest, t.power);
+            let (id, owner, guest, power, used_portal) =
+                (t.id, t.owner, t.guest, t.power, t.used_portal);
             let silent = self.entity_silent(id);
             let (owner, guest) = match owner {
                 Some(_) => (owner, guest),
@@ -516,6 +520,7 @@ impl Game<'_> {
                     false,
                     super::explosion::ExplosionSource::default()
                         .with_silence(silent)
+                        .with_portal_proof(used_portal)
                         .with_entity(id, "minecraft:tnt"),
                 )
             });
@@ -600,6 +605,13 @@ impl Game<'_> {
             self.send_overlay_message(message);
             return Ok(false);
         }
+        // `TntBlock.prime`: an adventure player lights TNT only with a stack
+        // whose `can_break` matches it. The refused click is still SUCCESS: the
+        // arm swings, and neither the block, the stack nor the fuse changes.
+        if !self.may_build() && !self.can_break_in_adventure(hit.pos) {
+            self.swing_arm();
+            return Ok(true);
+        }
         if !self.tnt_prime_allowed(pos) {
             return Ok(true);
         }
@@ -661,8 +673,12 @@ impl Game<'_> {
             self.view_scale(),
         );
         for t in &self.tnts {
+            // LevelExtractor: the camera entity is not drawn from its own eyes.
+            if self.hides_as_camera(t.id) {
+                continue;
+            }
             // EntityRenderer.shouldRender.
-            if !self.standing_entity_in_view(
+            let Some(sight) = self.standing_entity_sight(
                 camera,
                 super::entity_culling::at(t.previous),
                 super::entity_culling::at(t.position),
@@ -671,10 +687,11 @@ impl Game<'_> {
                 PrimedTnt::SIZE,
                 range,
                 0.0,
-            ) {
+            ) else {
                 continue;
-            }
-            self.mark_motion(out.len(), Self::MOTION_OBJECT | u64::from(t.id));
+            };
+            let start = out.len();
+            self.mark_motion(start, Self::MOTION_OBJECT | u64::from(t.id));
             let fuse = t.fuse as f32 - alpha as f32 + 1.0;
             let scale = if fuse < 10.0 {
                 let g = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
@@ -743,6 +760,9 @@ impl Game<'_> {
                         glint_uv: [0.0, 0.0],
                     });
                 }
+            }
+            if !sight.camera {
+                self.ray_only(out, start);
             }
         }
     }
@@ -1370,6 +1390,136 @@ mod tests {
         );
         game.streaming.forced.insert((0, 0));
         Some(game)
+    }
+
+    /// PrimedTnt.teleport selects USED_PORTAL_DAMAGE_CALCULATOR even in the
+    /// same dimension; ordinary TNT still destroys portal blocks.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn portal_blast_tnt_survives_teleport_but_not_save_reload() {
+        use super::super::commands::Target;
+        let mut game = server_game().expect("set HORIZON_TEST_RESOURCES");
+        let portal = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:nether_portal")
+            .unwrap();
+        let at = BlockPos::new(8, 64, 8);
+        let explosion_sound = "minecraft:entity.generic.explode";
+        let detonate = |game: &mut Game<'_>| {
+            game.world.set(at.x, at.y, at.z, portal).unwrap();
+            game.tnts[0].position = Vec3::new(8.5, 64.0, 8.5);
+            game.tnts[0].previous = game.tnts[0].position;
+            game.tnts[0].velocity = Vec3::ZERO;
+            game.tnts[0].no_gravity = true;
+            game.tnts[0].fuse = 1;
+            game.tick_one_tnt(0, &[]).unwrap();
+            game.world.block(at.x, at.y, at.z) == portal
+        };
+        game.add_primed_tnt(at, 0.0, 80, None, None);
+        assert!(!detonate(&mut game), "ordinary TNT destroys the portal");
+        assert_eq!(game.audio.heard.get(explosion_sound), Some(&1));
+        game.add_primed_tnt(at, 0.0, 80, None, None);
+        // Exercise the actual command teleport path rather than setting its flag.
+        let id = game.tnts[0].id;
+        game.remember_tags(
+            id,
+            &horizon_world::nbt::Tag::Compound(
+                [("Silent".into(), horizon_world::nbt::Tag::Byte(1))].into(),
+            ),
+        );
+        game.audio.heard.clear();
+        game.teleport_to_in_level(Target::Tnt(id), [8.5, 64.0, 8.5], None, false);
+        assert!(detonate(&mut game), "teleported TNT protects the portal");
+        assert!(!game.audio.heard.contains_key(explosion_sound));
+        game.add_primed_tnt(at, 0.0, 80, None, None);
+        let id = game.tnts[0].id;
+        game.teleport_to_in_level(Target::Tnt(id), [8.5, 64.0, 8.5], None, false);
+        let saved = game.tnt_nbt(0);
+        game.tnts.clear();
+        game.load_tnt(saved, None);
+        assert!(!detonate(&mut game), "usedPortal is not saved");
+        // The runtime arrival handoff is consumed before retaining the NBT.
+        game.add_primed_tnt(at, 0.0, 80, None, None);
+        let mut transfer = game.tnt_nbt(0);
+        super::super::persist::mark_fresh(&mut transfer);
+        game.tnts.clear();
+        game.world.loaded_entities.push((
+            (0, 0),
+            vec![horizon_client::world::PendingEntity::after_tnt_portal(
+                transfer,
+            )],
+        ));
+        game.spawn_loaded_entities();
+        let kept = game.tnt_nbt(0);
+        assert!(kept.get("horizon:tnt_used_portal").is_none());
+        assert!(detonate(&mut game), "arrival preserves runtime immunity");
+    }
+
+    /// Optional.empty resistance means the rays behave exactly as through air,
+    /// not like a zero-resistance solid (which still costs 0.09 per step).
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn portal_blast_rays_pass_through_without_resistance() {
+        use super::super::explosion::{BlockInteraction, ExplosionSource};
+        let mut game = server_game().expect("set HORIZON_TEST_RESOURCES");
+        let registry = game.pack.assets.registry;
+        let portal = registry.default_state("minecraft:nether_portal").unwrap();
+        let glass = registry.default_state("minecraft:glass").unwrap();
+        let air = game.world.air;
+        for seed in [0, 1, 19, 314159] {
+            let mut outcomes = Vec::new();
+            for center in [air, portal] {
+                for x in -4i32..=4 {
+                    for y in -4i32..=4 {
+                        for z in -4i32..=4 {
+                            let distance = x.abs().max(y.abs()).max(z.abs());
+                            let state = if distance <= 1 {
+                                center
+                            } else if distance == 3 {
+                                glass
+                            } else {
+                                air
+                            };
+                            game.world.set(8 + x, 64 + y, 8 + z, state).unwrap();
+                        }
+                    }
+                }
+                game.world.random.set_seed(seed);
+                game.server_explode_from(
+                    [8.5, 64.5, 8.5],
+                    2.0,
+                    BlockInteraction::Destroy,
+                    false,
+                    ExplosionSource::default().with_portal_proof(true),
+                )
+                .unwrap();
+                let mut remaining = Vec::new();
+                for x in -3i32..=3 {
+                    for y in -3i32..=3 {
+                        for z in -3i32..=3 {
+                            if x.abs().max(y.abs()).max(z.abs()) == 3 {
+                                remaining.push(game.world.block(8 + x, 64 + y, 8 + z) == glass);
+                            }
+                        }
+                    }
+                }
+                outcomes.push(remaining);
+            }
+            assert!(
+                outcomes[0].iter().any(|&solid| !solid),
+                "blast reaches the shell"
+            );
+            assert!(
+                outcomes[0].iter().any(|&solid| solid),
+                "shell also extends beyond the blast"
+            );
+            assert_eq!(
+                outcomes[0], outcomes[1],
+                "seed {seed}: portal must not attenuate rays"
+            );
+        }
     }
 
     #[test]

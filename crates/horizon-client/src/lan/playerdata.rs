@@ -230,8 +230,7 @@ pub fn face_world_spawn(guest: &mut Guest, known: bool, [yaw, pitch]: [f32; 2]) 
 /// Give a guest the player state read into `level`.
 pub fn apply(guest: &mut Guest, level: &Level) {
     if let Some(p) = level.position {
-        guest.position = p;
-        guest.previous_position = p;
+        guest.place(p);
     }
     guest.yaw = level.rotation[0];
     guest.pitch = level.rotation[1];
@@ -248,6 +247,7 @@ pub fn apply(guest: &mut Guest, level: &Level) {
     guest.xp_level = level.xp_level;
     guest.xp_progress = level.xp_progress;
     guest.xp_total = level.xp_total;
+    guest.score = level.score;
     guest.xp_seed = level.xp_seed;
     guest.effects = crate::effects::PlayerEffects::from_saved(&level.active_effects);
     guest.game_mode = level.mode();
@@ -527,6 +527,7 @@ pub fn store(guest: &Guest, level: &mut Level, vehicle: Option<Tag>) {
     level.xp_level = guest.xp_level;
     level.xp_progress = guest.xp_progress;
     level.xp_total = guest.xp_total;
+    level.score = guest.score;
     level.xp_seed = guest.xp_seed;
     level.active_effects = guest.effects.saved();
     level.game_mode = guest.game_mode;

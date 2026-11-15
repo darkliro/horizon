@@ -241,10 +241,6 @@
   "Peak Brightness": "Pik Parlaqlıq",
   "Black Level": "Qara Səviyyə",
   "UI Brightness": "UI Parlaqlığı",
-  "HDR Lighting": "HDR işıqlandırma",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "İşıq mənbələri, günəş və günəş işığı ağdan kənara parlayır. Söndür: yalnız SDR kimi.",
-  "Smooth Gradients": "Hamar keçidlər",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-bit kadr: tünd səmalar və kölgələr zolaqlanmır. Bir az daha çox VRAM. Növbəti başlatmada.",
   "Battery Mode": "Batareya rejimi",
   "Graphics API": "Qrafik API",
   "Translucent Batching": "Şəffaf Batching",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Ekranın təzələnməsini gözləyir: cırılma, bir az gecikmə.",
   "Size of menus and the HUD.": "Menyuların ölçüsü və HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Aşağıdakı seçimləri birlikdə təyin edir. Birinin dəyişdirilməsi onu Xüsusi edir.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, od və günəş işığı ağdan daha parlaq parlayır. HDR displey lazımdır.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Kölgələri ekranınızın ən tünd qarasına qaldırır. 0: həqiqi qara, qaldırma yoxdur.",
   "How bright highlights get. Auto: the peak your system reports.": "Parlaq məqamlar necə əldə edilir. Avtomatik: sisteminizin ən yüksək hesabatı.",
   "How bright white looks in the world. Auto: your desktop's white.": "Dünyada ağ rəngin nə qədər parlaq göründüyü. Avtomatik: iş masanızın ağı.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Nişan əlavə et",
   "horizon.studio.topbar.clear_keyframes": "🗑 Açar kadrları təmizlə",
   "horizon.studio.topbar.timeline_hud": "⏱ Vaxt xətti",
-  "horizon.studio.topbar.split_scene": "Səhnəni böl"
+  "horizon.studio.topbar.split_scene": "Səhnəni böl",
+  "horizon.options.block_vibration": "Bedrock-dan haptik əks əlaqə",
+  "horizon.options.split_vibration": "Yığın bölmə vibrasiyası",
+  "horizon.options.impulse_triggers": "İmpuls tetikləri",
+  "A tick when you break a block, as in Bedrock.": "Blok qıranda o, Bedrock-dakı kimi titrəyir.",
+  "A short buzz when you split a stack, as in Bedrock.": "Bir yığını böldükdə qısa müddət titrəyir, Bedrock-dakı kimi.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One kontrolunun tetikləri tutacaqları ilə birlikdə titrəyir."
 }

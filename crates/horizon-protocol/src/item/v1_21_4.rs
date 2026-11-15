@@ -124,8 +124,8 @@ pub(super) fn read_component(kind: i32, r: &mut Reader) -> Result<Component> {
                 ));
             }
             Ok(Component::Trim {
-                material: material - 1,
-                pattern: pattern - 1,
+                material: ids::synced_up("minecraft:trim_material", material - 1),
+                pattern: ids::synced_up("minecraft:trim_pattern", pattern - 1),
             })
         }
         _ => Component::read(kind, r),
@@ -202,7 +202,8 @@ fn block_set(r: &mut Reader, w: &mut Writer) -> Result<()> {
     if n == 0 {
         w.string(&r.string(32767)?);
     } else {
-        let n = usize::try_from(n - 1).map_err(|_| Error::new("negative holder set"))?;
+        let n =
+            usize::try_from(n.wrapping_sub(1)).map_err(|_| Error::new("negative holder set"))?;
         if n > r.remaining() {
             return Err(Error::new("holder set past the end"));
         }

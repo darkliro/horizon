@@ -241,10 +241,6 @@
   "Peak Brightness": "Sklêrijenn uhelañ",
   "Black Level": "Live du",
   "UI Brightness": "Sklêrijenn UI",
-  "HDR Lighting": "Gouloù HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "An holl c'houloù, an heol hag e skedoù a lugern pelloc'h eget ar gwenn. Diweredekaet : evel SDR hepken.",
-  "Smooth Gradients": "Gradennoù dous",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Framm 16 bit : ne vez bandennoù ebet en oabl teñval nag er skeudoù. Un tamm muioc'h a VRAM. Kregiñ da heul.",
   "Battery Mode": "Mod pilenn",
   "Graphics API": "API grafikoù",
   "Translucent Batching": "Lodennadur treuzwelus",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Gortoz a ra freskaat ar skramm : tamm torr ebet, un tamm dale.",
   "Size of menus and the HUD.": "Ment ar mennozhioù hag an HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Lakaat a ra an dibarzhioù amañ dindan asambles. Cheñch unan a ra anezhañ Personelaet.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, tan ha gouloù an heol a lugern muioc'h eget ar gwenn. Ezhomm zo eus ur skramm HDR.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Sevel a ra ar skeudoù betek du teñvalañ ho skramm. 0 : du gwir, sevel ebet.",
   "How bright highlights get. Auto: the peak your system reports.": "Pegen skedus e teu ar sklêrijennoù. Emgefre : ar pik a vez embannet gant ho reizhiad.",
   "How bright white looks in the world. Auto: your desktop's white.": "Pegen skedus e seblant ar gwenn er bed. Emgefreek : gwenn ho kefridi.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Ouzhpenn ur merker",
   "horizon.studio.topbar.clear_keyframes": "🗑 Skaotañ an alc'hwezioù framm",
   "horizon.studio.topbar.timeline_hud": "⏱ Linenn amzer",
-  "horizon.studio.topbar.split_scene": "Rannañ ar senenn"
+  "horizon.studio.topbar.split_scene": "Rannañ ar senenn",
+  "horizon.options.block_vibration": "Adlakaat haptek eus Bedrock",
+  "horizon.options.split_vibration": "Fibrusadenn rannañ bern",
+  "horizon.options.impulse_triggers": "Tarzhoù impuls",
+  "A tick when you break a block, as in Bedrock.": "Pa torrit ur bloc'had e fiñv, evel e Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Ur fibrusadenn verr pa rannet ur bern, evel e Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "An tarzhoù war ur c'hontroller Xbox One a fiñv gant e zornadoù."
 }

@@ -241,10 +241,6 @@
   "Peak Brightness": "Պայծառ պայծառություն",
   "Black Level": "Սև մակարդակ",
   "UI Brightness": "UI պայծառություն",
-  "HDR Lighting": "HDR լուսավորություն",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Լույսի աղբյուրները, արևը և արևի լույսը փայլում են սպիտակից վեր։ Անջատված՝ ինչպես SDR։",
-  "Smooth Gradients": "Հարթ գրադիենտներ",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-բիթ կադր. մութ երկինքներն ու ստվերները չեն շերտավորվում։ Մի փոքր ավելի շատ VRAM։ Հաջորդ գործարկումից։",
   "Battery Mode": "Մարտկոցի ռեժիմ",
   "Graphics API": "Գրաֆիկական API",
   "Translucent Batching": "Կիսաթափանցիկ փաթեթավորում",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Սպասում է էկրանի թարմացմանը՝ առանց պատռվելու, մի փոքր ուշացում:",
   "Size of menus and the HUD.": "Ցանկերի չափը և HUD-ը:",
   "Sets the options below together. Changing one makes it Custom.": "Սահմանում է ստորև նշված տարբերակները միասին: Մեկը փոխելը դարձնում է մաքսային:",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Լավան, կրակը և արևի լույսն ավելի պայծառ են փայլում, քան սպիտակը: Անհրաժեշտ է HDR էկրան:",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Ստվերները բարձրացնում է ձեր էկրանի ամենամուգ սևին։ 0՝ իրական սև, առանց բարձրացման։",
   "How bright highlights get. Auto: the peak your system reports.": "Որքան վառ ընդգծումներ են ստանում: Ավտոմատ. ձեր համակարգի գագաթնակետը հաղորդում է:",
   "How bright white looks in the world. Auto: your desktop's white.": "Թե որքան պայծառ է սպիտակը երևում աշխարհում։ Ավտոմատ՝ ձեր աշխատասեղանի սպիտակը։",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Ավելացնել մարկեր",
   "horizon.studio.topbar.clear_keyframes": "🗑 Մաքրել կադրերը",
   "horizon.studio.topbar.timeline_hud": "⏱ Ժամանակագիծ",
-  "horizon.studio.topbar.split_scene": "Բաժանել տեսարանը"
+  "horizon.studio.topbar.split_scene": "Բաժանել տեսարանը",
+  "horizon.options.block_vibration": "Հապտիկ արձագանք Bedrock-ից",
+  "horizon.options.split_vibration": "Թրթռում կույտը բաժանելիս",
+  "horizon.options.impulse_triggers": "Իմպուլսային ձգաններ",
+  "A tick when you break a block, as in Bedrock.": "Երբ կոտրում ես բլոկ, այն թրթռում է, ինչպես Bedrock-ում։",
+  "A short buzz when you split a stack, as in Bedrock.": "Կարճ թրթռում, երբ բաժանում ես կույտը, ինչպես Bedrock-ում։",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One կարգավորիչի ձգանները թրթռում են նրա բռնակների հետ միասին։"
 }

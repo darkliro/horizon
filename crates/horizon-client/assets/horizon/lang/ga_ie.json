@@ -241,10 +241,6 @@
   "Peak Brightness": "Buaic Gile",
   "Black Level": "Leibhéal Dubh",
   "UI Brightness": "Gile Chomhéadain",
-  "HDR Lighting": "Soilsiú HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Téann foinsí solais, an ghrian agus solas na gréine thar bán. As: díreach mar SDR.",
-  "Smooth Gradients": "Grádáin Réidh",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Fráma 16-giotán: ní dhéanann spéartha dorcha agus scáthanna bandaí. Beagán níos mó VRAM. An chéad tús eile.",
   "Battery Mode": "Mód Battery",
   "Graphics API": "Grafaicí API",
   "Translucent Batching": "Baisceáil Tréshoilseach",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Ag fanacht le hathnuachan an taispeántais: gan stróiceadh, beagán foighne.",
   "Size of menus and the HUD.": "Méid na biachláir agus an HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Socraíonn sé na roghanna thíos le chéile. Athrú ar cheann a dhéanann sé an Chustaim.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Tá lava, tine agus solas na gréine níos gile ná bán. Tá taispeáint HDR ag teastáil.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Ardaíonn scáthanna go dtí an dubh is dorcha ar do thaispeántas. 0: fíordhubh, gan ardú.",
   "How bright highlights get. Auto: the peak your system reports.": "Conas a fhaigheann buaicphointí geala. Auto: an bhuaic tuairiscí do chórais.",
   "How bright white looks in the world. Auto: your desktop's white.": "Cé chomh geal is a fheictear bán sa domhan. Uathoibríoch: bán do dheisce.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Cuir Marcóir",
   "horizon.studio.topbar.clear_keyframes": "🗑 Glan Eochairfhrámaí",
   "horizon.studio.topbar.timeline_hud": "⏱ Amlíne",
-  "horizon.studio.topbar.split_scene": "Scoilt Radharc"
+  "horizon.studio.topbar.split_scene": "Scoilt Radharc",
+  "horizon.options.block_vibration": "Aiseolas haptach ó Bedrock",
+  "horizon.options.split_vibration": "Creathadh ag roinnt stac",
+  "horizon.options.impulse_triggers": "Truicirí spreagtha",
+  "A tick when you break a block, as in Bedrock.": "Nuair a bhriseann tú bloc, crithíonn sé, mar atá i Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Creathadh gearr nuair a roinneann tú stac, mar atá in Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Crithíonn truicirí rialtán Xbox One leo siúd lena lámha."
 }

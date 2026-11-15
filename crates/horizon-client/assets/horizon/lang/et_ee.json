@@ -241,10 +241,6 @@
   "Peak Brightness": "Maksimaalne heledus",
   "Black Level": "Must tase",
   "UI Brightness": "UI heledus",
-  "HDR Lighting": "HDR-valgustus",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Valgusallikad, päike ja päikesevalgus säravad üle valge. Väljas: nagu SDR.",
-  "Smooth Gradients": "Sujuvad üleminekud",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-bitine kaader: tumedad taevad ja varjud ei triibulise. Natuke rohkem VRAM-i. Järgmisel käivitusel.",
   "Battery Mode": "Akurežiim",
   "Graphics API": "Graafika API",
   "Translucent Batching": "Läbipaistev pakkimine",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Ootab ekraani värskendust: ei rebene, väike latentsus.",
   "Size of menus and the HUD.": "Menüüde suurus ja HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Määrab allolevad valikud koos. Ühe muutmine muudab selle kohandatud.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Laava, tuli ja päikesevalgus säravad valgest heledamalt. Vajab HDR-ekraani.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Tõstab varjud ekraani tumedaima mustani. 0: tõeline must, ilma tõstmiseta.",
   "How bright highlights get. Auto: the peak your system reports.": "Kui eredad esiletõstud saavad. Automaatne: tipp, millest süsteem teatab.",
   "How bright white looks in the world. Auto: your desktop's white.": "Kui hele valge maailmas paistab. Automaatne: sinu töölaua valge.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Lisa marker",
   "horizon.studio.topbar.clear_keyframes": "🗑 Tühjenda võtmeraamid",
   "horizon.studio.topbar.timeline_hud": "⏱ Ajatelg",
-  "horizon.studio.topbar.split_scene": "Tükelda stseen"
+  "horizon.studio.topbar.split_scene": "Tükelda stseen",
+  "horizon.options.block_vibration": "Bedrocki haptiline tagasiside",
+  "horizon.options.split_vibration": "Virna jagamise vibratsioon",
+  "horizon.options.impulse_triggers": "Impulsspäästikud",
+  "A tick when you break a block, as in Bedrock.": "Kui ploki lõhud, vibreerib see nagu Bedrockis.",
+  "A short buzz when you split a stack, as in Bedrock.": "Lühike vibratsioon virna jagamisel, nagu Bedrockis.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox Onei pulti päästikud vibreerivad koos selle käepidemetega."
 }

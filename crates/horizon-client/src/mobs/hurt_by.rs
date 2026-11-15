@@ -47,9 +47,7 @@ pub(super) fn before_hurt(m: &mut Mob, source: &Damage) -> bool {
     // Enderman.hurtServer: past `isInvulnerableTo`, the teleport draw follows
     // `super.hurtServer` whatever it answered (a hurt cooldown, a dead
     // enderman), its hurt sound's pitch included.
-    m.species() == Species::Enderman
-        && !m.removed
-        && !(m.is_invulnerable() && !source.kind.bypasses_invulnerability())
+    m.species() == Species::Enderman && !m.removed && !m.is_invulnerable_to(source)
 }
 /// `LivingEntity.baseTick`'s hurt timers: `hurtTime` and `invulnerableTime`
 /// count down, and the mob that hurt it is forgotten once it is not alive or

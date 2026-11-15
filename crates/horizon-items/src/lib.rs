@@ -17,6 +17,8 @@ pub mod flowers;
 pub mod item_data;
 pub mod item_nbt;
 pub mod items;
+#[cfg(test)]
+mod loot_predicate_tests;
 pub mod mining;
 pub mod random_sequences;
 pub mod recipe_filters;

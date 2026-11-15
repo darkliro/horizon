@@ -390,6 +390,8 @@ pub(super) struct Level<'g, H> {
     /// holds the game); the first ones scan, as the build costs a few scans.
     pub(super) boxes: std::cell::OnceCell<MobBoxes>,
     pub(super) box_queries: std::cell::Cell<u32>,
+    /// The `SpawnGroupData` the pack being spawned has so far.
+    pub(super) group: std::cell::Cell<Option<horizon_client::mobs::spawning::SpawnGroup>>,
     /// The entity types some biome of the level gives a spawn cost (the
     /// nether's few): for any other the cost is none wherever it stands, and
     /// spawning asks for one for every loaded mob each tick.
@@ -443,7 +445,21 @@ impl<H: LevelHost> Level<'_, H> {
         let (bx, by, bz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let facts = biome_facts_in(self.w.world, self.w.biomes, self.w.data, bx, by, bz);
         let difficulty = difficulty_reader(self.w.world)(r.position);
-        horizon_client::mobs::spawning::finalize(&mut mob, &facts, &difficulty);
+        // NaturalSpawner.spawnCategoryForPosition passes each member the group
+        // data the previous one returned, starting from null.
+        let mut group = if r.group_index == 0 {
+            None
+        } else {
+            self.group.get()
+        };
+        // Natural packs still finalize on the mob's own random until #11574 ports them.
+        horizon_client::mobs::spawning::finalize_on_own_random_in(
+            &mut mob,
+            &facts,
+            &difficulty,
+            &mut group,
+        );
+        self.group.set(group);
         horizon_client::mobs::raider::finalize(
             &mut mob,
             horizon_client::mobs::raider::Reason::Natural,
@@ -474,8 +490,7 @@ impl<H: LevelHost> Level<'_, H> {
         )
     }
     fn biome(&self, x: i32, y: i32, z: i32) -> Option<&BiomeInfo> {
-        let chunk = self.w.world.chunks.get(&(x >> 4, z >> 4))?;
-        Some(self.w.biomes.get(chunk.biome(x, y, z)))
+        Some(self.w.biomes.get(self.w.world.noise_biome(x, y, z)?))
     }
     /// The block whose noise cell `BiomeManager.getBiome` reads.
     fn zoomed(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
@@ -555,11 +570,13 @@ impl<H: LevelHost> NaturalLevel for Level<'_, H> {
     fn potential_spawns(&self, category: Category, pos: [i32; 3], entries: &mut Vec<SpawnEntry>) {
         self.game.potential_spawns(category, pos, entries);
     }
+    // `Level.getMinY` and `getMaxY`: the level's own range (0..255 in vanilla's
+    // Nether and End), not the widened column its chunks hold.
     fn min_y(&self) -> i32 {
-        self.w.world.bottom_y()
+        self.w.world.shape.min_y
     }
     fn max_y(&self) -> i32 {
-        self.w.world.top_y() - 1
+        self.w.world.shape.max_y() - 1
     }
     fn ambient_light(&self) -> f32 {
         self.w.dimension_type.ambient_light
@@ -674,8 +691,11 @@ impl<H: LevelHost> NaturalLevel for Level<'_, H> {
     /// skipped (air counts for no heightmap). An unloaded column reads as air.
     fn heightmap(&self, kind: Heightmap, x: i32, z: i32) -> i32 {
         let world = self.w.world;
+        // A heightmap reads at least the level's minimum Y (an empty column of a level
+        // narrower than its chunks' column would read the column's bottom).
+        let min_y = world.shape.min_y;
         if kind == Heightmap::WorldSurface {
-            return self.w.world_surface(x, z);
+            return self.w.world_surface(x, z).max(min_y);
         }
         world
             .chunks
@@ -685,7 +705,7 @@ impl<H: LevelHost> NaturalLevel for Level<'_, H> {
                     spawn_selection::heightmap_blocks(self, kind, x, y, z)
                 })
             })
-            .map_or(self.w.world.bottom_y(), |y| y + 1)
+            .map_or(min_y, |y| (y + 1).max(min_y))
     }
     fn pathfindable_land(&self, x: i32, y: i32, z: i32) -> bool {
         self.w.data.state(self.state(x, y, z)).flags & data::LAND != 0
@@ -749,6 +769,7 @@ impl<'a> Game<'a> {
             pending_ids: Default::default(),
             boxes: Default::default(),
             box_queries: Default::default(),
+            group: Default::default(),
             costed: spawn_cost_types(world_biomes!(self)),
         }
     }
@@ -789,7 +810,7 @@ impl<'a> Game<'a> {
             self.enchant_spawn_equipment(id);
             self.halloween_spawn_head(id);
             if !persistent {
-                self.spawn_jockeys(id, true);
+                self.spawn_jockeys_on(id, true, true);
             }
         }
     }
@@ -1199,6 +1220,48 @@ mod tests {
             );
             assert_eq!(full(&game, x, range), near, "{x} {range}");
         }
+    }
+
+    /// An End chunk read back from a save holds the table's first biome (badlands) in the
+    /// sections its widened column adds below Y 0 and above 255. Natural spawning reads the
+    /// level's own range (`getMinY` 0, `getMaxY` 255) and biomes clamped to it
+    /// (`getNoiseBiome`): next to a floor at Y 0 every monster list is the End's, and an
+    /// empty column's surface is the floor (#15880).
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn end_spawning_reads_the_level_range_not_the_widened_column() {
+        use horizon_client::chunk::{Chunk, LevelShape};
+        use std::sync::Arc;
+        let mut game = crate::game::native_machines::tests::server_game();
+        game.dim = Dim::End;
+        game.world.shape = LevelShape::END;
+        let end = world_biomes!(game).id("minecraft:the_end");
+        // The column runs -64..320: quart rows 16..80 are the level's 0..256. The zoom
+        // reaches into the neighbours.
+        for (cx, cz) in (-1..=1).flat_map(|x| (-1..=1).map(move |z| (x, z))) {
+            let mut chunk = Chunk::with_layout(cx, cz, LevelShape::END.column());
+            for qy in 16..80 {
+                for qz in 0..4 {
+                    for qx in 0..4 {
+                        chunk.set_biome_cell(qx, qy, qz, end);
+                    }
+                }
+            }
+            game.world.chunks.insert((cx, cz), Arc::new(chunk));
+        }
+        let level = game.natural_level();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in [1, 2, 3, 254, 255] {
+                    let list = spawn_selection::mobs_at(&level, Category::Monster, x, y, z);
+                    let types: Vec<&str> = list.iter().map(|e| e.entity.as_str()).collect();
+                    assert_eq!(types, ["minecraft:enderman"], "at {x} {y} {z}");
+                }
+            }
+        }
+        assert_eq!((level.min_y(), level.max_y()), (0, 255));
+        assert_eq!(level.heightmap(Heightmap::WorldSurface, 3, 3), 0);
+        assert_eq!(level.heightmap(Heightmap::MotionBlocking, 3, 3), 0);
     }
 
     #[test]

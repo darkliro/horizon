@@ -130,7 +130,7 @@ impl Game<'_> {
             )
         };
         let name = match &state.name {
-            Some(n) => horizon_protocol::text::literal(n),
+            Some(n) => horizon_client::scoreboard::json_to_tag(&n.component()),
             None => Tag::compound([("translate", Tag::String(key.as_str().into()))]),
         };
         let uuid = state.mob.map_or([0; 4], |id| self.mob_uuid(id));
@@ -302,6 +302,7 @@ impl Game<'_> {
         menu.merchant = Some(session);
         op(&mut menu, &env);
         let made = maps.made.take();
+        self.guest_bundle_sounds(host, gi, std::mem::take(&mut menu.player_sounds));
         let session = menu.merchant.take().expect("attached");
         let dropped = std::mem::take(&mut menu.dropped);
         let crafted_counts = std::mem::take(&mut menu.crafted_counts);

@@ -263,6 +263,22 @@ impl PlayerMotion {
     }
 }
 impl MotionWorld<'_, '_, '_> {
+    /// `Player.getBlockSpeedFactor` (#16176): soul sand and honey slow the
+    /// player's move only while it neither flies nor glides.
+    pub(super) fn player_block_speed_factor(&mut self) -> Result<f32> {
+        let efficiency = self.player.attribute("minecraft:movement_efficiency")? as f32;
+        let flying = self.player.flying || self.player.fall_flying;
+        let location = self.location();
+        Ok(movement_support::player_block_speed_factor(
+            &mut RegistryMovementWorld {
+                properties: &self.resources.blocks,
+                world: self,
+            },
+            location,
+            flying,
+            efficiency,
+        )?)
+    }
     /// `LivingEntity.aiStep`'s jump phase: rise in water or lava, else jump
     /// from the ground (or from shallow fluid); nothing while flying.
     pub(super) fn jump_phase(&mut self) -> Result<()> {

@@ -837,6 +837,21 @@ impl Game<'_> {
     }
     /// `EntityType.spawn(.., pos, reason, tryMoveDown, false)` for a mob.
     pub(super) fn spawn_mob_at(&mut self, kind: &str, p: Pos, try_move_down: bool) -> Option<u32> {
+        self.spawn_mob_finalized_at(kind, p, try_move_down, true)
+    }
+    /// `MobBucketItem.spawn`: `EntityType.create(.., EntitySpawnReason.BUCKET, true, false)`.
+    /// `Axolotl.finalizeSpawn` returns first for that reason, without a draw.
+    pub(super) fn spawn_bucket_mob(&mut self, kind: &str, p: Pos) -> Option<u32> {
+        let axolotl = matches!(kind, "axolotl" | "minecraft:axolotl");
+        self.spawn_mob_finalized_at(kind, p, true, !axolotl)
+    }
+    fn spawn_mob_finalized_at(
+        &mut self,
+        kind: &str,
+        p: Pos,
+        try_move_down: bool,
+        finalize: bool,
+    ) -> Option<u32> {
         let name = if kind.contains(':') {
             kind.to_owned()
         } else {
@@ -871,17 +886,20 @@ impl Game<'_> {
             f64::from(p.2) + 0.5,
         ];
         // EntityType.create: `snapTo(.., Mth.wrapDegrees(level.random.nextFloat() * 360), 0)`.
-        let id = self.spawn_mob_reason_yaw(
+        let id = self.spawn_mob_internal(
             &name,
             at,
             true,
             false,
             false,
+            finalize,
             super::creatures::SpawnYaw::Created,
         )?;
         // finalizeSpawn's riders (chicken jockeys, spider jockeys...) come
         // with a dispensed mob as with any spawn that is not natural.
-        self.spawn_jockeys(id, false);
+        if finalize {
+            self.spawn_jockeys(id, false);
+        }
         Some(id)
     }
     /// `Player.setItemSlot` of a dispensed piece for the player in place:
@@ -1043,7 +1061,7 @@ impl Game<'_> {
         true
     }
     /// After `EntityType.spawn` / `MobBucketItem.spawn`: `mob.playAmbientSound()`.
-    fn mob_ambient(&mut self, id: u32) -> Result<()> {
+    pub(super) fn mob_ambient(&mut self, id: u32) -> Result<()> {
         if self.dragon_spawn_ambient(id) {
             return Ok(());
         }
@@ -1068,7 +1086,9 @@ impl Game<'_> {
     pub(super) fn mob_placed(&mut self, id: u32, stack: &ItemStack) -> Result<()> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
             m.persistent = false;
-            horizon_client::entity_nbt::apply_item_components(m, stack);
+        }
+        self.apply_bucket_stack_config(id, stack);
+        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
             match m.species() {
                 Species::Cod
                 | Species::Salmon
@@ -1115,7 +1135,7 @@ impl Game<'_> {
         // EntityType.updateCustomEntityTag: a configured egg
         // (`/give @s pig_spawn_egg[minecraft:entity_data={…}]`) spawns the mob
         // it describes from a dispenser too, not only from a player's hand.
-        self.apply_spawn_egg_entity_data(id, &stack);
+        self.apply_spawn_egg_entity_data(id, &stack, true);
         self.mob_ambient(id)?;
         // SpawnEggItemBehavior: the entity was placed by the dispenser.
         self.post_block_game_event("minecraft:entity_place", [pos.0, pos.1, pos.2], None, None);
@@ -1439,7 +1459,7 @@ impl Game<'_> {
         if let Some(kind) = mob {
             // MobBucketItem.checkExtraContent: the mob from the bucket calls
             // out, then ENTITY_PLACE.
-            if let Some(id) = self.spawn_mob_at(kind, target, true) {
+            if let Some(id) = self.spawn_bucket_mob(kind, target) {
                 self.mob_placed(id, &stack)?;
             }
             self.post_block_game_event(

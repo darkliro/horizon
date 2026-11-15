@@ -20,7 +20,8 @@
 //!   ([`fdlibm`]).
 //!
 //! So these functions return what vanilla returns on the same machine, on
-//! Linux and on an Apple silicon Mac alike.
+//! Linux and on an Apple silicon Mac alike. They are JVM methods, not ports of
+//! a vanilla class, so the comments below name the Java function they compute.
 
 pub mod fdlibm;
 
@@ -30,7 +31,7 @@ pub mod aarch64 {
     pub use super::fdlibm::{cos_fma as cos, sin_fma as sin};
 }
 
-/// `Math.round(float)`: the `int` closest to `a`, ties toward positive
+/// Java `float` rounding: the `int` closest to `a`, ties toward positive
 /// infinity (so `-2.5` is `-2`); `NaN` is 0, and values beyond the `int`
 /// range give `i32::MIN` or `i32::MAX`.
 pub fn round_f32(a: f32) -> i32 {
@@ -41,7 +42,7 @@ pub fn round_f32(a: f32) -> i32 {
     (f64::from(a) + 0.5).floor() as i32
 }
 
-/// `Math.sin`.
+/// Java `sin`.
 pub fn sin(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         aarch64::sin(x)
@@ -52,7 +53,7 @@ pub fn sin(x: f64) -> f64 {
     }
 }
 
-/// `Math.cos`.
+/// Java `cos`.
 pub fn cos(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         aarch64::cos(x)
@@ -63,7 +64,7 @@ pub fn cos(x: f64) -> f64 {
     }
 }
 
-/// `Math.tan`.
+/// Java `tan`.
 pub fn tan(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         libm::tan(x)
@@ -72,7 +73,7 @@ pub fn tan(x: f64) -> f64 {
     }
 }
 
-/// `Math.exp`.
+/// Java `exp`.
 pub fn exp(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         libm::exp(x)
@@ -81,7 +82,7 @@ pub fn exp(x: f64) -> f64 {
     }
 }
 
-/// `Math.log`.
+/// Java `log`.
 pub fn log(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         fdlibm::log(x)
@@ -92,7 +93,7 @@ pub fn log(x: f64) -> f64 {
     }
 }
 
-/// `Math.log10`.
+/// Java `log10`.
 pub fn log10(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         fdlibm::log10(x)
@@ -101,7 +102,7 @@ pub fn log10(x: f64) -> f64 {
     }
 }
 
-/// `Math.pow`.
+/// Java `pow`.
 pub fn pow(x: f64, y: f64) -> f64 {
     // Java differs from C here: a NaN exponent, or |x| == 1 with an infinite
     // exponent, yields NaN (C returns 1.0). A zero exponent stays 1.0 for any x.
@@ -115,7 +116,7 @@ pub fn pow(x: f64, y: f64) -> f64 {
     }
 }
 
-/// `Math.cbrt`.
+/// Java `cbrt`.
 pub fn cbrt(x: f64) -> f64 {
     if cfg!(target_arch = "aarch64") {
         fdlibm::cbrt(x)
@@ -124,32 +125,32 @@ pub fn cbrt(x: f64) -> f64 {
     }
 }
 
-/// `Math.atan2`.
+/// Java `atan2`.
 pub fn atan2(y: f64, x: f64) -> f64 {
     crate::geometry::trig::fdlibm_atan2(y, x)
 }
 
-/// `Math.atan`.
+/// Java `atan`.
 pub fn atan(x: f64) -> f64 {
     libm::atan(x)
 }
 
-/// `Math.asin`.
+/// Java `asin`.
 pub fn asin(x: f64) -> f64 {
     libm::asin(x)
 }
 
-/// `Math.acos`.
+/// Java `acos`.
 pub fn acos(x: f64) -> f64 {
     libm::acos(x)
 }
 
-/// `Math.hypot`.
+/// Java `hypot`.
 pub fn hypot(x: f64, y: f64) -> f64 {
     fdlibm::hypot(x, y)
 }
 
-/// `Math.round(double)`: the nearest `long`, ties toward positive infinity
+/// Java `double` rounding: the nearest `long`, ties toward positive infinity
 /// (so `-2.5` is `-2`), saturating, `NaN` is 0.
 pub fn round(x: f64) -> i64 {
     let f = x.floor();
@@ -513,7 +514,7 @@ pub mod exact {
         (quick, log_series(s, k))
     }
 
-    /// `log(x)` rounded to nearest, as Java's `Math.log` with the platform's libm out of it: NaN
+    /// `log(x)` rounded to nearest, as Java's `log` with the platform's libm out of it: NaN
     /// for NaN and negative `x`, -infinity for 0, infinity for infinity.
     pub fn log(x: f64) -> f64 {
         if x.is_nan() || x < 0.0 {
@@ -605,7 +606,7 @@ mod tests {
         }
     }
 
-    /// Java 24's `Math.sin` and `Math.cos` on x86-64 HotSpot, for arguments
+    /// Java 24's `sin` and `cos` on x86-64 HotSpot, for arguments
     /// where Windows' libm rounds the other way.
     #[test]
     fn exact_sin_and_cos_round_like_javas_x86_intrinsics() {
@@ -646,7 +647,7 @@ mod tests {
         assert_eq!(exact::sin(3.0e6), 3.0e6f64.sin());
     }
 
-    /// Java 25's `Math.log` on x86-64 HotSpot, for arguments where Windows' libm rounds the other way.
+    /// Java 25's `log` on x86-64 HotSpot, for arguments where Windows' libm rounds the other way.
     #[test]
     fn exact_log_rounds_like_javas_x86_intrinsic() {
         for case in [
@@ -872,7 +873,7 @@ mod tests {
 
     #[test]
     fn atan2_matches_strictmath() {
-        // (y bits, x bits, StrictMath.atan2 bits) from HotSpot 25: x < 0 and
+        // (y bits, x bits, Java's `atan2` bits) from HotSpot 25: x < 0 and
         // |y/x| > 2^60, where libm::atan2 rounds one ulp lower,
         check2(
             super::atan2,

@@ -230,6 +230,7 @@ fn launching_from_a_block_and_while_gliding_use_the_rocket_up() {
             pos: [2, 199, 2],
             face: [0, 1, 0],
             point: [2.5, 200.0, 2.5],
+            inside: false,
         };
         for used in 1..=5 {
             game.inventory[game.selected] = Some(stack.clone());

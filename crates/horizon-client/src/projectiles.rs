@@ -11,10 +11,12 @@ use horizon_core::{
     random::RandomSource,
 };
 
+mod deflection;
+
 /// `AbstractArrow.startFalling`'s per-axis random velocity damping.
 pub fn start_falling_velocity(
     velocity: Vec3,
-    random: &mut horizon_core::random::LegacyRandom,
+    random: &mut horizon_core::random::EntityRandom,
 ) -> Vec3 {
     let x = f64::from(random.next_float() * 0.2);
     let y = f64::from(random.next_float() * 0.2);
@@ -276,8 +278,10 @@ pub struct Projectile {
     /// `Entity.DATA_SHARED_FLAGS_ID`'s fire bit, set by the server's base tick.
     pub synced_fire: bool,
     /// `Fireball.DATA_ITEM_STACK`: the item a fireball is drawn as, a fire
-    /// charge until [`Projectile::set_item`] gives it another. None for the
-    /// kinds that are no `Fireball` (a wither skull, a wind charge).
+    /// charge until [`Projectile::set_item`] gives it another. For a thrown
+    /// item (`ThrowableItemProjectile.DATA_ITEM_STACK`) the stack it was
+    /// thrown or loaded as, None for its kind's own item. None for the other
+    /// kinds (a wither skull, a wind charge).
     pub item: Option<crate::items::ItemStack>,
     /// `ThrownEgg`'s item `CHICKEN_VARIANT` component, as the chicken variant
     /// index its hatchlings get; None when no item was recorded.
@@ -290,8 +294,8 @@ pub struct Projectile {
 }
 /// A new projectile's own random (`Entity.random`) and the UUID its first two
 /// draws make (`Mth.createInsecureUUID`).
-pub fn new_own_random() -> (horizon_core::random::LegacyRandom, [i32; 4]) {
-    let mut random = crate::random_source::entity();
+pub fn new_own_random() -> (horizon_core::random::EntityRandom, [i32; 4]) {
+    let mut random = horizon_core::random::EntityRandom::own(crate::random_source::entity());
     let uuid = crate::save::insecure_uuid(&mut random);
     (random, uuid)
 }
@@ -568,7 +572,7 @@ impl Projectile {
         self.bounds()
     }
     /// The arrow's own random from now on (`Entity.random`).
-    pub fn with_arrow_random(mut self, random: horizon_core::random::LegacyRandom) -> Self {
+    pub fn with_arrow_random(mut self, random: horizon_core::random::EntityRandom) -> Self {
         if let Some(a) = self.arrow.as_mut() {
             a.random = random;
         }
@@ -807,15 +811,7 @@ impl Projectile {
         // that movement. AbstractHurtingProjectile.applyInertia reads the
         // movement it already has: fireballs, wither skulls and wind charges
         // have no gravity step before the bubbles.
-        let hurting = matches!(
-            self.kind,
-            ProjectileKind::SmallFireball
-                | ProjectileKind::LargeFireball { .. }
-                | ProjectileKind::DragonFireball
-                | ProjectileKind::WitherSkull { .. }
-                | ProjectileKind::WindCharge
-                | ProjectileKind::BreezeWindCharge
-        );
+        let hurting = self.is_hurting();
         let throwable = matches!(
             self.kind,
             ProjectileKind::Snowball
@@ -842,7 +838,7 @@ impl Projectile {
     /// Projectile.shoot: normalized direction plus triangular noise, times speed.
     pub fn shoot(
         &mut self,
-        random: &mut impl RandomSource,
+        random: &mut horizon_core::random::EntityRandom,
         dir: [f64; 3],
         speed: f32,
         uncertainty: f32,
@@ -938,7 +934,15 @@ impl Projectile {
     pub fn set_egg_item(&mut self, stack: &crate::items::ItemStack) {
         if self.kind == ProjectileKind::Egg {
             self.egg_variant = Some(egg_chicken_variant(stack));
+            self.set_thrown_item(stack);
         }
+    }
+    /// `ThrowableItemProjectile.setItem`: one of the stack, which the save
+    /// writes back as `Item`.
+    pub fn set_thrown_item(&mut self, stack: &crate::items::ItemStack) {
+        let mut stack = stack.clone();
+        stack.count = 1;
+        self.item = Some(stack);
     }
     pub fn set_item(&mut self, stack: crate::items::ItemStack) {
         if !self.kind.is_item_fireball() {
@@ -3016,7 +3020,9 @@ mod arrow_color_tests {
                 effect: None,
             };
             let mut p = Projectile::new(kind, Vec3::new(0.5, 64.0, 0.5), None);
-            let mut arrow = crate::arrows::ArrowState::new(LegacyRandom::new(0));
+            let mut arrow = crate::arrows::ArrowState::new(
+                horizon_core::random::EntityRandom::own(LegacyRandom::new(0)),
+            );
             arrow.set_item(stack);
             p.arrow = Some(Box::new(arrow));
             p.arrow_effect_color()

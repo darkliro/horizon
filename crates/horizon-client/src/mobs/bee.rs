@@ -17,7 +17,7 @@ use super::{
     path::PathType,
 };
 use crate::beehive::BeehiveExt;
-use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_core::random::{LevelRandom, RandomSource};
 use std::collections::HashMap;
 
 const FLAG_ROLL: u8 = 2;
@@ -282,7 +282,7 @@ fn can_target(m: &Mob, w: &MobWorld) -> bool {
 
 /// `Bee.tick` after `super.tick()`: nectar drips (positions drawn from the
 /// level's random even on the server), then the roll.
-pub fn tick(m: &mut Mob, level_random: &mut LegacyRandom) {
+pub fn tick(m: &mut Mob, level_random: &mut LevelRandom) {
     if has_nectar(m) && get(m).is_some_and(|b| b.crops_grown < 10) && m.random.next_float() < 0.05 {
         let mut i = 0;
         while i < m.random.next_int_bound(2).unwrap_or(0) + 1 {
@@ -1337,7 +1337,6 @@ mod tests {
     use crate::mobs::world::with_test_world;
     use crate::mobs::{Mob, MobEvent, Species, Who, sensor_scan_tests::kind};
     use horizon_core::geometry::Vec3;
-    use horizon_core::random::LegacyRandom;
 
     fn bee() -> Mob {
         let mut kind = kind();
@@ -1387,7 +1386,7 @@ mod tests {
             |w, _| {
                 let mut m = bee();
                 m.position = Vec3::new(0.5, 64.0, 0.5);
-                let mut random = LegacyRandom::new(1);
+                let mut random = crate::mobs::world::level_random(1);
                 let mut events = Vec::new();
                 // The goal grows on a 1-in-reduced(30) roll.
                 for _ in 0..1000 {
@@ -1428,7 +1427,7 @@ mod tests {
         with_test_world(&[], |w, _| {
             let mut m = bee();
             let mut events = Vec::new();
-            let mut random = LegacyRandom::new(1);
+            let mut random = crate::mobs::world::level_random(1);
             let mut cx = Cx {
                 w,
                 lr: &mut random,
@@ -1461,7 +1460,7 @@ mod tests {
                 b.angry_at = None;
                 b.anger_end = w.game_time + 400;
                 m.ai.goals.add(1, super::BecomeAngryTarget::new());
-                let mut random = LegacyRandom::new(1);
+                let mut random = crate::mobs::world::level_random(1);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w: &w,

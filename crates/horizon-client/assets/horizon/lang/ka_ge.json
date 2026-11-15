@@ -241,10 +241,6 @@
   "Peak Brightness": "პიკური სიკაშკაშე",
   "Black Level": "შავი დონე",
   "UI Brightness": "ინტერფეისის სიკაშკაშე",
-  "HDR Lighting": "HDR განათება",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "სინათლის წყაროები, მზე და მზის შუქი თეთრზე მეტად ანათებს. გამორთული: ზუსტად როგორც SDR.",
-  "Smooth Gradients": "გლუვი გრადიენტები",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-ბიტიანი კადრი: ბნელი ცა და ჩრდილები ზოლებად არ იშლება. ცოტა მეტი VRAM. შემდეგი გაშვება.",
   "Battery Mode": "ბატარეის რეჟიმი",
   "Graphics API": "გრაფიკული API",
   "Translucent Batching": "გამჭვირვალე Batching",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "ელოდება ეკრანის განახლებას: არ იშლება, მცირე შეყოვნება.",
   "Size of menus and the HUD.": "მენიუს ზომა და HUD.",
   "Sets the options below together. Changing one makes it Custom.": "აყენებს ქვემოთ მოცემულ ვარიანტებს ერთად. ერთის შეცვლა მას მორგებულს ხდის.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "ლავა, ცეცხლი და მზის შუქი ანათებს თეთრზე უფრო კაშკაშა. სჭირდება HDR დისპლეი.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "ჩრდილებს ასწევს თქვენი ეკრანის ყველაზე ბნელ შავამდე. 0: ნამდვილი შავი, აწევის გარეშე.",
   "How bright highlights get. Auto: the peak your system reports.": "რამდენად ნათელი ხაზგასმა ხდება. ავტომატური: თქვენი სისტემის ანგარიშების პიკი.",
   "How bright white looks in the world. Auto: your desktop's white.": "რამდენად ნათელია თეთრი სამყაროში. ავტო: თქვენი სამუშაო მაგიდის თეთრი.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "მარკერის დამატება",
   "horizon.studio.topbar.clear_keyframes": "🗑 საკვანძო კადრების გასუფთავება",
   "horizon.studio.topbar.timeline_hud": "⏱ დროის ხაზი",
-  "horizon.studio.topbar.split_scene": "სცენის გაყოფა"
+  "horizon.studio.topbar.split_scene": "სცენის გაყოფა",
+  "horizon.options.block_vibration": "ჰაპტური უკუკავშირი Bedrock-იდან",
+  "horizon.options.split_vibration": "ვიბრაცია დასტის გაყოფისას",
+  "horizon.options.impulse_triggers": "იმპულსური ტრიგერები",
+  "A tick when you break a block, as in Bedrock.": "როცა ბლოკს ატეხავ, ის ვიბრირებს, როგორც Bedrock-ში.",
+  "A short buzz when you split a stack, as in Bedrock.": "მოკლე ვიბრაცია დასტის გაყოფისას, როგორც Bedrock-ში.",
+  "An Xbox One controller's triggers buzz with its handles.": "Xbox One კონტროლერის ტრიგერები მის სახელურებთან ერთად ვიბრირებს."
 }

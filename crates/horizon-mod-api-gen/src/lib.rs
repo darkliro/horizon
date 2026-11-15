@@ -39,6 +39,11 @@ fn game_methods(
             game_methods(&path, &inner, methods)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            // Only a top-level `impl ... Game` is taken below, and that needs both words in the
+            // text: a file without them is not parsed (about 200 of game/'s 708 files).
+            if !source.contains("impl") || !source.contains("Game") {
+                continue;
+            }
             let file = syn::parse_file(&source).map_err(|e| format!("{}: {e}", path.display()))?;
             for item in file.items {
                 if let Item::Impl(item) = item
@@ -1684,15 +1689,10 @@ mod tests {
             lf(&std::fs::read_to_string(root.join(super::RENDER_HOOKS)).unwrap()),
             lf(&std::fs::read_to_string(real.join(super::RENDER_HOOKS)).unwrap()),
         );
-        assert_eq!(
-            super::sources(&root, super::FillMode::Require)
-                .unwrap()
-                .hooks,
-            super::sources(&real, super::FillMode::Require)
-                .unwrap()
-                .hooks,
-        );
-        super::sources(&root, super::FillMode::Require).unwrap();
+        // Parsing the sources is the slow part, so each tree is parsed once.
+        let filled = super::sources(&root, super::FillMode::Require).unwrap();
+        let shipped_sources = super::sources(&real, super::FillMode::Require).unwrap();
+        assert_eq!(filled.hooks, shipped_sources.hooks);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -6,7 +6,7 @@
 //! draw lists (`ShadowView`) serve both; the map's texels are distorted toward the camera as the
 //! prelude's `shadow_position` undoes.
 
-use horizon_shader_api::{Api, Frame as FrameInputs, manifest::Shadow as Settings, stages::GROUP};
+use horizon_shader_api::{Frame as FrameInputs, manifest::Shadow as Settings, stages::GROUP};
 use horizon_shaders::Shadow;
 
 use super::native_material::TerrainShape;
@@ -43,13 +43,16 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     out.base = pos;
     return out;
 }
+fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>) -> HorizonShadowOut {
+    let atlas = horizon_terrain_terrain_uv(c.uv, origin.w);
+    let pos = horizon_material_displace(c.position + origin.xyz, atlas, c.layer, c.color, c.light);
+    return horizon_shadow_vertex(pos, atlas, c.layer, c.color);
+}
 @vertex fn horizon_shadow_vs(
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> HorizonShadowOut {
-    let atlas = horizon_terrain_terrain_uv(uv, origin.w);
-    let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin);
 }
 @vertex fn horizon_shadow_vs_flat(
     @builtin(vertex_index) index: u32,
@@ -57,9 +60,18 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonShadowOut {
     let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
-    let atlas = horizon_terrain_terrain_uv(uv, origin.w);
-    let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin);
+}
+// Solid draws reading the arena page (`SECTION_CORNER`), in either layout of the solid quads.
+@vertex fn horizon_shadow_vs_section(@builtin(vertex_index) vertex: u32,
+    @location(5) origin: vec4<f32>) -> HorizonShadowOut {
+    let s = horizon_terrain_section_corner(vertex);
+    return horizon_shadow_terrain(horizon_terrain_corner_inputs(s.c), origin);
+}
+@vertex fn horizon_shadow_vs_section_flat(@builtin(vertex_index) vertex: u32) -> HorizonShadowOut {
+    let s = horizon_terrain_section_corner(vertex);
+    let origin = horizon_corner_origin(s);
+    return horizon_shadow_terrain(horizon_terrain_corner_inputs(s.c), origin);
 }
 @fragment fn horizon_shadow_fs(in: HorizonShadowOut) {
     if horizon_shadow_taken(in.base, in.layer) { discard; }
@@ -152,13 +164,8 @@ pub struct ShadowGrid<'a> {
     pub normals: &'a wgpu::TextureView,
 }
 
-/// `shadow_color`'s format: under 0.2 it holds linear light, which 8 bits would band.
-fn shadow_color(api: Api) -> wgpu::TextureFormat {
-    match api {
-        Api::V0_1 => wgpu::TextureFormat::Rgba8Unorm,
-        Api::V0_2 => super::native_post::INTERMEDIATE,
-    }
-}
+/// `shadow_color`'s format: it holds linear light, which 8 bits would band.
+const SHADOW_COLOR: wgpu::TextureFormat = super::native_post::INTERMEDIATE;
 
 /// The shader pack's shadow camera for `settings`: orthographic over `distance` each side,
 /// staying put while the camera walks a `SNAP`-block cell. The map is distorted about its
@@ -223,7 +230,7 @@ pub struct ShadowMap {
 }
 
 impl ShadowMap {
-    pub fn new(device: &wgpu::Device, settings: Option<&Settings>, api: Api) -> Self {
+    pub fn new(device: &wgpu::Device, settings: Option<&Settings>) -> Self {
         let size = settings.map_or(1, |s| s.resolution);
         let texture = |label, format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -255,7 +262,7 @@ impl ShadowMap {
         );
         let color = texture(
             "Native shader pack shadow colour",
-            shadow_color(api),
+            SHADOW_COLOR,
             wgpu::TextureUsages::empty(),
         );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -479,7 +486,6 @@ fn shader_source(
     vertex: Option<&str>,
     materials: &[(u32, u32)],
     grid: Option<&str>,
-    api: Api,
 ) -> String {
     let table = super::native_material::layer_table("horizon_sprite_material", materials);
     let (head, displace) = match (grid, vertex) {
@@ -510,13 +516,14 @@ fn shader_source(
         ),
     };
     format!(
-        "{head}// Horizon's terrain (terrain.wgsl)\n{}{solid}{}{displace}{ENTRIES}",
+        "{head}// Horizon's terrain (terrain.wgsl)\n{}{solid}{}{displace}{}{ENTRIES}",
         prefixed(
-            &(include_str!("../hdr_light.wgsl").to_owned()
+            &(super::wgsl_prefix::HDR_LIGHT.to_owned()
                 + section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)")),
             PREFIX
         ),
-        super::native_post::line_helpers(api, false)
+        super::native_post::line_helpers(false),
+        super::native_material::SECTION_CORNER,
     )
 }
 
@@ -535,7 +542,6 @@ impl NativeShadow {
             vertex.map(|s| s.source.as_str()),
             shape.sprite_materials,
             grid.as_ref().map(|g| g.material.source.as_str()),
-            frame.api,
         );
         let module = naga::front::wgsl::parse_str(&text)
             .map_err(|e| format!("shadow pass: {}", e.emit_to_string(&text)))?;
@@ -622,7 +628,7 @@ impl NativeShadow {
             attributes: &instance_attributes,
         };
         let color_target = [Some(wgpu::ColorTargetState {
-            format: shadow_color(frame.api),
+            format: SHADOW_COLOR,
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         })];
@@ -684,31 +690,40 @@ impl NativeShadow {
             pipeline_with(layout, vertex, buffers, fragment)
         };
         let instanced = layout(None);
-        let solid = pipeline(
-            &instanced,
-            "horizon_shadow_vs",
-            &[Some(vertices.clone()), Some(instances.clone())],
-            false,
-        );
+        let flat_layout = shape.flat.map(|group| layout(Some(group)));
+        // With flat draws' page groups the solid draws read the page themselves
+        // (`SECTION_CORNER`), in either layout of the solid quads, as the renderer's do.
+        let solid = match &flat_layout {
+            Some(paged) => pipeline(
+                paged,
+                "horizon_shadow_vs_section",
+                &[None, Some(instances.clone())],
+                false,
+            ),
+            None => pipeline(
+                &instanced,
+                "horizon_shadow_vs",
+                &[Some(vertices.clone()), Some(instances.clone())],
+                false,
+            ),
+        };
         let translucent = pipeline(
             &instanced,
             "horizon_shadow_vs",
             &[Some(vertices.clone()), Some(instances)],
             true,
         );
-        let flat_layout = shape.flat.map(|group| layout(Some(group)));
-        let flat_pipeline = |translucent| {
-            flat_layout.as_ref().map(|layout| {
-                pipeline(
-                    layout,
-                    "horizon_shadow_vs_flat",
-                    &[Some(vertices.clone())],
-                    translucent,
-                )
-            })
-        };
-        let flat = flat_pipeline(false);
-        let flat_translucent = flat_pipeline(true);
+        let flat = flat_layout
+            .as_ref()
+            .map(|layout| pipeline(layout, "horizon_shadow_vs_section_flat", &[], false));
+        let flat_translucent = flat_layout.as_ref().map(|layout| {
+            pipeline(
+                layout,
+                "horizon_shadow_vs_flat",
+                &[Some(vertices.clone())],
+                true,
+            )
+        });
         let entity = entity_pipeline(device, shape.entities, &frame_layout);
         // The grid's corners come from its group 1, not from vertex buffers.
         let displaced = grid.as_ref().map(|g| {
@@ -734,15 +749,134 @@ impl NativeShadow {
     }
 }
 
+/// What the renderer hands the shadow passes each frame.
+pub struct ShadowDraws<'a> {
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub timing: Option<&'a mut super::pack_timing::PassTiming>,
+    /// What the light sees, when the frame asked for a shadow view.
+    pub lists: Option<ShadowLists<'a>>,
+}
+
+/// The renderer's lists of what the light sees, and what they draw from.
+pub struct ShadowLists<'a> {
+    /// The world's group 0.
+    pub group: &'a wgpu::BindGroup,
+    pub sections: super::SectionLists<'a>,
+    /// The frame draws its terrain flat (`sections.flat`'s shadow calls).
+    pub flat_frame: bool,
+    pub instances: &'a wgpu::Buffer,
+    pub indirect: &'a wgpu::Buffer,
+    /// The light's first draw, its solid draws and its translucent draws after them.
+    pub draws: [u32; 3],
+    /// The entities' group 0 and vertices: `entity_quads` from the start, then
+    /// `shadow_only_quads` before the GPU-posed outlines at `outline_base`.
+    pub entity_group: &'a wgpu::BindGroup,
+    pub entity_vertices: &'a wgpu::Buffer,
+    pub entity_quads: u32,
+    pub shadow_only_quads: u32,
+    pub outline_base: u32,
+}
+
+impl super::native_pack::NativePack {
+    /// The pack's shadow passes (`[shadow]`): the solid terrain the light sees into its shadow
+    /// map, the translucent over a copy of it, then the entities. A pack without one gets its
+    /// 1×1 map cleared to "far" once.
+    pub fn draw_shadow(&mut self, draws: ShadowDraws<'_>) {
+        let ShadowDraws {
+            encoder,
+            mut timing,
+            lists,
+        } = draws;
+        self.frame.shadow_map.clear_blank(encoder);
+        let (Some(lists), Some(shadow)) = (lists, &self.shadow) else {
+            return;
+        };
+        let map = &self.frame.shadow_map;
+        let sections = &lists.sections;
+        let [first, solid, translucent] = lists.draws;
+        let mut pass = map.begin(encoder, "Native shader pack shadow", timing.as_deref_mut());
+        pass.set_bind_group(0, lists.group, &[]);
+        pass.set_bind_group(GROUP, &shadow.group, &[]);
+        if lists.flat_frame
+            && let Some(flat) = sections.flat
+            && let Some(pipeline) = &shadow.flat
+        {
+            pass.set_pipeline(pipeline);
+            let [first, translucent] = flat.shadow_calls;
+            flat.draw(
+                &mut pass,
+                &flat.calls[first..translucent],
+                sections.flat_vertices(),
+            );
+        } else if !lists.flat_frame {
+            pass.set_pipeline(&shadow.solid);
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, lists.instances.slice(..));
+            let pulled = sections.flat.is_some();
+            sections.draw(&mut pass, lists.indirect, 0, first, solid, pulled);
+        }
+        // `[displacement]`'s grid casts in place of the flat quads it took over.
+        if let Some((d, picks, pipeline)) = self
+            .displacement
+            .as_ref()
+            .and_then(|d| Some((d, d.shadow.as_ref()?, shadow.displaced.as_ref()?)))
+        {
+            d.draw(&mut pass, picks, pipeline);
+        }
+        drop(pass);
+        let mut pass =
+            map.begin_translucent(encoder, "Native shader pack translucent shadow", timing);
+        pass.set_bind_group(0, lists.group, &[]);
+        pass.set_bind_group(GROUP, &shadow.group, &[]);
+        if lists.flat_frame
+            && let Some(flat) = sections.flat
+            && let Some(pipeline) = &shadow.flat_translucent
+        {
+            pass.set_pipeline(pipeline);
+            let [_, translucent] = flat.shadow_calls;
+            flat.draw(
+                &mut pass,
+                &flat.calls[translucent..],
+                sections.flat_vertices(),
+            );
+        } else if !lists.flat_frame {
+            pass.set_pipeline(&shadow.translucent);
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, lists.instances.slice(..));
+            sections.draw(
+                &mut pass,
+                lists.indirect,
+                0,
+                first + solid,
+                translucent,
+                false,
+            );
+        }
+        drop(pass);
+        let (quads, shadow_only) = (lists.entity_quads, lists.shadow_only_quads);
+        if quads > 0 || shadow_only > 0 {
+            let mut pass = map.begin_entities(encoder, "Native shader pack entity shadow");
+            pass.set_pipeline(&shadow.entity);
+            pass.set_bind_group(0, lists.entity_group, &[]);
+            pass.set_bind_group(GROUP, &shadow.group, &[]);
+            pass.set_vertex_buffer(0, lists.entity_vertices.slice(..));
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..quads * 6, 0, 0..1);
+            // Before the GPU-posed outlines (`EntityBatch::append_shadow_only`).
+            let first = lists.outline_base - shadow_only * 4;
+            pass.draw_indexed(0..shadow_only * 6, first as i32, 0..1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_shadow_shader_validates() {
-        let lines = [Api::V0_1, Api::V0_2];
-        for (materials, api) in [&[][..], &[(3, 7), (4, 8), (9, 7)][..]].iter().zip(lines) {
-            let text = shader_source(&shadow_solid(materials, &[7]), None, materials, None, api);
+        for materials in [&[][..], &[(3, 7), (4, 8), (9, 7)][..]] {
+            let text = shader_source(&shadow_solid(materials, &[7]), None, materials, None);
             let module = naga::front::wgsl::parse_str(&text).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
@@ -756,7 +890,7 @@ mod tests {
     #[test]
     fn the_shadow_shader_with_the_displaced_grid_validates() {
         use horizon_shader_api::{MANIFEST, Pack, StageKind, check};
-        let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.1\"\n\
+        let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
             [material]\nfile = \"material.wgsl\"\n[shadow]\n[displacement]\n";
         let material = "fn material(input: MaterialInput) -> Surface {\n    \
                 return Surface(input.albedo);\n}\n\
@@ -777,7 +911,6 @@ mod tests {
             None,
             &materials,
             Some(&stage.source),
-            Api::V0_1,
         );
         let module = naga::front::wgsl::parse_str(&text)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));

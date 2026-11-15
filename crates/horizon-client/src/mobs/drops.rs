@@ -6,7 +6,7 @@
 //! the experience orbs.
 use super::{Mob, Species, equine, gear, raider, render::DYE_NAMES, species};
 use crate::random_sequences::RandomSequences;
-use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_core::random::{LegacyRandom, LevelRandom, RandomSource};
 use horizon_world::{
     loot::{EntityLootParams, LootDamage, LootData, LootEntity, LootStack},
     registry::BlockStateId,
@@ -21,8 +21,8 @@ pub use horizon_world::loot::EQUIPMENT_SLOTS as SLOTS;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Drop {
     Item(LootStack),
-    /// The whole stack a mob kept in an equipment slot (damage, name,
-    /// components), dropped as it is.
+    /// A whole stack a mob kept (in an equipment slot, its inventory or a
+    /// horse's chest), with its damage, name and components, dropped as it is.
     Stack(crate::items::ItemStack),
     /// `Enderman.dropCustomDeathLoot`: the carried block's own drops, rolled
     /// with `enderman::carried_block_tool` (`enderman::carried_block_drops`).
@@ -254,7 +254,27 @@ fn slot_index(slot: &str) -> Option<usize> {
 }
 /// The whole stack the mob kept in `slot` (by name), when it kept one.
 fn stored_slot_stack(m: &Mob, slot: &str) -> Option<crate::items::ItemStack> {
-    super::finalize::stored_stack(m, slot_index(slot)?)
+    if let Some(index) = slot_index(slot) {
+        return super::finalize::stored_stack(m, index);
+    }
+    // The body armour and the saddle keep their components in their own
+    // fields, so a named saddle or wolf's armor drops as the stack it is.
+    match slot {
+        "body" => m.equipment_stacks()[6].clone(),
+        "saddle" => m.saddle_item(),
+        _ => None,
+    }
+}
+/// `EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)`
+/// on a whole stack: whether its enchantments keep it from dropping.
+fn stack_prevents_drop(loot: &LootData, stack: &crate::items::ItemStack) -> bool {
+    let mut probe = loot_stack(&stack.item, stack.count as i32);
+    probe.enchantments = stack
+        .enchantments()
+        .iter()
+        .map(|(e, l)| (e.to_string(), *l as i32))
+        .collect();
+    loot.prevents_equipment_drop(&probe)
 }
 /// The drop of what the mob has in `slot`, given its `stack` after the drop
 /// rolls: the whole stack the mob kept (with the rolled damage), else the loot stack.
@@ -446,7 +466,7 @@ pub fn die(
     m: &mut Mob,
     d: &Death,
     sequences: &mut RandomSequences,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
 ) -> (Vec<Drop>, bool) {
     let mut out = Vec::new();
     death_state(m);
@@ -484,7 +504,10 @@ pub fn die(
         out.push(slot_drop(m, "mainhand", stack));
         clear_slot(m, "mainhand");
     }
-    if let Some(table) = death_loot_table(m, d.mob_drops) {
+    // `LivingEntity.dropAllDeathLoot`'s `shouldDropLoot`: the loot table and
+    // `dropCustomDeathLoot` only; `dropEquipment` below always runs.
+    let death_table = death_loot_table(m, d.mob_drops);
+    if let Some(table) = death_table.as_deref() {
         let params = EntityLootParams {
             this: this.clone(),
             damage: d.damage.clone(),
@@ -493,7 +516,7 @@ pub fn die(
         };
         let items = roll(
             d,
-            &table,
+            table,
             &params,
             sequences,
             m.extra.death_loot_seed,
@@ -563,21 +586,21 @@ pub fn die(
             clear_slot(m, "mainhand");
         }
     }
-    // Piglin.dropCustomDeathLoot: everything in its inventory.
-    if s == Species::Piglin {
+    // Piglin.dropCustomDeathLoot, inside `shouldDropLoot`: everything in its
+    // inventory, as the whole stacks it kept (`removeAllItems`, with no
+    // vanishing curse check).
+    if s == Species::Piglin && death_table.is_some() {
         for stack in m.extra.inventory.drain(..) {
-            let mut item = loot_stack(&stack.item, stack.count as i32);
-            item.damage = stack.damage as i32;
-            out.push(Drop::Item(item));
+            if stack.count > 0 {
+                out.push(Drop::Stack(stack));
+            }
         }
     }
     // dropEquipment: AbstractHorse's inventory, then a chested horse's chest.
     if equine::is_equine(s) {
         for stack in m.extra.items.iter().flatten() {
-            if stack.count > 0 {
-                let mut item = loot_stack(&stack.item, stack.count as i32);
-                item.damage = stack.damage as i32;
-                out.push(Drop::Item(item));
+            if stack.count > 0 && !stack_prevents_drop(d.loot, stack) {
+                out.push(Drop::Stack(stack.clone()));
             }
         }
         if m.extra.chested {
@@ -618,7 +641,7 @@ fn roll(
     params: &EntityLootParams,
     sequences: &mut RandomSequences,
     seed: i64,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
 ) -> Vec<LootStack> {
     if seed != 0 {
         return d
@@ -683,6 +706,7 @@ pub fn base_experience(m: &mut Mob) -> i32 {
 #[cfg(test)]
 mod death_loot_table_tests {
     use super::*;
+    use crate::mobs::world::level_random;
     use horizon_world::loot::{LootData, PackOverlay};
 
     /// Mob.getLootTable and LootTable.getRandomItems: a mob's own
@@ -719,7 +743,7 @@ mod death_loot_table_tests {
             }
             m.extra.death_loot_seed = seed;
             let mut sequences = RandomSequences::default();
-            let (out, _) = die(&mut m, &death, &mut sequences, &mut LegacyRandom::new(7));
+            let (out, _) = die(&mut m, &death, &mut sequences, &mut level_random(7));
             out.into_iter()
                 .filter_map(|d| match d {
                     Drop::Item(s) => Some(s.item),
@@ -737,6 +761,7 @@ mod death_loot_table_tests {
 mod slot_tests {
     use super::*;
     use crate::mobs::sensor_scan_tests::kind;
+    use crate::mobs::world::level_random;
     use horizon_core::geometry::Vec3;
     use horizon_world::loot::PackOverlay;
     use std::sync::Arc;
@@ -822,7 +847,7 @@ mod slot_tests {
             &mut m,
             &death(true),
             &mut RandomSequences::default(),
-            &mut LegacyRandom::new(7),
+            &mut level_random(7),
         );
         assert!(orbs(&out) > 0, "memory timer awards experience: {out:?}");
 
@@ -831,7 +856,7 @@ mod slot_tests {
             &mut m,
             &death(false),
             &mut RandomSequences::default(),
-            &mut LegacyRandom::new(7),
+            &mut level_random(7),
         );
         assert_eq!(orbs(&out), 0, "no timer, no experience: {out:?}");
 
@@ -840,7 +865,7 @@ mod slot_tests {
             &mut m,
             &death(true),
             &mut RandomSequences::default(),
-            &mut LegacyRandom::new(7),
+            &mut level_random(7),
         );
         assert!(helmet(&out), "memory timer drops equipment: {out:?}");
 
@@ -849,7 +874,7 @@ mod slot_tests {
             &mut m,
             &death(false),
             &mut RandomSequences::default(),
-            &mut LegacyRandom::new(7),
+            &mut level_random(7),
         );
         assert!(!helmet(&out), "no timer, no equipment: {out:?}");
     }
@@ -865,3 +890,7 @@ mod slot_tests {
         assert_eq!(m.extra.head, None);
     }
 }
+
+#[cfg(test)]
+#[path = "drops_tests.rs"]
+mod drops_tests;

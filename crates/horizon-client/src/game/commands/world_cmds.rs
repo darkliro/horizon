@@ -352,11 +352,10 @@ impl Game<'_> {
         let ignites = registry.in_tag(kind, "minecraft:is_fire")
             || registry.in_tag(kind, "minecraft:is_explosion");
         match target {
-            Target::Boat(_) => self
-                .boats
-                .iter()
-                .position(|b| b.id == id)
-                .is_some_and(|i| self.hurt_boat_result(i, amount, creative).is_some()),
+            Target::Boat(_) => self.boats.iter().position(|b| b.id == id).is_some_and(|i| {
+                self.hurt_boat_result(i, amount, creative, causing)
+                    .is_some()
+            }),
             Target::Cart(_) => self.carts.iter().position(|c| c.id == id).is_some_and(|i| {
                 self.hurt_cart_result(i, amount, creative, ignites, CartHit::command(by, causing))
             }),
@@ -578,11 +577,7 @@ impl Game<'_> {
         let targets = if ctx.get("targets").is_some() {
             self.entities(ctx, "targets", false)?
         } else {
-            vec![
-                self.command_source
-                    .and_then(|s| s.entity)
-                    .unwrap_or(Target::Player),
-            ]
+            vec![self.implied(false)?]
         };
         let mut tracker = Tracker::default();
         for t in targets {
@@ -771,46 +766,13 @@ impl Game<'_> {
             _ => None,
         };
         let field = |key: &str| opts.as_ref().and_then(|c| c.get(&key.into()).cloned());
-        let number = |t: &Tag| -> Option<f32> {
-            Some(match t {
-                Tag::Byte(v) => f32::from(*v),
-                Tag::Short(v) => f32::from(*v),
-                Tag::Int(v) => *v as f32,
-                Tag::Long(v) => *v as f32,
-                Tag::Float(v) => f32::from_bits(*v),
-                Tag::Double(v) => f64::from_bits(*v) as f32,
-                _ => return None,
-            })
-        };
         let string = |t: &Tag| match t {
             Tag::String(s) => Some(s.to_string_lossy()),
             _ => None,
         };
-        // ExtraCodecs.RGB_COLOR_CODEC: an int or a list of three floats.
-        let rgb = match field("color") {
-            Some(Tag::List(l)) if l.len() >= 3 => [
-                number(&l[0]).unwrap_or(1.0),
-                number(&l[1]).unwrap_or(0.0),
-                number(&l[2]).unwrap_or(0.0),
-            ],
-            Some(Tag::Int(v)) => [
-                ((v >> 16) & 255) as f32 / 255.0,
-                ((v >> 8) & 255) as f32 / 255.0,
-                (v & 255) as f32 / 255.0,
-            ],
-            _ => [1.0, 0.0, 0.0],
-        };
         // The block state of a block particle, for its packet.
         let mut block_state = None;
         let options = match ty {
-            ParticleType::Dust => ParticleOptions::dust(
-                rgb,
-                field("scale")
-                    .as_ref()
-                    .and_then(number)
-                    .unwrap_or(1.0)
-                    .clamp(0.01, 4.0),
-            ),
             // ItemParticleOption: an item id, or a stack {id, ...}.
             ParticleType::Item => {
                 let id = match field("item") {
@@ -832,6 +794,7 @@ impl Game<'_> {
                 ParticleOptions::simple(ty)
             }
             ParticleType::Block
+            | ParticleType::BlockCrumble
             | ParticleType::FallingDust
             | ParticleType::DustPillar
             | ParticleType::BlockMarker => {
@@ -876,7 +839,13 @@ impl Game<'_> {
                     _ => ParticleOptions::simple(ty),
                 }
             }
-            _ => ParticleOptions::simple(ty),
+            // Every other type with options decodes its own codec
+            // (`ParticleTypes.CODEC`): dust, spells, sculk charge, shriek,
+            // geysers. A type without options keeps the defaults.
+            _ => opts
+                .as_ref()
+                .and_then(|c| crate::game::potions::particle_options(ty, c))
+                .unwrap_or_else(|| ParticleOptions::simple(ty)),
         };
         let pos = self
             .position_arg(ctx, "pos")
@@ -983,7 +952,9 @@ impl Game<'_> {
         }
         self.feedback(Text::translate(
             "commands.particle.success",
-            &[Text::literal(name.to_owned())],
+            // ParticleCommand.sendParticles: the type's registry key, not the
+            // text the player typed.
+            &[Text::literal(ty.id())],
         ));
         Ok(reached)
     }
@@ -1228,22 +1199,24 @@ impl Game<'_> {
                         )))
                     }
                     _ => {
-                        let Some(handle) = player.attributes.get_instance(Some(key)).ok().flatten()
-                        else {
-                            return Err(no_attribute(&name, &description));
-                        };
-                        let found = player
+                        // getAttributeModifier: getEntityWithAttribute checks
+                        // hasAttribute, then hasModifier and getModifierValue read
+                        // the cached instance or the type's supplier. None of
+                        // them calls getInstance, so a failed lookup leaves the
+                        // attribute map (and the `attributes` list a save packs)
+                        // untouched.
+                        if !player
                             .attributes
-                            .edit(&handle, |value, _| {
-                                Ok(value
-                                    .modifiers()
-                                    .iter()
-                                    .find(|m| m.id() == modifier_id)
-                                    .map(|m| m.amount()))
-                            })
+                            .has_attribute(Some(key.clone()))
+                            .map_err(unavailable)?
+                        {
+                            return Err(no_attribute(&name, &description));
+                        }
+                        let Some(v) = player
+                            .attributes
+                            .modifier_value(Some(key), &modifier_id)
                             .ok()
-                            .flatten();
-                        let Some(v) = found else {
+                        else {
                             return Err(text_error(
                                 "commands.attribute.failed.no_modifier",
                                 &[
@@ -1288,7 +1261,7 @@ impl Game<'_> {
                 .map(Some)
             }
             Target::Mob(mob_id) => {
-                let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) else {
+                let Some(m) = self.mobs.iter().find(|m| m.id == mob_id) else {
                     return Ok(None);
                 };
                 // The attributes the mob's gameplay reads live in `finalize`;
@@ -1298,10 +1271,21 @@ impl Game<'_> {
                 else {
                     return Err(no_attribute(&name, &description));
                 };
+                // `LivingEntity.collectEquipmentChanges` puts the gear's
+                // modifiers in the same map, so reads see them too.
+                let gear = finalize::equipment_modifiers(
+                    m,
+                    attr.id(),
+                    world_items!(self),
+                    &self.stations().enchantments,
+                );
                 let current = if id == "attribute.base.get" {
                     finalize::base_value(m, attr)
                 } else {
-                    finalize::value(m, attr)
+                    finalize::value_with_gear(m, attr, &gear)
+                };
+                let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) else {
+                    return Ok(None);
                 };
                 let no_modifier = text_error(
                     "commands.attribute.failed.no_modifier",
@@ -1325,7 +1309,7 @@ impl Game<'_> {
                     }
                     "attribute.base.set" => {
                         // AttributeInstance keeps the raw base and clamps only the
-                        // effective value; Health is unchanged.
+                        // effective value; the tick's refreshDirtyAttributes clamps Health.
                         finalize::set_base(m, attr, value_arg);
                         Ok(Some((
                             1,
@@ -1351,6 +1335,7 @@ impl Game<'_> {
                         // AttributeInstance.hasModifier: the modeled transient
                         // minecraft:baby counts too.
                         if finalize::has_modifier(m, attr, &modifier_id)
+                            || gear.iter().any(|(id, _, _)| id == &modifier_id)
                             || (modifier_id == "minecraft:baby"
                                 && finalize::transient(m, attr).is_some())
                         {
@@ -1397,10 +1382,15 @@ impl Game<'_> {
                         )))
                     }
                     _ => {
-                        // Permanent entries stay authoritative. The modeled baby
-                        // modifier is transient and absent from that saved store.
-                        let amount =
-                            finalize::modifier_amount(m, attr, &modifier_id).or_else(|| {
+                        // The gear's modifier replaced a permanent one of its id
+                        // (collectEquipmentChanges). The modeled baby modifier is
+                        // transient and absent from the saved store.
+                        let amount = gear
+                            .iter()
+                            .find(|(id, _, _)| id == &modifier_id)
+                            .map(|(_, amount, _)| *amount)
+                            .or_else(|| finalize::modifier_amount(m, attr, &modifier_id))
+                            .or_else(|| {
                                 finalize::transient(m, attr)
                                     .filter(|_| modifier_id == "minecraft:baby")
                                     .map(|(amount, _)| amount)
@@ -1440,7 +1430,11 @@ impl Game<'_> {
         if let Target::Mob(id) = t
             && (matches!(
                 attribute,
-                "minecraft:armor" | "minecraft:armor_toughness" | "minecraft:max_absorption"
+                "minecraft:armor"
+                    | "minecraft:armor_toughness"
+                    | "minecraft:max_absorption"
+                    // `LivingEntity.travelInAir` reads it every tick.
+                    | "minecraft:friction_modifier"
             ) || self.sulfur_archetype_attribute(t, attribute))
         {
             let mob = self.mobs.iter_mut().find(|m| m.id == id)?;
@@ -1548,20 +1542,30 @@ impl Game<'_> {
                 .map(|m| horizon_client::mobs::armor::absorption_bonus(&m.extra.effects)),
             _ => None,
         };
+        let gear = match target {
+            Target::Mob(mob) => self.mobs.iter().find(|m| m.id == mob).map(|m| {
+                let enchantments = &self.stations().enchantments;
+                finalize::equipment_modifiers(m, attribute, world_items!(self), enchantments)
+            }),
+            _ => None,
+        };
         let map = self
             .generic_attributes(target, attribute)
             .ok_or_else(no_attribute)?;
         if !map.has(key) {
             return Err(no_attribute());
         }
+        // LivingEntity.collectEquipmentChanges: reads see the gear's modifiers.
+        let mut worn = attribute_gear::with_gear(map, key, gear);
         let (message, args, result) = match id {
             "attribute.get" | "attribute.base.get" => {
+                let seen = worn.as_mut().unwrap_or(map);
                 let v = if id == "attribute.get"
                     && let Some(bonus) = absorption_bonus
                 {
-                    horizon_client::mobs::armor::max_absorption_of(Some(&*map), 0.0, bonus)
+                    horizon_client::mobs::armor::max_absorption_of(Some(&*seen), 0.0, bonus)
                 } else if id == "attribute.get" {
-                    map.value(key).map_err(|_| no_attribute())?
+                    seen.value(key).map_err(|_| no_attribute())?
                 } else {
                     map.base_value(key).map_err(|_| no_attribute())?
                 };
@@ -1600,7 +1604,7 @@ impl Game<'_> {
                 )
             }
             "attribute.modifier.add" => {
-                if map.has_modifier(key, modifier_id) {
+                if worn.as_ref().unwrap_or(map).has_modifier(key, modifier_id) {
                     return Err(text_error(
                         "commands.attribute.failed.modifier_already_present",
                         &[
@@ -1648,7 +1652,9 @@ impl Game<'_> {
                 )
             }
             _ => {
-                let v = map
+                let v = worn
+                    .as_ref()
+                    .unwrap_or(map)
                     .modifier_value(key, modifier_id)
                     .map_err(|_| no_modifier())?;
                 (
@@ -1682,14 +1688,18 @@ impl Game<'_> {
             return self.ride_guest(id, ctx, target, name);
         }
         if id == "ride.dismount" {
-            let Some(v) = self.ride_vehicle(target) else {
+            let Some(v) = self.passenger_vehicle_target(target) else {
                 return Err(err("commands.ride.not_riding", &[&name.plain()]));
             };
             let vehicle_name = self.target_name(v);
             match target {
                 Target::Player => self.stop_riding(),
                 Target::Mob(rider) => self.dismount_mob(rider),
-                _ => {}
+                _ => {
+                    if let Some(id) = super::super::native_entities::target_id(target) {
+                        self.unlink_passenger(id);
+                    }
+                }
             }
             self.feedback(Text::translate(
                 "commands.ride.dismount.success",
@@ -1717,7 +1727,7 @@ impl Game<'_> {
             let not_riding = || err("commands.ride.not_riding", &[&name.plain()]);
             let vehicle_name = self
                 .for_player(target, |g| {
-                    let vehicle = g.ride_vehicle(Target::Player)?;
+                    let vehicle = g.passenger_vehicle_target(Target::Player)?;
                     let vehicle_name = g.target_name(vehicle);
                     g.stop_riding();
                     Some(vehicle_name)
@@ -1755,7 +1765,7 @@ impl Game<'_> {
     pub(in crate::game) fn ride_mount(&mut self, target: Target, vehicle: Target) -> R<()> {
         let name = self.target_name(target);
         let vehicle_name = self.target_name(vehicle);
-        if let Some(current) = self.ride_vehicle(target) {
+        if let Some(current) = self.passenger_vehicle_target(target) {
             let current = self.target_name(current);
             return Err(err(
                 "commands.ride.already_riding",
@@ -1772,7 +1782,7 @@ impl Game<'_> {
             if v == target {
                 return Err(err("commands.ride.mount.failure.loop", &[]));
             }
-            up = self.ride_vehicle(v);
+            up = self.passenger_vehicle_target(v);
         }
         let rider = match target {
             Target::Mob(id) => Some(id),
@@ -1784,15 +1794,37 @@ impl Game<'_> {
                 &[&name.plain(), &vehicle_name.plain()],
             )
         };
-        // Only players and mobs ride.
-        if !(target == Target::Player || rider.is_some()) {
+        if self.target_type(vehicle) == "minecraft:marker"
+            || !super::super::spawner::entity_type_saves(&self.target_type(vehicle))
+        {
             return Err(generic());
+        }
+        // Existing simulated seats keep their rules. Other registered entities
+        // use Entity.startRiding's forced relationship, not a mob-only stand-in.
+        if target != Target::Player
+            && (rider.is_none()
+                || !matches!(
+                    vehicle,
+                    Target::Mob(_)
+                        | Target::Boat(_)
+                        | Target::Cart(_)
+                        | Target::Tnt(_)
+                        | Target::Cushion(_)
+                ))
+        {
+            let id = super::super::native_entities::target_id(target).ok_or_else(generic)?;
+            let parent = super::super::native_entities::target_id(vehicle).ok_or_else(generic)?;
+            if !self.native_mob_may_ride(id, parent, true) {
+                return Err(generic());
+            }
+            self.link_loaded_passenger(id, parent);
+            self.note_started_riding(parent);
+            return Ok(());
         }
         // `RideCommand.mount` forces the ride (`startRiding(vehicle, true, true)`),
         // which skips `canRide` and `canAddPassenger`: a boat under water still
         // takes the rider. Horizon's boats seat at most `max_passengers`, so a
-        // full boat still refuses. Minecarts carry only players here: Horizon's
-        // carts have no mob passengers yet.
+        // full boat still refuses.
         match vehicle {
             Target::Boat(id) => {
                 let Some(i) = self.boats.iter().position(|b| b.id == id) else {
@@ -1809,8 +1841,8 @@ impl Game<'_> {
                     if !self.native_may_board(id) {
                         return Err(generic());
                     }
-                    self.yaw = self.boats[i].yaw;
-                    // ServerPlayer.startRiding seats the player immediately.
+                    // ServerPlayer.startRiding seats the player immediately,
+                    // keeping its rotation (`Relative.ROTATION`).
                     let at = self.player_boat_seat(i);
                     if let Some(player) = self.player.as_mut() {
                         player.position = at;
@@ -1824,17 +1856,23 @@ impl Game<'_> {
                 return Ok(());
             }
             Target::Cart(id) => {
-                if target != Target::Player
-                    || self.ridden_by_guest(id)
-                    || !self.native_may_board(id)
-                {
+                if let Some(rider) = rider {
+                    // A cart carries any mob the forced ride puts in it
+                    // (`Entity.positionRider` seats it, game/minecarts.rs).
+                    if !self.try_mount_mob(rider, id) {
+                        return Err(generic());
+                    }
+                    return Ok(());
+                }
+                if self.ridden_by_guest(id) || !self.native_may_board(id) {
                     return Err(generic());
                 }
                 self.start_riding(id);
                 return Ok(());
             }
-            // An armor stand, a display, a marker, an interaction or any entity Horizon keeps as its
+            // An armor stand, a display, an interaction or any entity Horizon keeps as its
             // compound: the forced ride takes it too, and the rider sits on its passenger point.
+            // A marker takes no rider at all (`Marker.couldAcceptPassenger`).
             Target::Stand(id) | Target::Other(id) => {
                 let Some(seat) = self.seat(id) else {
                     return Err(generic());
@@ -1873,12 +1911,22 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
             m.extra.flag = false;
             m.extra.counter = 0;
-            self.yaw = m.yaw;
         }
         self.mount.jump_ticks = 0;
         self.mount.jump_scale = 0.0;
         self.start_riding(mob_id);
         Ok(())
+    }
+
+    /// Non-player graph lookup; player/Guest resolution remains with the
+    /// existing command helper (the separate Guest repair owns that method).
+    pub(in crate::game) fn passenger_vehicle_target(&self, target: Target) -> Option<Target> {
+        match super::super::native_entities::target_id(target) {
+            Some(id) => self
+                .passenger_vehicle(id)
+                .and_then(|parent| self.level_entity(parent as i32)),
+            None => self.ride_vehicle(target),
+        }
     }
 
     /// Entity.getVehicle: the player's mount, or a mob's.
@@ -2252,6 +2300,9 @@ pub(super) fn look_at(from: [f64; 3], to: [f64; 3]) -> [f32; 2] {
     [wrap_degrees(yaw), pitch]
 }
 
+#[path = "attribute_gear.rs"]
+mod attribute_gear;
+
 #[cfg(test)]
 #[path = "attribute_missing_tests.rs"]
 mod attribute_missing_tests;
@@ -2464,7 +2515,7 @@ mod vehicle_damage_command_tests {
     use horizon_client::chunk::Chunk;
     use horizon_core::position::ChunkPos;
     use std::sync::Arc;
-    fn with_game(test: impl FnOnce(&mut Game<'_>)) {
+    pub(super) fn with_game(test: impl FnOnce(&mut Game<'_>)) {
         let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
@@ -2863,6 +2914,18 @@ mod vehicle_damage_command_tests {
 }
 
 #[cfg(test)]
+#[path = "particle_command_tests.rs"]
+mod particle_command_tests;
+
+#[cfg(test)]
+#[path = "../particle_command_tests.rs"]
+mod particle_render_command_tests;
+
+#[cfg(test)]
+#[path = "attribute_tests.rs"]
+mod attribute_tests;
+
+#[cfg(test)]
 mod attribute_modifier_command_tests {
     use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
     use horizon_client::chunk::Chunk;
@@ -2964,3 +3027,7 @@ mod attribute_modifier_command_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "attribute_equipment_tests.rs"]
+mod attribute_equipment_tests;

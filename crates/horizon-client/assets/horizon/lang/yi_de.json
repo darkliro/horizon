@@ -241,10 +241,6 @@
   "Peak Brightness": "שפּיץ ברייטנאַס",
   "Black Level": "שוואַרץ לעוועל",
   "UI Brightness": "UI ברייטנאַס",
-  "HDR Lighting": "HDR באַלייַכטונג",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "ליכט־קוואַלן, די זון און זונשיין שייַנען איבער ווייַס. אַוועק: פּונקט ווי SDR.",
-  "Smooth Gradients": "גלאַטע גראַדיענטן",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16־ביט ראַם: טונקעלע הימלען און שאָטן באַנדן נישט. אַ ביסל מער VRAM. בייַ דעם קומענדיקן סטאַרט.",
   "Battery Mode": "באַטאַרייע מאָדע",
   "Graphics API": "גראַפיקס אַפּי",
   "Translucent Batching": "טראַנסלוסאַנט באַטשינג",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "ווארטן פֿאַר דער דערפרישן פון די אַרויסווייַזן: קיין טירינג, אַ ביסל לייטאַנסי.",
   "Size of menus and the HUD.": "גרייס פון מעניוז און HUD.",
   "Sets the options below together. Changing one makes it Custom.": "שטעלט די אָפּציעס אונטן צוזאַמען. טשאַנגינג איינער מאכט עס קאַסטאַם.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "לאַוואַ, פייַער און זונשייַן שייַנען ברייטער ווי ווייַס. דאַרף אַ HDR אַרויסווייַזן.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "הייבט שאָטן אויף דיין אַרויסווייַזנס טונקעלסטן שוואַרץ. 0: ריין שוואַרץ, אָן אויפֿהייבונג.",
   "How bright highlights get. Auto: the peak your system reports.": "ווי העל כיילייץ באַקומען. אַוטאָ: די שפּיץ דיין סיסטעם ריפּאָרץ.",
   "How bright white looks in the world. Auto: your desktop's white.": "ווי העל ווייַס זעט אויס אין דער וועלט. אַוטאָ: דיין דעסקטאָפּס ווייַס.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "לייג צו מאַרקער",
   "horizon.studio.topbar.clear_keyframes": "🗑 ליידיק שליסלראַמען",
   "horizon.studio.topbar.timeline_hud": "⏱ צײַטליניע",
-  "horizon.studio.topbar.split_scene": "צעטיילן סצענע"
+  "horizon.studio.topbar.split_scene": "צעטיילן סצענע",
+  "horizon.options.block_vibration": "האַפּטישע פֿידבעק פֿון Bedrock",
+  "horizon.options.split_vibration": "וויבראַציע ביים צעטיילן אַ שטאָס",
+  "horizon.options.impulse_triggers": "אימפּולס טריגערס",
+  "A tick when you break a block, as in Bedrock.": "ווען דו ברעכסט אַ בלאָק, עס וויברירט, ווי אין Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "אַ קורצע וויבראַציע ווען מען צעטיילט אַ שטאָס, ווי אין Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "די טריגערס פֿון אַן Xbox One קאָנטראָלער וויברירן צוזאַמען מיט זײַנע האַנטגרעפֿן."
 }

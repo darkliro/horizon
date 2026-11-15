@@ -89,27 +89,29 @@ impl Game<'_> {
     /// A cushion succeeds where it may be placed and spawns on the server, a
     /// firework rocket wherever it may be used, and the server launches it.
     /// Whether the item's use succeeded, which ends the click.
-    pub(super) fn predict_item_on_block(
+    pub(in crate::game) fn predict_item_on_block(
         &mut self,
         stack: &ItemStack,
         hit: &super::super::Hit,
         hand: Hand,
     ) -> bool {
+        // ItemStack.useOn gates every item's own useOn before it runs: on this
+        // client too, the acting stack acts only where the player may build or
+        // its can_place_on matches the clicked block.
+        if !self.with_hand(hand, |g| g.may_use_on(hit.pos)) {
+            return false;
+        }
         // FireworkRocketItem.useOn: SUCCESS on the client too, so neither
         // UseItem nor the off hand follows. It passes while gliding (the use
-        // boosts instead), cooling down (MultiPlayerGameMode.performUseItemOn
-        // skips useOn) and in adventure mode off its can_place_on
-        // (ItemStack.useOn).
+        // boosts instead) and cooling down (MultiPlayerGameMode.performUseItemOn
+        // skips useOn).
         if &*stack.item == "minecraft:firework_rocket" {
             let cooling = self.items().get(&stack.item).is_some_and(|info| {
                 let group = horizon_client::cooldowns::group(stack, info.use_cooldown.as_ref());
                 self.cooldowns.is_on_cooldown(&group)
             });
             let gliding = self.player.as_ref().is_some_and(|p| p.fall_flying);
-            return !cooling
-                && !gliding
-                && (self.may_build()
-                    || self.with_hand(hand, |g| g.can_place_on_in_adventure(hit.pos)));
+            return !cooling && !gliding;
         }
         let at = [
             f64::from(hit.pos[0]) + 0.5,
@@ -247,6 +249,7 @@ mod tests {
             pos,
             face: [0, 1, 0],
             point: [0.5, 65.0, 0.5],
+            inside: false,
         };
 
         // Fire charge on TNT: returns true, leaves consumption and sound to server.

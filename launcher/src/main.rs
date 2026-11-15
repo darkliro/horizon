@@ -52,7 +52,9 @@ mod mods_project;
 mod motion;
 mod multiplayer_page;
 mod native_log_page;
+mod nav_strip;
 mod new_instance;
+mod notes_cache;
 mod owner_page;
 mod packs_page;
 mod partner;
@@ -221,6 +223,8 @@ struct Launcher {
     /// How many times the page changed, for the page transition.
     switches: usize,
     content_scroll: Scrollbar,
+    /// The top bar's page tabs, including their horizontal overflow controls.
+    nav_strip: nav_strip::NavStrip,
     /// The glass Settings page's own scroll: its sections beside their list.
     settings_pane: gpui::ScrollHandle,
     /// The glass Home's patch log scroll, for its wheel to chain to the page.
@@ -292,6 +296,8 @@ struct Launcher {
     confirm_remove: Option<String>,
     /// The releases whose patch notes the Versions page shows open.
     notes_open: std::collections::HashSet<String>,
+    /// Release notes parsed from `releases`, for the patch log and Patch notes.
+    notes: notes_cache::NotesCache,
     picker: glass_home::PickerState,
     /// Settings' any-colour swatch shows the hue strip (the glass look).
     accent_strip: bool,
@@ -579,6 +585,7 @@ impl Launcher {
             page: Page::from_env(),
             switches: 0,
             content_scroll: Scrollbar::default(),
+            nav_strip: nav_strip::NavStrip::default(),
             settings_pane: gpui::ScrollHandle::new(),
             patch_scroll: Scrollbar::default(),
             settings_marked: 0,
@@ -626,6 +633,7 @@ impl Launcher {
             native_log: Default::default(),
             confirm_remove: None,
             notes_open: Default::default(),
+            notes: Default::default(),
             picker: glass_home::PickerState::default(),
             accent_strip: false,
             look_sliders: Default::default(),
@@ -1091,6 +1099,7 @@ impl Launcher {
 
     fn fetch_releases(&mut self) {
         self.releases = Load::Loading;
+        self.notes.clear();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Releases(backend::releases()));
@@ -1147,7 +1156,8 @@ impl Launcher {
                     if let (Ok(_), Some(checked)) = (&r, self.checked) {
                         self.perf.record_since("launcher.release_list_ms", checked);
                     }
-                    self.releases = r.map_or_else(Load::Failed, Load::Ready)
+                    self.releases = r.map_or_else(Load::Failed, Load::Ready);
+                    self.notes.clear();
                 }
                 Msg::Links(links) => {
                     // The official server may have moved: its list entry and its count follow.
@@ -4807,7 +4817,11 @@ impl Launcher {
                 .gap(px(10.))
                 .w(px(180.))
                 .child(progress_bar(None, &t))
-                .child(text(theme::MICRO).text_color(t.muted).child("Removing…"))
+                .child(
+                    text(theme::MICRO)
+                        .text_color(t.muted)
+                        .child(tr("Removing…")),
+                )
         } else {
             self.version_actions(tag, selected, cx)
         };
@@ -5077,7 +5091,11 @@ impl Launcher {
                         .gap(px(10.))
                         .w(px(180.))
                         .child(progress_bar(None, &t))
-                        .child(text(theme::MICRO).text_color(t.muted).child("Removing…"))
+                        .child(
+                            text(theme::MICRO)
+                                .text_color(t.muted)
+                                .child(tr("Removing…")),
+                        )
                         .into_any_element()
                 } else if installed && backend::needs_game_architecture_install(&tag, &release) {
                     let mut b = button(
@@ -5336,7 +5354,7 @@ impl Render for Launcher {
         // Dark: the glass frame over the scene; Light keeps the night one over the dawn.
         let (topbar, sidebar) = if t.glass {
             (
-                self.glass_topbar(cx),
+                self.glass_topbar(window, cx),
                 self.glass_sidebar(window, cx).into_any_element(),
             )
         } else {

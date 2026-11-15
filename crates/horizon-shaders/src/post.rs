@@ -15,10 +15,30 @@ use std::collections::BTreeSet;
 use crate::config::{self, Config};
 use crate::custom::Custom;
 use crate::{
-    ComputeProgram, eval_condition, preprocess, translate_composite, translate_compute,
-    translate_gbuffers, translate_shadow,
+    ComputeProgram, eval_condition, preprocess, translate_composite, translate_gbuffers,
+    translate_shadow,
 };
 use crate::{GbuffersInputs, Macros, Pack, Preprocessed, Program, Properties, Target};
+
+/// `indirect.<pass>`: three unsigned work-group counts in a storage buffer (3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndirectDispatch {
+    pub buffer: u32,
+    pub offset: u64,
+}
+
+impl IndirectDispatch {
+    fn parse(value: &str) -> Option<Self> {
+        let mut words = value.split_whitespace();
+        let buffer = words.next()?.parse().ok()?;
+        let offset: u64 = words.next()?.parse().ok()?;
+        if buffer > 8 || !offset.is_multiple_of(4) || words.next().is_some() {
+            return None;
+        }
+        offset.checked_add(12)?;
+        Some(Self { buffer, offset })
+    }
+}
 
 /// Which group of 2.1 a program belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -792,7 +812,7 @@ pub fn load_post(
             continue;
         }
         if let Some(name) = e.key.strip_prefix("image.") {
-            match CustomImage::parse(name, &options.expand(&e.value)) {
+            match CustomImage::parse(name, &e.value) {
                 Some(i) => post.images.push(i),
                 None => post.notes.push(format!("`{}`: not an image", e.key)),
             }
@@ -1647,6 +1667,19 @@ impl Loader<'_> {
             {
                 continue;
             }
+            let indirect = match self.properties.get(&format!("indirect.{name}")) {
+                Some(value) => match IndirectDispatch::parse(&self.options.expand(value)) {
+                    Some(request) => Some(request),
+                    None => {
+                        self.post.notes.push(format!(
+                            "{name}: skipped: invalid indirect request; expected SSBO index 0–8 \
+                             and a four-byte-aligned byte offset"
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
             let pp = self.preprocess(&path);
             let problems = diagnostics(&pp);
             let notes = &mut self.post.notes;
@@ -1655,7 +1688,7 @@ impl Loader<'_> {
                 notes.push(format!("{name}: skipped"));
                 continue;
             }
-            match translate_compute(&pp) {
+            match crate::translate::translate_compute_dispatch(&pp, indirect) {
                 Ok(program) => {
                     notes.extend(
                         program
@@ -1827,6 +1860,46 @@ fn flips(properties: &Properties, program: &str) -> Vec<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_indirect_requests_skip_the_compute_instead_of_dispatching_directly() {
+        let pack = Pack::from_zip_bytes(
+            "original-indirect-property",
+            crate::pack::tests::zip(&[(
+                "shaders/composite.csh",
+                "#version 430\nlayout(local_size_x=1) in; void main() {}",
+            )]),
+        )
+        .unwrap();
+        for value in [
+            "",
+            "2",
+            "2 0 extra",
+            "-1 0",
+            "9 0",
+            "2 -4",
+            "2 2",
+            "2 18446744073709551612",
+        ] {
+            let properties =
+                Properties::parse(&format!("indirect.composite={value}"), &Macros::standard());
+            let post = load_post(
+                &pack,
+                "",
+                &properties,
+                &Macros::standard(),
+                &GameInputs::default(),
+            );
+            assert!(post.programs.is_empty(), "{value}: silently became direct");
+            assert!(
+                post.notes
+                    .iter()
+                    .any(|n| n.contains("invalid indirect request")),
+                "{value}: {:?}",
+                post.notes
+            );
+        }
+    }
 
     #[test]
     fn unsupported_defaults_are_notes_without_skipping_render_or_compute() {
@@ -2025,8 +2098,13 @@ mod tests {
 
     #[test]
     fn image_dimensions_expand_default_and_chosen_options() {
-        let bytes =
-            crate::pack::tests::zip(&[("shaders/options.glsl", "#define SIZE 16 // [8 16]\n")]);
+        let bytes = crate::pack::tests::zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            (
+                "shaders/shaders.properties",
+                "image.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
+            ),
+        ]);
         for (choice, expected) in [(None, [16, 16]), (Some("8"), [8, 8])] {
             let mut pack = Pack::from_zip_bytes("image.zip", bytes.clone()).unwrap();
             if let Some(value) = choice {
@@ -2035,16 +2113,96 @@ mod tests {
                     value.into(),
                 )]));
             }
-            let macros = Macros::standard();
-            let properties = Properties::parse(
-                "image.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
-                &macros,
-            );
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
             let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
             assert!(post.notes.is_empty(), "{:?}", post.notes);
             assert_eq!(post.images.len(), 1);
             assert_eq!(post.images[0].size, ImageSize::Absolute(expected));
         }
+    }
+
+    #[test]
+    fn image_dimensions_keep_the_macros_of_their_own_line() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[("shaders/placeholder.glsl", "")]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse(
+            "#define SIZE 16\n\
+             image.first = none RGBA RGBA8 BYTE false false SIZE SIZE\n\
+             #undef SIZE\n\
+             #define SIZE 32\n\
+             image.second = none RGBA RGBA8 BYTE false false SIZE SIZE",
+            &macros,
+        );
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        let sizes: Vec<ImageSize> = post.images.iter().map(|i| i.size).collect();
+        assert_eq!(
+            sizes,
+            [ImageSize::Absolute([16, 16]), ImageSize::Absolute([32, 32])]
+        );
+    }
+
+    #[test]
+    fn an_image_does_not_see_an_option_undefined_before_it() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[
+                ("shaders/options.glsl", "#define SIZE 16 // [16 32]\n"),
+                (
+                    "shaders/shaders.properties",
+                    "#undef SIZE\nimage.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
+                ),
+                ("shaders/placeholder.glsl", ""),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        let (properties, _) = crate::read_properties(&pack, &mut macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.images.is_empty(), "{:?}", post.images);
+        assert!(
+            post.notes.iter().any(|n| n.contains("not an image")),
+            "{:?}",
+            post.notes
+        );
+    }
+
+    #[test]
+    fn image_dimensions_expand_macros_the_properties_file_defines() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[
+                (
+                    "shaders/options.glsl",
+                    "#define SKYBOX_RESOLUTION 128 // [128 256]\n",
+                ),
+                (
+                    "shaders/shaders.properties",
+                    "#if SKYBOX_RESOLUTION == 128\n\
+                     #define SKYBOX_RESOLUTION_X 384\n\
+                     #define SKYBOX_RESOLUTION_Y 256\n\
+                     #endif\n\
+                     image.skyBox2D = none RGBA RGBA8 BYTE false false \
+                     SKYBOX_RESOLUTION_X SKYBOX_RESOLUTION_Y",
+                ),
+                ("shaders/placeholder.glsl", ""),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        // The pack reads its properties with its options, and writes the size as macros it
+        // defines further up in the same file, inside an `#if` (IterationRP's
+        // `SKYBOX_RESOLUTION_X/Y`).
+        let (properties, _) = crate::read_properties(&pack, &mut macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(post.images.len(), 1);
+        assert_eq!(post.images[0].size, ImageSize::Absolute([384, 256]));
     }
 
     #[test]

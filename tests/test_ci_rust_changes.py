@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tools.ci.rust_changes import changed_paths, needs_launcher, needs_rust
+from tools.ci.rust_changes import changed_paths, needs_launcher, needs_rust, needs_server_build
 
 
 class RustChangesTests(unittest.TestCase):
@@ -38,6 +38,17 @@ class RustChangesTests(unittest.TestCase):
                      ".github/workflows/ci.yml"]:
             with self.subTest(path=path):
                 self.assertTrue(needs_launcher(["README.md", path]))
+
+    def test_the_server_build_clippy_follows_the_client_crates_and_manifests(self):
+        for path in ["crates/horizon-world/src/lib.rs", "crates/horizon-perf/src/lib.rs", "tools/parity.py",
+                     "docs/setup.md", "launcher/src/main.rs"]:
+            with self.subTest(path=path):
+                self.assertFalse(needs_server_build([path]))
+        for path in ["crates/horizon-client/src/game.rs", "crates/horizon-client-render/src/hud.rs",
+                     "crates/horizon-client-core/src/lang.rs", "crates/horizon-world/Cargo.toml", "Cargo.lock",
+                     "Cargo.toml", ".cargo/config.toml", ".github/workflows/ci.yml", "tools/ci/rust_changes.py"]:
+            with self.subTest(path=path):
+                self.assertTrue(needs_server_build(["docs/setup.md", path]))
 
     def test_moving_source_into_docs_still_requires_rust(self):
         with tempfile.TemporaryDirectory() as directory:

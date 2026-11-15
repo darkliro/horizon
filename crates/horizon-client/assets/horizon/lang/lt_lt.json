@@ -241,10 +241,6 @@
   "Peak Brightness": "Didžiausias ryškumas",
   "Black Level": "Juodasis lygis",
   "UI Brightness": "UI ryškumas",
-  "HDR Lighting": "HDR apšvietimas",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Šviesos šaltiniai, saulė ir saulės šviesa šviečia ryškiau už baltą. Išjungta: kaip SDR.",
-  "Smooth Gradients": "Glotnūs gradientai",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16 bitų kadras: tamsus dangus ir šešėliai nesuskirstomi. Šiek tiek daugiau VRAM. Kitas paleidimas.",
   "Battery Mode": "Baterijos režimas",
   "Graphics API": "Grafikos API",
   "Translucent Batching": "Permatomos partijos",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Laukiama ekrano atnaujinimo: be plyšimų, šiek tiek delsos.",
   "Size of menus and the HUD.": "Meniu dydis ir HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Kartu nustatomos toliau pateiktos parinktys. Pakeitus vieną, jis tampa individualus.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, ugnis ir saulės šviesa šviečia ryškiau nei balta. Reikia HDR ekrano.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Pakelia šešėlius iki tamsiausios jūsų ekrano juodos. 0: tikra juoda, be pakėlimo.",
   "How bright highlights get. Auto: the peak your system reports.": "Kaip ryškūs akcentai. Automatinis: didžiausias jūsų sistemos pranešimas.",
   "How bright white looks in the world. Auto: your desktop's white.": "Koks ryškus baltas atrodo pasaulyje. Automatinis: jūsų darbalaukio baltas.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Pridėti žymę",
   "horizon.studio.topbar.clear_keyframes": "🗑 Išvalyti raktinius kadrus",
   "horizon.studio.topbar.timeline_hud": "⏱ Laiko juosta",
-  "horizon.studio.topbar.split_scene": "Skirti sceną"
+  "horizon.studio.topbar.split_scene": "Skirti sceną",
+  "horizon.options.block_vibration": "Bedrock haptinis atsiliepimas",
+  "horizon.options.split_vibration": "Vibracija dalijant krūvą",
+  "horizon.options.impulse_triggers": "Impulsiniai gaidukai",
+  "A tick when you break a block, as in Bedrock.": "Kai sulaužote bloką, jis vibruoja, kaip Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Trumpa vibracija dalijant krūvą, kaip Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "„Xbox One“ pultelio gaidukai vibruoja kartu su jo rankenomis."
 }

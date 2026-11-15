@@ -1,5 +1,8 @@
 //! Stable entity material grouping with renderer-owned, reusable CPU scratch.
 use super::Vertex;
+use super::native_entity::EntityRuns;
+use super::surface_setup::ray_query::ray_scene::GEOMETRIES;
+use horizon_shader_api::stages::RAY_ENTITY_QUAD;
 
 /// Entity materials by a quad's overlay (`Vertex::layer`), in draw order:
 /// ordinary entities, world text drawn with a depth bias (35,
@@ -81,7 +84,7 @@ pub const WORLD_TEXT_POLYGON_OFFSET_OVERLAY: u32 = 40;
 
 /// The material of a quad by its overlay (`MATERIALS` order): the overlay is the layer's low 16
 /// bits, as entity.wgsl reads it; HDR output's tier rides in the high ones.
-fn material(layer: u32, oit: bool) -> usize {
+pub(in crate::gfx) fn material(layer: u32, oit: bool) -> usize {
     match layer & 0xffff {
         TERRAIN_MODEL_SOLID_OVERLAY => return 13,
         TERRAIN_MODEL_CUTOUT_OVERLAY => return 14,
@@ -120,12 +123,49 @@ pub(super) struct EntityBatch {
     /// last material (improved transparency on): the dragon's eyes, which share
     /// the additive buffer with its rays.
     pub(super) moved_additive: u32,
+    /// For a native pack's `[entity]` stage (`native_entity.rs`) and the ray scene's entity
+    /// layer: the runs of the next `update`'s entities that they take.
+    pub(super) kinds: EntityRuns,
+    /// The ordinary quads, the improved transparency ones and the ray-only ones in `combined`,
+    /// as (first quad, quads): the entity layer's geometries (gfx/ray_scene.rs).
+    pub(super) ray_ranges: [(u32, u32); GEOMETRIES],
+    /// The entities the camera doesn't draw within the ray scene's reach, which the game moved
+    /// out of the stream (`Renderer::take_ray_only`), and their runs: what `ray_only_quads`
+    /// takes of them.
+    pub(super) ray_only: Vec<Vertex>,
+    pub(super) ray_kinds: EntityRuns,
+    /// The last `update`'s `oit`.
+    oit: bool,
 }
 
 impl EntityBatch {
-    /// After `update`: quads only a native pack's shadow pass draws, at the buffer's end.
+    /// After `update`: the ray-only quads, then the quads only a native pack's shadow pass draws,
+    /// at the buffer's end (it draws them from there).
     pub(super) fn append_shadow_only(&mut self, shadow_only: &[Vertex]) {
+        self.append_ray_only();
         self.combined.extend_from_slice(shadow_only);
+    }
+
+    /// Appends the quads of `ray_only` the entity layer takes, marked as `tag_kinds` marks the
+    /// stream's: those in a run, of the ordinary material or improved transparency's. No pass
+    /// draws them: they lie past every material, the hand and the see-through quads, and before
+    /// the shadow-only ones, which the native shadow pass counts back to from the end.
+    fn append_ray_only(&mut self) {
+        let first = self.combined.len() / 4;
+        let quads = self.ray_only.as_chunks::<4>().0;
+        let bits = self.ray_kinds.bits((0..quads.len() as u32).map(|q| q * 4));
+        for (quad, bits) in quads.iter().zip(bits) {
+            if bits != 0 && matches!(material(quad[0].layer, self.oit), 0 | 9) {
+                let layer = |v: &Vertex| v.layer | bits | RAY_ENTITY_QUAD;
+                self.combined.extend(quad.iter().map(|v| Vertex {
+                    layer: layer(v),
+                    ..*v
+                }));
+            }
+        }
+        self.ray_ranges[2] = (first as u32, (self.combined.len() / 4 - first) as u32);
+        self.ray_only.clear();
+        self.ray_kinds.clear();
     }
 
     pub(super) fn update(
@@ -179,7 +219,7 @@ impl EntityBatch {
                 }
             }
         }
-        // Fluid and RenderType.text sort their own alpha-blended quads far to
+        // Fluid and RenderTypes.text sort their own alpha-blended quads far to
         // near. Fluid precedes both world-canvas layers, after existing materials
         // (including eyes moved out of additive).
         for runs in &self.runs[10..13] {
@@ -218,7 +258,40 @@ impl EntityBatch {
         }
         self.combined.extend_from_slice(hand);
         self.combined.extend_from_slice(see_through);
+        let oit_first: usize = counts[..9].iter().sum();
+        let end = self.combined.len() / 4;
+        self.ray_ranges = [(0, counts[0]), (oit_first, counts[9]), (end, 0)]
+            .map(|(first, quads)| (first as u32, quads as u32));
+        self.oit = oit;
+        self.tag_kinds(oit_first);
         counts.map(|count| count as u32)
+    }
+
+    /// Writes into each ordinary or improved transparency quad's layer the kind of the run of
+    /// `kinds` it is in, and that it is in the ray scene's entity layer (`RAY_ENTITY_QUAD`), and
+    /// forgets the runs: they are one frame's. The other materials' quads take none, in a run
+    /// or not: each has a pipeline of its own, the same with the stage as without (so a
+    /// translucent item an entity holds is Horizon's until items draw through the stage).
+    /// `oit_first` is the first improved transparency quad in `combined`.
+    fn tag_kinds(&mut self, oit_first: usize) {
+        if self.kinds.is_empty() {
+            return;
+        }
+        let combined = self.combined.as_chunks_mut::<4>().0;
+        // Each material's quads are together in `combined`, in the order the game drew them.
+        for (material, first) in [(0, 0), (9, oit_first)] {
+            let quads = self.runs[material]
+                .iter()
+                .flat_map(|&(first, count)| first..first + count);
+            let bits = self.kinds.bits(quads.map(|quad| quad as u32 * 4));
+            for (quad, bits) in combined[first..].iter_mut().zip(bits) {
+                let bits = if bits == 0 { 0 } else { bits | RAY_ENTITY_QUAD };
+                for vertex in quad {
+                    vertex.layer |= bits;
+                }
+            }
+        }
+        self.kinds.clear();
     }
 }
 

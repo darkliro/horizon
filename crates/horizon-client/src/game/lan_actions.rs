@@ -8,8 +8,10 @@
 use super::{
     Dim, Game, GuestUse, Hit, InteractTarget, Mining, Screen,
     building_players::{BuildingPlayer, BuildingPlayers, HubBodies, shared},
+    combat,
     lan::LanHost,
     lan_crafting::MenuRemoval,
+    lan_particles,
     respawn_anchor::RespawnConfig,
 };
 use horizon_client::{
@@ -312,17 +314,6 @@ pub(super) fn guest_within_entity_range(
     let range = if g.creative() { 5.0 } else { 3.0 } + buffer;
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < range * range
 }
-fn direction(face: i32) -> [i32; 3] {
-    match face {
-        0 => [0, -1, 0],
-        1 => [0, 1, 0],
-        2 => [0, 0, -1],
-        3 => [0, 0, 1],
-        4 => [-1, 0, 0],
-        _ => [1, 0, 0],
-    }
-}
-
 /// The windows a guest has open besides their inventory: the block or mod
 /// container, the crafting table, a station, a lectern, a merchant, a mount.
 fn guest_open_windows(host: &LanHost, conn: u32) -> Vec<i32> {
@@ -583,6 +574,7 @@ impl Game<'_> {
                 level: g.xp_level,
                 progress: g.xp_progress,
                 total: g.xp_total,
+                score: g.score,
             },
         );
         let level_up_sound = std::mem::replace(&mut self.level_up_sound, play.level_up_sound);
@@ -687,14 +679,14 @@ impl Game<'_> {
             &mut self.applied_modifiers,
             std::mem::take(&mut play.modifiers),
         );
-        // Its worn armour on its attributes, when it changed.
+        // Its equipment on its attributes, when it changed (once its tick saw a new hand item).
         let selected_item = self.inventory.get(self.selected).and_then(Option::as_ref);
         let unchanged = play.equipped.as_deref().is_some_and(|eq| {
             eq.len() == self.armor.len() + 1
                 && eq[..self.armor.len()] == self.armor[..]
                 && eq[self.armor.len()].as_ref() == selected_item
         });
-        if !unchanged {
+        if !unchanged && (play.equipped.is_none() || self.held_item_ticked()) {
             let mut equipped: Vec<Option<ItemStack>> = self.armor.to_vec();
             equipped.push(selected_item.cloned());
             self.apply_equipment();
@@ -775,7 +767,6 @@ impl Game<'_> {
             building_boxes,
         })
     }
-
     /// The second half of `as_guest`: the guest's state back into their
     /// record, the game's back in place, and what the turn changed sent.
     pub(super) fn leave_guest(&mut self, host: &mut LanHost, swap: GuestSwap) {
@@ -979,7 +970,6 @@ impl Game<'_> {
         // An ender chest the guest opened: the menu shows their inventory
         // itself (lan_open_container), not a stand-in block entity.
         self.close_ender_chest();
-
         // What the action opened: handed to the guest instead of the host.
         let opened = self.container.take();
         let guest_table = std::mem::replace(&mut self.craft_table, craft_table);
@@ -1090,6 +1080,7 @@ impl Game<'_> {
         g.xp_level = new_xp.level;
         g.xp_progress = new_xp.progress;
         g.xp_total = new_xp.total;
+        g.score = new_xp.score;
         let new_mode = self.mode_id();
         self.mode = mode;
         self.creative = creative;
@@ -1254,7 +1245,6 @@ impl Game<'_> {
                     .for_turn(actor, None, building_players(host));
         }
     }
-
     /// `ServerLevel.broadcastDamageEvent` for a guest that took an unblocked hit.
     fn guest_damage_broadcast(
         &mut self,
@@ -1273,7 +1263,6 @@ impl Game<'_> {
             .map_or("minecraft:generic", |d| d.name.as_str());
         host.hub.damage_event(id, kind, None, None, at);
     }
-
     /// `LivingEntity.playHurtSound` for a guest: the server's `Entity.playSound`
     /// reaches every player around but the hurt one, whose own client plays it
     /// from `handleDamageEvent` (#4149).
@@ -1286,7 +1275,6 @@ impl Game<'_> {
         self.audio.play_unshared(sound, Some(at), 1.0, 1.0);
         host.hub.sound(sound, at, 1.0, 1.0, source, Some(conn));
     }
-
     /// `ServerLevel.players()` in turn: the host's own player, then each
     /// guest in the level in place with their state swapped in (`as_guest`).
     /// What reaches the players around a point (a beacon's powers, a splash
@@ -1977,14 +1965,14 @@ impl Game<'_> {
     }
 
     /// The rest of it: a block in `dimension` within `radius` of the world
-    /// spawn (square, in the Overworld only).
+    /// spawn (square, and only in the dimension the spawn belongs to).
     pub(super) fn spawn_protects(&self, radius: i32, dimension: &str, pos: [i32; 3]) -> bool {
         let Some(spawn) = self.level.world_spawn else {
             return false;
         };
         let dx = pos[0].abs_diff(spawn[0]);
         let dz = pos[2].abs_diff(spawn[2]);
-        dimension == "minecraft:overworld" && dx.max(dz) <= radius as u32
+        dimension == self.level.spawn_dimension() && dx.max(dz) <= radius as u32
     }
 
     /// ServerPlayer.sendSpawnProtectionMessage.
@@ -2134,7 +2122,7 @@ impl Game<'_> {
                     {
                         return;
                     }
-                    let face = direction(i32::from(a.direction));
+                    let face = super::hit::direction(i32::from(a.direction));
                     // Native mods, once the dig may start: a canceled click
                     // attacks, digs and breaks nothing (the ack puts the
                     // block back on the client).
@@ -2402,16 +2390,7 @@ impl Game<'_> {
                     self.lan_log_event(horizon_client::lan::hub::HostEvent::Warn(line));
                     return;
                 }
-                let face = direction(p.face);
-                let hit = Hit {
-                    pos: p.pos,
-                    face,
-                    point: [
-                        f64::from(p.pos[0]) + f64::from(p.cursor[0]),
-                        f64::from(p.pos[1]) + f64::from(p.cursor[1]),
-                        f64::from(p.pos[2]) + f64::from(p.cursor[2]),
-                    ],
-                };
+                let hit = Hit::from_use_item_on(&p);
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                 // handleUseItemOn: above or below the world nothing is used and
                 // the player is told the limit (the blocks are not resent);
@@ -2484,10 +2463,7 @@ impl Game<'_> {
                     self.build_limit_message(host, conn, true, max_y);
                 }
                 // The client predicted a result: correct it with what really is.
-                for pos in [
-                    p.pos,
-                    [p.pos[0] + face[0], p.pos[1] + face[1], p.pos[2] + face[2]],
-                ] {
+                for pos in [p.pos, hit.beside()] {
                     let state = self.world.block(pos[0], pos[1], pos[2]).0 as i32;
                     host.hub
                         .send_to(conn, &C::BlockUpdate(play::BlockUpdate { pos, state }));
@@ -3217,9 +3193,9 @@ impl Game<'_> {
             g.position[1] + g.eye_height() - f64::from(0.3f32),
             g.position[2],
         ];
+        let mut r = horizon_client::random_source::entity(); // the guest's Entity.random
         for stack in stacks {
-            let r = &mut self.world.random;
-            let v = horizon_client::entities::drop_motion(r, g.yaw, g.pitch, false);
+            let v = horizon_client::entities::drop_motion(&mut r, g.yaw, g.pitch, false);
             self.spawn_item(stack, eye, v, 40);
         }
     }
@@ -3396,145 +3372,6 @@ impl Game<'_> {
             .iter()
             .find(|&(_, &knot)| knot as i32 == id)
             .map(|(&fence, _)| fence)
-    }
-
-    fn guest_attack(&mut self, host: &mut LanHost, conn: u32, id: i32) {
-        let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
-            return;
-        };
-        if host.hub.guests[gi].spectator() {
-            return;
-        }
-        if self.guest_attack_stops(host, gi, id) {
-            return;
-        }
-        // Native mods, where Player.attack starts: a canceled blow does
-        // nothing (game/native_hooks.rs).
-        let aimed = if let Some(g) = host
-            .hub
-            .guests
-            .iter()
-            .find(|g| g.entity_id == id && g.conn != conn && host.hub.here(g))
-        {
-            Some(("minecraft:player".to_owned(), g.position))
-        } else {
-            // The mod hooks hear no natural fence knot (#13036).
-            self.level_entity(id)
-                .filter(|t| !matches!(t, super::commands::Target::Knot(_)))
-                .map(|t| {
-                    (
-                        self.target_type(t),
-                        self.target_position(t).unwrap_or_default(),
-                    )
-                })
-        };
-        if let Some((kind, at)) = aimed
-            && self.as_guest(host, conn, |g| {
-                let mut canceled = false;
-                g.native_attack_entity(id, &kind, at, &mut canceled);
-                canceled
-            }) == Some(true)
-        {
-            return;
-        }
-        if let Some(victim) = Self::pvp_victim(host, conn, id) {
-            if let Some(Some(strike)) = self.as_guest(host, conn, |g| g.pvp_strike())
-                && self.pvp_land(host, victim, &strike)
-            {
-                let on_ground = Self::pvp_victim_on_ground(host, victim);
-                let stops_sprint = strike.stops_sprint();
-                let sent = self.as_guest(host, conn, |g| g.pvp_hit_after(on_ground, stops_sprint));
-                self.send_guest_motion(host, conn, sent.flatten());
-            }
-            return;
-        }
-        // A ghast's fireball or a wind charge: turned along the guest's own
-        // view (ServerGamePacketListenerImpl.handleInteract, then
-        // Player.attack's AIM_DEFLECT).
-        if let Some(i) = self
-            .creatures
-            .projectiles
-            .iter()
-            .position(|p| p.id != 0 && p.id as i32 == id && super::deflect::attackable(p))
-        {
-            self.as_guest_with_host(host, conn, |g, host| {
-                if g.within_interaction_range(i) {
-                    if matches!(
-                        g.creatures.projectiles[i].kind,
-                        horizon_client::projectiles::ProjectileKind::ShulkerBullet { .. }
-                    ) {
-                        g.hit_shulker_bullet(Some(host), i);
-                    } else {
-                        g.deflect(i);
-                    }
-                }
-            });
-            return;
-        }
-        if let Some(index) = self
-            .mobs
-            .iter()
-            .position(|m| m.id as i32 == id && m.alive())
-            .filter(|_| self.dragon.as_ref().is_none_or(|d| d.id as i32 != id))
-        {
-            if host.hub.guests[gi].vehicle == Some(self.mobs[index].id) {
-                return;
-            }
-            // A mace's smash sets the attacker's velocity and sends it at once, before the
-            // Wind Burst's push (MaceItem.hurtEnemy, then the post-attack effects).
-            let sent = self
-                .as_guest(host, conn, |g| {
-                    let marked = g
-                        .player
-                        .as_mut()
-                        .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
-                    g.attack_mob(index);
-                    g.swing_arm();
-                    let p = g.player.as_mut()?;
-                    let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
-                    sent.then_some(p.velocity)
-                })
-                .flatten();
-            self.send_guest_motion(host, conn, sent);
-            // The mob now answers to this guest (game/lan_mobs.rs).
-            if let Ok(id) = u32::try_from(id) {
-                host.mob_players.insert(id, conn);
-            }
-            return;
-        }
-        let (old_yaw, old_pitch) = (host.hub.guests[gi].yaw, host.hub.guests[gi].pitch);
-        let boat = self.boats.iter().position(|boat| boat.id as i32 == id);
-        // A packet names its target already. Keep the attacker's actual yaw
-        // for the boat's knockback instead of aiming a ray at its center.
-        if boat.is_none() && self.look_at_entity(host, gi, id, None).is_none() {
-            return;
-        }
-        // A mace's smash sets the attacker's velocity and sends it at once, before the
-        // Wind Burst's push (MaceItem.hurtEnemy, then the post-attack effects).
-        let sent = self
-            .as_guest(host, conn, |g| {
-                let marked = g
-                    .player
-                    .as_mut()
-                    .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
-                if let Some(index) = boat {
-                    g.strike_boat(index);
-                    g.swing_arm();
-                } else {
-                    g.attack();
-                }
-                let p = g.player.as_mut()?;
-                let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
-                sent.then_some(p.velocity)
-            })
-            .flatten();
-        self.send_guest_motion(host, conn, sent);
-        // The mob now answers to this guest (game/lan_mobs.rs).
-        if let Ok(id) = u32::try_from(id) {
-            host.mob_players.insert(id, conn);
-        }
-        host.hub.guests[gi].yaw = old_yaw;
-        host.hub.guests[gi].pitch = old_pitch;
     }
 
     /// Commands.performCommand for a guest with command access.
@@ -3818,7 +3655,7 @@ impl Game<'_> {
             }
             None => Default::default(),
         };
-        let reg = &mut self.ui.registries;
+        let reg = self.suggestion_registries();
         let level = std::mem::replace(&mut reg.permission, permission);
         let own_players = std::mem::replace(&mut reg.players, players);
         let own_ops = std::mem::replace(&mut reg.ops, ops);
@@ -4008,9 +3845,11 @@ impl Game<'_> {
             level: g.xp_level,
             progress: g.xp_progress,
             total: g.xp_total,
+            score: g.score,
         };
         xp.respawn(self.ui.rules.bool("keep_inventory") || g.game_mode == SPECTATOR);
-        (g.xp_level, g.xp_progress, g.xp_total) = (xp.level, xp.progress, xp.total);
+        (g.xp_level, g.xp_progress, g.xp_total, g.score) =
+            (xp.level, xp.progress, xp.total, xp.score);
         // PlayerEvent.Clone, at the end of `restoreFrom`: the data is copied,
         // the new player not yet placed.
         let (cloned, name) = (g.uuid, g.name.clone());
@@ -4215,6 +4054,7 @@ impl Game<'_> {
                                 f64::from(pos[1]) + 0.5,
                                 f64::from(pos[2]) + 0.5,
                             ],
+                            inside: false,
                         });
                     }
                     let _ = g.tick_mining();
@@ -4391,6 +4231,7 @@ impl Game<'_> {
                 level: g.xp_level,
                 progress: g.xp_progress,
                 total: g.xp_total,
+                score: g.score,
             }
             .death_reward(self.ui.rules.bool("keep_inventory") || g.game_mode == SPECTATOR);
             let (name, uuid) = (g.name.clone(), g.uuid);
@@ -4958,395 +4799,6 @@ impl Game<'_> {
         });
     }
 
-    /// The guest's body on the server each tick: ServerPlayer.tick's damage
-    /// clock and Entity.baseTick's fluid phase (burning), then for each move
-    /// ServerPlayer.doCheckFallDamage (the fall distance grows while they go
-    /// down and hurts them where they land, as the host's own landing does;
-    /// water resets it, lava halves it) and checkMovementStatistics (the
-    /// exhaustion of sprinting and swimming), then LivingEntity.baseTick's
-    /// hazards (drowning, lava, fire blocks, suffocation, the void), and
-    /// regeneration and the food tick (ServerPlayer.doTick). Their hurt
-    /// sounds are heard at the guest.
-    fn guest_server_tick(&mut self, host: &mut LanHost, conn: u32) {
-        self.guest_replay(host, conn);
-        self.guest_vehicle_tick(host, conn);
-        // The last move's fall stands in for the server's delta movement.
-        let fell = host
-            .hub
-            .guest_mut(conn)
-            .and_then(|g| g.moves.last().map(|m| m.0[1]))
-            .unwrap_or(0.0);
-        self.guest_glide_tick(host, conn, fell);
-        let Some(g) = host.hub.guest_mut(conn) else {
-            return;
-        };
-        let moves = std::mem::take(&mut g.moves);
-        let from_ground = if moves.is_empty() {
-            g.on_ground
-        } else {
-            g.moves_from_ground
-        };
-        if g.spectator() {
-            // ServerPlayer.doTick runs the player's whole tick for a spectator
-            // too, unless its box touches an unloaded chunk
-            // (`touchingUnloadedChunk`): its effects (LivingEntity.baseTick),
-            // Player.aiStep's tickRegeneration and foodData.tick go on while
-            // it watches (#11312). The hazards, the travel and the movement
-            // statistics below are what a spectator's body skips.
-            let (at, body) = (g.position, g.dimensions());
-            let loaded =
-                !touching_unloaded_chunk(at, body, |x, z| self.world.chunks.contains_key(&(x, z)));
-            if !g.effects.list.is_empty() {
-                self.as_guest(host, conn, |game| game.tick_mob_effects());
-            }
-            self.as_guest(host, conn, |game| {
-                game.handle_shoulder_entities();
-                if !loaded {
-                    return;
-                }
-                let rules = game.world.health_rules;
-                let Some(player) = game.player.as_mut() else {
-                    return;
-                };
-                // Entity.baseTick's clocks (hurtTime, invulnerableTime) run too.
-                player.health.advance_clock();
-                let _ = player.peaceful_regeneration(rules);
-                let _ = player.food_tick(&game.health_resources, rules);
-                let events = std::mem::take(&mut player.events);
-                game.record_combat(&events);
-            });
-            return;
-        }
-        let in_wall = !g.sleeping && self.in_wall(g.position, g.dimensions());
-        let at = g.position;
-        let (sneaking, sleeping) = (g.sneaking, g.sleeping);
-        let riding = g.vehicle.is_some();
-        if g.motion
-            .as_ref()
-            .is_some_and(|m| m.auto_spin_attack_ticks > 0)
-        {
-            self.as_guest(host, conn, |game| game.server_spin_attack());
-        }
-        let mut soul = None;
-        let events = self.as_guest(host, conn, |game| {
-            let rules = game.world.health_rules;
-            let (freeze_immune, boots) = (game.wears_freeze_immune(), game.wears_leather_boots());
-            let burn_immune = game.wears_burn_from_stepping_immunity();
-            let boat = game.riding_boat_fluid_box();
-            let Some(player) = game.player.as_mut() else {
-                return (Vec::new(), None);
-            };
-            player.fluids.boat = boat;
-            let mut w = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: game.collision,
-                resources: game.motion,
-                health: &game.health_resources,
-            };
-            w.player.health.advance_clock();
-            let _ = w.fluid_base_tick();
-            w.player.ground.on_ground = from_ground;
-            // Player.aiStep: a flying player that isn't riding starts every tick
-            // with no fall distance, so flying down in creative and switching to
-            // survival lands without the flight's distance.
-            if w.player.flying && !riding {
-                w.player.fall_distance = 0.0;
-            }
-            let travelled: Vec<[f64; 3]> = moves.iter().map(|m| m.0).collect();
-            // The tick's whole movement, for the delta movement a glide's wall
-            // hit reads (`handleMovePlayer` gives the server copy the client's
-            // own movement).
-            let tick_movement = travelled.iter().fold(Vec3::ZERO, |sum, d| {
-                sum.add_vector(Vec3::new(d[0], d[1], d[2]))
-            });
-            // Entity.move's movementThisTick: each move, from where the
-            // tick's first one started.
-            let end = w.player.position;
-            let start = travelled
-                .iter()
-                .fold(end, |p, d| p.subtract(Vec3::new(d[0], d[1], d[2])));
-            w.player.history.clear();
-            let mut from = start;
-            for d in &travelled {
-                let delta = Vec3::new(d[0], d[1], d[2]);
-                let to = from.add_vector(delta);
-                w.player
-                    .history
-                    .add(horizon_world::entity_move::MovementRecord {
-                        from,
-                        to,
-                        original: Some(delta),
-                    });
-                from = to;
-            }
-            // handleMovePlayer moves the player before it checks the fall: a
-            // cobweb or a sweet berry bush it moves through has already made it
-            // forget the fall (`makeStuckInBlock`), so landing in one is safe.
-            let _ = w.server_stuck_in_blocks(start);
-            for (moved, on_ground) in moves {
-                let movement = Vec3::new(moved[0], moved[1], moved[2]);
-                let landed = (|| -> horizon_client::Result<()> {
-                    w.set_on_ground_with_movement(on_ground, false, movement)?;
-                    let pos = w.legacy_on_position()?;
-                    let state = w.block_state(pos)?;
-                    w.check_fall_damage(moved[1], on_ground, state, pos)?;
-                    w.check_movement_statistics(movement)
-                })();
-                if landed.is_err() {
-                    break;
-                }
-            }
-            // A ServerPlayer travels on the server too
-            // (MoveSimulationType.AUTHORITATIVE_SIDE_AND_SERVER), so every tick
-            // on a ladder or vine LivingEntity.handleOnClimbable resets its fall
-            // distance: climbing down doesn't hurt where it lands (#1255).
-            if w.climbable().unwrap_or(false) {
-                w.player.fall_distance = 0.0;
-            }
-            // ServerGamePacketListenerImpl.handlePlayerPositionChange ends the
-            // impulse context on LivingEntity.hasLandedInLiquid: a move into a
-            // liquid that does not rise, or a wind charge that lands in water
-            // would waive the fall after it.
-            let liquid = w.player.fluids.was_touching_water || w.player.is_in_lava();
-            let delta_y = w.player.velocity.y;
-            w.player.impulse.landed_in_liquid(delta_y, liquid);
-            // Entity.applyEffectsFromBlocks along those moves: magma, cactus,
-            // lit campfires and grown sweet berry bushes hurt (#1305).
-            w.player.shift_key_down = sneaking;
-            let _ = w.player.set_sleeping(sleeping);
-            (w.player.freeze_immune, w.player.leather_boots) = (freeze_immune, boots);
-            w.player.burn_from_stepping_immune = burn_immune;
-            let _ = w.server_block_damage(start);
-            let _ = w.update_soul_speed_block();
-            let _ = w.tick_environment_damage();
-            let _ = w.apply_fire_contact();
-            let _ = w.server_hazards_tick(in_wall);
-            // LivingEntity.aiStep: a Riptide spin counts down on the server's
-            // copy too, or it would stay in the spin pose (eye 0.4) for good.
-            // LivingEntity.tick: a changed scale rebuilds the box. Player.tick
-            // ends with updatePlayerPose — or, for a passenger, the rideTick
-            // path that clears a swim (#4509 / #3308).
-            let _ = if riding {
-                w.passenger_pose_tick()
-            } else {
-                w.server_player_pose_tick()
-            };
-            let mut events = std::mem::take(&mut w.player.events);
-            // Powder snow and cauldrons put the fire out along those moves.
-            game.block_extinguish_player(&events);
-            // Entity.baseTick: rain puts out a burning player.
-            game.rain_extinguish_player();
-            // WitherRoseBlock.entityInside along those moves.
-            for event in &events {
-                if matches!(event, MotionEvent::InsideWitherRose) {
-                    game.wither_rose_contact();
-                }
-            }
-            // ServerGamePacketListenerImpl.handleMovePlayer:
-            // Player.checkMovementStatistics for each move.
-            for d in travelled {
-                game.movement_stats(Vec3::new(d[0], d[1], d[2]));
-            }
-            // LivingEntity.baseTick: a new block position runs the worn
-            // enchantments' location_changed effects (frost walker).
-            game.location_changed_effects([start.x, start.y, start.z], from_ground);
-            // LivingEntity.baseTick: outside the world border, then tickEffects.
-            game.border_damage();
-            game.tick_mob_effects();
-            // Soul Speed's effects (LivingEntity.baseTick's location_changed
-            // and tick effects); its particle goes to the players around.
-            soul = game.tick_soul_speed();
-            game.handle_shoulder_entities();
-            let Some(player) = game.player.as_mut() else {
-                return (Vec::new(), None);
-            };
-            let _ = player.peaceful_regeneration(rules);
-            let _ = player.food_tick(&game.health_resources, rules);
-            events.append(&mut player.events);
-            player.carry_client_movement(tick_movement);
-            let _ = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: game.collision,
-                resources: game.motion,
-                health: &game.health_resources,
-            }
-            .server_travel();
-            // Player.aiStep's entity contacts run with the player's body,
-            // even when the level and its mobs are frozen. Flush their damage
-            // events and marked velocity through the existing guest path.
-            game.touch_pufferfish();
-            let Some(player) = game.player.as_mut() else {
-                return (events, None);
-            };
-            // Landing damage from this travel reaches the tracker too.
-            events.append(&mut player.events);
-            // A hurt since the last tick marked the velocity (Entity.markHurt):
-            // ServerEntity.sendChanges sends it as it is after this travel.
-            let marked = std::mem::take(&mut player.health.sync_velocity);
-            let velocity = marked.then_some(player.velocity);
-            // Player.causeFallDamage: a fall of 2 blocks or more counts.
-            for event in &events {
-                if let MotionEvent::Fall(horizon_client::landing::FallEvent::Statistic(cm)) = event
-                {
-                    game.award_custom_stat("fall_one_cm", *cm);
-                }
-            }
-            game.record_combat(&events);
-            game.wear_armor(&events);
-            (events, velocity)
-        });
-        let Some((events, marked)) = events else {
-            return;
-        };
-        if let Some((at, velocity)) = soul {
-            super::lan_particles::send_soul_particle(host, at, velocity);
-        }
-        self.as_guest(host, conn, |game| {
-            game.sculk_step_on_player();
-            game.tick_player_sculk_events();
-            // Entity.restituteMovementAfterCollisions: GameEvent.BOUNCE.
-            for event in &events {
-                if matches!(event, MotionEvent::Bounce { .. }) {
-                    game.post_entity_event("minecraft:bounce", horizon_client::mobs::Who::Player);
-                }
-            }
-        });
-        for event in events {
-            match event {
-                MotionEvent::Health(horizon_client::health::HealthEvent::DamageBroadcast {
-                    source,
-                }) => self.guest_damage_broadcast(host, conn, source),
-                // LivingEntity.playHurtSound: the server's `Entity.playSound`
-                // reaches every player around but the hurt one, whose own
-                // client plays it from handleDamageEvent (#4149).
-                MotionEvent::HurtSound(sound) => self.guest_hurt_sound(host, conn, sound),
-                // LivingEntity.checkFallDamage: the crumbs reach every player.
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Particles {
-                    state,
-                    position,
-                    count,
-                    speed,
-                }) => self.landing_dust(Some(host), state, position, count, speed),
-                // A block's own sound names no player: the guest hears it too.
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Sound {
-                    sound,
-                    position: Some(pos),
-                    volume,
-                    pitch,
-                }) if sound.block_sound().is_some() => {
-                    if let Some(name) = sound.block_sound() {
-                        let source = horizon_client::settings::sound_source(name) as i32;
-                        let at = [
-                            f64::from(pos.x) + 0.5,
-                            f64::from(pos.y) + 0.5,
-                            f64::from(pos.z) + 0.5,
-                        ];
-                        self.audio.play_unshared(name, Some(at), volume, pitch);
-                        host.hub.sound(name, at, volume, pitch, source, None);
-                    }
-                }
-                // LivingEntity.causeFallDamage (the fall sound and
-                // playBlockFallSound), and HoneyBlock.fallOn's `entity.playSound`:
-                // Player.playSound skips the guest, whose own client plays it;
-                // everyone else hears it.
-                MotionEvent::Fall(
-                    event @ (horizon_client::landing::FallEvent::Sound { .. }
-                    | horizon_client::landing::FallEvent::BlockFallSound { .. }),
-                ) => {
-                    if let Some((name, volume, pitch)) = event.heard_fall_sound(self.res.facts()) {
-                        let source = horizon_client::settings::sound_source(&name) as i32;
-                        self.audio.play_unshared(&name, Some(at), volume, pitch);
-                        host.hub.sound(&name, at, volume, pitch, source, Some(conn));
-                    }
-                }
-                // HoneyBlock.fallOn: entity event 54, including the player who
-                // landed (`broadcastEntityEvent` has no excluded player).
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Broadcast(event))
-                    if horizon_client::landing::honey_particle_count(event as i8).is_some() =>
-                {
-                    if let Some(id) = host.hub.guest(conn).map(|g| g.entity_id) {
-                        host.hub.entity_event(id, event as i8, at);
-                    }
-                }
-                MotionEvent::Fall(event) => {
-                    let player = host.hub.guest(conn).map(|g| g.uuid);
-                    // The rule's own game event goes out as the player whose
-                    // landing it was (`FarmlandBlock.turnToBaseBlock`'s change,
-                    // `TurtleEggBlock.decreaseEggs`' destroy): a sculk sensor, a
-                    // calibrated sensor and a warden hear it.
-                    if let Some(vibration) = self.landing_block_updates(player, &event) {
-                        self.as_guest(host, conn, |game| game.post_landing_vibration(vibration));
-                    }
-                }
-                // PowderSnowBlock.entityInside: every player around sees the
-                // snowflake (`ServerLevel.sendParticles`).
-                MotionEvent::Snowflake { position, velocity } => {
-                    super::lan_particles::send_snowflake_particle(
-                        host,
-                        [position.x, position.y, position.z],
-                        [velocity.x, velocity.y, velocity.z],
-                    );
-                }
-                // LivingEntity.baseTick's entity event 67, to every client
-                // around, the guest's own included; this window draws it too.
-                MotionEvent::Drown => {
-                    if let Some(g) = host.hub.guest(conn) {
-                        host.hub
-                            .entity_event(g.entity_id, super::combat::DROWN_EVENT, at);
-                    }
-                    self.drown_particles(at, [0.0; 3]);
-                }
-                // ServerPlayer.onInsideBlock: the enter_block trigger, for the
-                // player who moved.
-                MotionEvent::EnterBlock { state } => {
-                    self.as_guest(host, conn, |game| game.trigger_enter_block(state));
-                }
-                // HoneyBlock.maybeDoSlideEffects: the sound reaches the
-                // others (Player.playSound excludes the player, whose client
-                // plays it), the entity event 53 everyone around.
-                MotionEvent::HoneySlide {
-                    pos,
-                    sound,
-                    particles,
-                } => {
-                    if self.world.game_time % 20 == 0 {
-                        self.as_guest(host, conn, |game| {
-                            game.trigger_honey_slide([pos.x, pos.y, pos.z])
-                        });
-                    }
-                    let Some((id, at)) = host.hub.guest(conn).map(|g| (g.entity_id, g.position))
-                    else {
-                        continue;
-                    };
-                    if sound {
-                        let name = "minecraft:block.honey_block.slide";
-                        let source = horizon_client::settings::sound_source(name) as i32;
-                        self.audio.play_unshared(name, Some(at), 1.0, 1.0);
-                        host.hub.sound(name, at, 1.0, 1.0, source, Some(conn));
-                    }
-                    if particles {
-                        self.honey_slide_particles(at);
-                        host.hub.entity_event(id, 53, at);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let (Some(v), Some(g)) = (marked, host.hub.guest(conn)) {
-            self.native_player_velocity(g.uuid, &g.name, [v.x, v.y, v.z]);
-            g.send(&C::SetEntityMotion(play::SetEntityMotion {
-                id: g.entity_id,
-                velocity: [v.x, v.y, v.z],
-            }));
-        }
-    }
-
     /// ServerGamePacketListenerImpl.handlePlayerCommand START_FALL_FLYING:
     /// `Player.tryToStartFallFlying`, or else `stopFallFlying` (a second
     /// start while gliding ends the glide, as in vanilla).
@@ -5416,7 +4868,7 @@ impl Game<'_> {
         }
         if self.guest_can_glide(host, conn) != Some(true) {
             if let Some(g) = host.hub.guest_mut(conn) {
-                g.fall_flying = false;
+                g.end_glide();
             }
             return;
         }
@@ -6140,6 +5592,7 @@ fn eye_columns(at: [f64; 3], body: Dimensions) -> [std::ops::RangeInclusive<i32>
 
 mod attack_checks;
 mod dig_stop;
+mod guest_attack;
 use dig_stop::{StopDig, stop_dig};
 
 /// ServerPlayer.swingAndResetAttackStrength resets only when a use starts a swing.

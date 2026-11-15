@@ -1009,12 +1009,15 @@ impl Game<'_> {
                             let item = &mut self.dropped[i];
                             item.health = (item.health as f32 - amount) as i32;
                             destroyed = item.health <= 0;
+                            // `ItemEntity.hurtServer`: ENTITY_DAMAGE before it is destroyed.
+                            let at = item.position;
+                            self.item_damage_event(at, self.explosion_kill_credit());
                             if destroyed {
-                                let at = item.position;
                                 // Health was already reduced above. Run the shared
                                 // onDestroyed path without applying damage twice.
                                 destroyed_contents.extend(
-                                    item.hurt(0)
+                                    self.dropped[i]
+                                        .hurt(0)
                                         .unwrap_or_default()
                                         .into_iter()
                                         .map(|stack| (stack, at)),
@@ -1042,7 +1045,7 @@ impl Game<'_> {
                     // `VehicleEntity.hurtServer`: damage * 10, broken past 40.
                     EntityHandle::Boat(i) => {
                         let len = self.boats.len();
-                        self.hurt_boat(i, amount, false);
+                        self.hurt_boat_by(i, amount, false, self.explosion_kill_credit());
                         boats_gone += len - self.boats.len();
                     }
                     // `hurtServer` does nothing to the rest.
@@ -1110,13 +1113,26 @@ impl Game<'_> {
     /// cause, including a TNT igniter or the player who broke an end crystal.
     pub(super) fn explosion_kill_credit(&self) -> Option<super::commands::Target> {
         use super::commands::Target;
-        // A primed TNT's owner (a player) names the blast before any mob does.
-        if self.combat.blast_owner.is_some() {
-            return Some(
+        // An explicit crystal or cart source names its own cause.
+        if let Some(cause) = &self.combat.explicit_explosion_cause {
+            return cause.as_ref().map(|cause| {
+                if cause.player {
+                    cause.guest.map_or(Target::Player, Target::Guest)
+                } else {
+                    Target::Mob(cause.entity.0)
+                }
+            });
+        }
+        // A primed TNT's owner names the blast before any mob does; a mob's UUID
+        // in its `owner` is that mob, not the player in place.
+        if let Some((id, _)) = self.combat.blast_owner {
+            return Some(if self.combat.blast_owner_player {
                 self.combat
                     .blast_guest
-                    .map_or(Target::Player, Target::Guest),
-            );
+                    .map_or(Target::Player, Target::Guest)
+            } else {
+                Target::Mob(id)
+            });
         }
         if let Some((id, _)) = self.blast_attacker() {
             return Some(Target::Mob(id));
@@ -1199,7 +1215,7 @@ impl Game<'_> {
         while i < self.cushions.len() {
             let p = self.cushions[i].position;
             if blast_reaches(center, diameter, [p.x, p.y, p.z]) {
-                self.break_cushion_by(i, false, self.explosion_kill_credit());
+                self.break_cushion_by(i, self.explosion_kill_credit());
             } else {
                 i += 1;
             }
@@ -1315,18 +1331,6 @@ impl Game<'_> {
     ) -> Result<()> {
         if self.serving.is_some() || self.options.dedicated.is_some() {
             self.native_explosion_prime(center, radius);
-        }
-        if let Some(p) = &self.player {
-            let d = [
-                p.position.x - center[0],
-                p.position.y - center[1],
-                p.position.z - center[2],
-            ];
-            let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            self.input_feedback(horizon_client::input_source::Feedback::Explosion {
-                distance,
-                radius,
-            });
         }
         // Explosion.explode: the blast is heard.
         let ctx = horizon_client::sculk::Context::default();

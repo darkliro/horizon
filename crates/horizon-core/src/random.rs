@@ -236,7 +236,7 @@ impl RandomSource for LegacyRandom {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct XoroshiroRandom {
     lo: u64,
     hi: u64,

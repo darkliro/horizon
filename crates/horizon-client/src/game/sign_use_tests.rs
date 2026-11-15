@@ -46,6 +46,7 @@ fn click_sign(game: &mut crate::game::Game<'_>, sign: SignData, stack: ItemStack
         pos: [2, 4, 3],
         face: [0, 0, 1],
         point: [2.5, 4.5, 3.9],
+        inside: false,
     };
     game.with_player_actor(|g| g.use_hand(Some(&hit))).unwrap();
     crate::game::sculk::TEST_POSTED_EVENTS.with(|events| events.borrow_mut().take().unwrap())

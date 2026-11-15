@@ -2,7 +2,9 @@
 //! literal/argument node trees with redirects, parsing that tries every
 //! relevant child and keeps the best result, completion suggestions, smart
 //! usage text and the vanilla error messages. Argument types live in
-//! [`args`]; the vanilla command tree in [`vanilla`].
+//! [`args`]; the vanilla command tree in [`vanilla`]. Brigadier is a library,
+//! not part of the pinned 26.3 sources, so a comment naming its classes
+//! describes the library this module ports.
 #![forbid(unsafe_code)]
 pub mod args;
 pub mod block;
@@ -84,7 +86,7 @@ impl CommandError {
         e.key = key.to_owned();
         e
     }
-    /// CommandSyntaxException.getContext: up to ten characters before the
+    /// Brigadier's command exception context: up to ten characters before the
     /// cursor followed by "<--[HERE]".
     pub fn context(&self) -> Option<String> {
         let input = self.input.as_ref()?;
@@ -350,7 +352,7 @@ impl Node {
             NodeKind::Argument { name, .. } => name,
         }
     }
-    /// CommandNode.getUsageText.
+    /// Brigadier's node usage text.
     pub fn usage_text(&self) -> String {
         match &self.kind {
             NodeKind::Root => String::new(),
@@ -411,7 +413,7 @@ impl Context {
             .find(|a| a.name == name)
             .map(|a| &a.value)
     }
-    /// CommandContextBuilder.findSuggestionContext: the node whose children
+    /// Brigadier's suggestion context: the node whose children
     /// complete the text at `cursor`, and where that text starts.
     pub fn suggestion_context(&self, cursor: usize) -> (usize, usize, &Context) {
         if self.range.1 < cursor {
@@ -518,7 +520,7 @@ pub struct Suggestion {
     pub int_value: Option<i32>,
 }
 impl Suggestion {
-    /// Suggestion.apply.
+    /// Brigadier's suggestion apply.
     pub fn apply(&self, input: &str) -> String {
         let (s, e) = (self.range.0.min(input.len()), self.range.1.min(input.len()));
         format!("{}{}{}", &input[..s], self.text, &input[e..])
@@ -555,7 +557,7 @@ impl<'a> SuggestionsBuilder<'a> {
             });
         }
     }
-    /// SuggestionsBuilder.suggest(int).
+    /// Brigadier's suggestions-builder `suggest(int)`.
     pub fn suggest_int(&mut self, value: i32) {
         self.out.push(Suggestion {
             range: (self.start, self.input.len()),
@@ -578,7 +580,7 @@ impl<'a> SuggestionsBuilder<'a> {
     pub fn offset(&self, start: usize) -> SuggestionsBuilder<'a> {
         SuggestionsBuilder::new(self.input, start)
     }
-    /// SuggestionsBuilder.add: keep another builder's suggestions (with their own ranges).
+    /// Brigadier's suggestions-builder `add`: keep another builder's suggestions (with their own ranges).
     pub fn add(&mut self, other: SuggestionsBuilder) {
         self.out.extend(other.out);
     }
@@ -617,7 +619,7 @@ pub fn compare_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
 }
-/// Suggestion.compareToIgnoreCase (IntegerSuggestion compares numerically).
+/// Case-insensitive text order, with IntegerSuggestion comparing numerically.
 fn compare_suggestions(a: &Suggestion, b: &Suggestion) -> std::cmp::Ordering {
     match (a.int_value, b.int_value) {
         (Some(x), Some(y)) => x.cmp(&y),
@@ -625,7 +627,7 @@ fn compare_suggestions(a: &Suggestion, b: &Suggestion) -> std::cmp::Ordering {
         _ => compare_ignore_case(&a.text, &b.text),
     }
 }
-/// Suggestions.create: merged, expanded to a common range and sorted case-insensitively.
+/// Brigadier's suggestions create: merged, expanded to a common range and sorted case-insensitively.
 pub fn merge_suggestions(input: &str, list: Vec<Suggestion>) -> (Range, Vec<Suggestion>) {
     if list.is_empty() {
         return ((0, 0), Vec::new());
@@ -636,7 +638,7 @@ pub fn merge_suggestions(input: &str, list: Vec<Suggestion>) -> (Range, Vec<Sugg
     let mut seen: std::collections::HashSet<(String, Option<String>)> =
         std::collections::HashSet::new();
     for s in list {
-        // Suggestion.expand: pad the text with the input around it.
+        // Brigadier's suggestion expand: pad the text with the input around it.
         let text = format!(
             "{}{}{}",
             &input[start..s.range.0],
@@ -674,7 +676,7 @@ pub fn merge_suggestions(input: &str, list: Vec<Suggestion>) -> (Range, Vec<Sugg
 
 impl Suggests {
     /// The provider's candidates; `context` is the whole parse context
-    /// (CommandContextBuilder.build), whose arguments some providers read.
+    /// (the built parse context), whose arguments some providers read.
     pub fn suggest(&self, builder: &mut SuggestionsBuilder, reg: &Registries, context: &Context) {
         match self {
             Suggests::AdvancementCriteria => {
@@ -809,7 +811,7 @@ impl Dispatcher {
             NodeKind::Argument { name, .. } => name.clone(),
             NodeKind::Root => String::new(),
         };
-        // CommandNode.addChild merges same-named children.
+        // Same-named children merge.
         if let Some(&existing) = self.nodes[parent]
             .children
             .iter()
@@ -1094,7 +1096,7 @@ impl Dispatcher {
             errors,
         }
     }
-    /// CommandDispatcher.parse from the start of `input` (no leading slash).
+    /// The dispatcher parses from the start of `input` (no leading slash).
     pub fn parse(&self, input: &str, reg: &Registries) -> ParseResults {
         self.parse_at(input, 0, reg)
     }
@@ -1103,7 +1105,7 @@ impl Dispatcher {
         let context = Context::new(0, start);
         self.parse_nodes(0, input, start, &context, reg, reg.permission, 0)
     }
-    /// CommandDispatcher.getCompletionSuggestions at `cursor`: brigadier
+    /// Brigadier's completion suggestions at `cursor`: it
     /// lists every child, whatever its requirement.
     pub fn suggestions(
         &self,
@@ -1239,7 +1241,7 @@ impl Dispatcher {
         }
         Some(this)
     }
-    /// CommandDispatcher.getSmartUsage: one line per child of `node`.
+    /// Brigadier's smart usage: one line per child of `node`.
     pub fn smart_usage(&self, node: usize, level: u8) -> Vec<(usize, String)> {
         let optional = self.nodes[node].command.is_some();
         self.nodes[node]
@@ -1253,5 +1255,7 @@ impl Dispatcher {
     }
 }
 
+#[cfg(test)]
+mod particle_option_tests;
 #[cfg(test)]
 mod tests;

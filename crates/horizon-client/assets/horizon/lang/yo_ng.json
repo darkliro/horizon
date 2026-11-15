@@ -241,10 +241,6 @@
   "Peak Brightness": "Imọlẹ tente oke",
   "Black Level": "Black Ipele",
   "UI Brightness": "UI Imọlẹ",
-  "HDR Lighting": "Ìmọ́lẹ̀ HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Àwọn orísun ìmọ́lẹ̀, oòrùn àti ìmọ́lẹ̀ oòrùn ń tàn ju funfun lọ. Pàá: bíi SDR náà.",
-  "Smooth Gradients": "Ìpínyà rírọ̀",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "Fírémù 16-bit: ojú ọ̀run àti òjìjí dúdú kò ní àwọ̀ ìlà. VRAM díẹ̀ sí i. Ìbẹ̀rẹ̀ tó ń bọ̀.",
   "Battery Mode": "Ipo Batiri",
   "Graphics API": "API eya aworan",
   "Translucent Batching": "Ìkójọpọ̀ ohun tí a lè rí kọjá",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Nduro fun isọdọtun ifihan: ko si yiya, lairi diẹ.",
   "Size of menus and the HUD.": "Iwọn awọn akojọ aṣayan ati HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Ṣeto awọn aṣayan ni isalẹ papọ. Yiyipada ọkan jẹ ki o jẹ Aṣa.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, ina ati imọlẹ orun tan imọlẹ ju funfun lọ. Nilo ohun HDR àpapọ.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Ń gbé òjìjí dé dúdú jùlọ nínú ifihàn rẹ. 0: dúdú tòótọ́, kò sí ìgbéga.",
   "How bright highlights get. Auto: the peak your system reports.": "Bawo ni imọlẹ ifojusi gba. Laifọwọyi: tente awọn ijabọ eto rẹ.",
   "How bright white looks in the world. Auto: your desktop's white.": "Bí funfun ṣe tan nínú ayé. Aifọwọyi: funfun ojú-ìbùdó kọ̀ǹpútà rẹ.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Fi àmì kún",
   "horizon.studio.topbar.clear_keyframes": "🗑 Nu àwọn kọ́kọ́rọ́",
   "horizon.studio.topbar.timeline_hud": "⏱ Àkókò ìlà",
-  "horizon.studio.topbar.split_scene": "Pín ìríran"
+  "horizon.studio.topbar.split_scene": "Pín ìríran",
+  "horizon.options.block_vibration": "Ìdáhùn ìfọwọ́kàn láti Bedrock",
+  "horizon.options.split_vibration": "Gbigbọn nígbà pínpín àkójọ",
+  "horizon.options.impulse_triggers": "Awọn titẹ impulsu",
+  "A tick when you break a block, as in Bedrock.": "Nigbati o ba fọ bulọọki kan, o ngbọn, bii ni Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "Gbigbọn kúkúrú nígbà tí o bá pín àkójọ kan, bíi ti Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "Awọn titẹ Xbox One controller n gbọn pẹlu awọn ọwọ rẹ."
 }

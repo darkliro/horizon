@@ -1353,16 +1353,22 @@ impl Game<'_> {
         self.swing_arm();
         true
     }
+    /// `CompassItem.inventoryTick` / `LodestoneTracker.tick` for one stack:
+    /// only a compass ticks it (`Item.inventoryTick` is empty, so any other
+    /// item carrying the component keeps it), and a compass loses its target
+    /// when its lodestone is gone.
+    fn compass_target_gone(&self, stack: &ItemStack) -> bool {
+        stack.item.as_ref() == "minecraft:compass"
+            && lodestone_target_gone(self, stack, self.dimension_id())
+    }
     /// `CompassItem.inventoryTick` / `LodestoneTracker.tick`: a compass whose
     /// lodestone is gone loses its target. A target in an unloaded chunk waits.
     pub(super) fn tick_lodestone_compasses(&mut self) {
-        let dim = self.dimension_id();
         for slot in (0..self.inventory.len()).chain([super::shield::OFFHAND_SLOT]) {
-            if self
+            let gone = self
                 .stack_in(slot)
-                .is_some_and(|s| lodestone_target_gone(self, s, dim))
-                && let Some(s) = self.stack_in_mut(slot)
-            {
+                .is_some_and(|s| self.compass_target_gone(s));
+            if gone && let Some(s) = self.stack_in_mut(slot) {
                 s.data_mut().set_other(
                     "minecraft:lodestone_tracker",
                     Some(Tag::Compound(Default::default())),
@@ -1371,11 +1377,10 @@ impl Game<'_> {
         }
         // `LivingEntity.tick` ticks `EntityEquipment` (the armour slots) as
         // well as the inventory, so a compass worn there loses its target too.
-        let gone = self.armor.each_ref().map(|stack| {
-            stack
-                .as_ref()
-                .is_some_and(|s| lodestone_target_gone(self, s, dim))
-        });
+        let gone = self
+            .armor
+            .each_ref()
+            .map(|stack| stack.as_ref().is_some_and(|s| self.compass_target_gone(s)));
         for (stack, gone) in self.armor.iter_mut().zip(gone) {
             if gone && let Some(stack) = stack {
                 stack.data_mut().set_other(
@@ -1398,12 +1403,8 @@ impl Game<'_> {
     fn tick_mob_compasses(&mut self) {
         use horizon_client::mobs::gear;
         const TRACKER: &str = "minecraft:lodestone_tracker";
-        let dim = self.dimension_id();
-        let gone_in = |stack: Option<&ItemStack>| {
-            stack.is_some_and(|s| {
-                s.item.as_ref() == "minecraft:compass" && lodestone_target_gone(self, s, dim)
-            })
-        };
+        let gone_in =
+            |stack: Option<&ItemStack>| stack.is_some_and(|s| self.compass_target_gone(s));
         let mut gone: Vec<(usize, usize)> = Vec::new();
         for (i, m) in self.mobs.iter().enumerate() {
             if gone_in(m.extra.main_hand_stack()) {
@@ -2245,6 +2246,7 @@ mod tests {
                 pos[1] as f64 + 0.5,
                 pos[2] as f64 + 0.5,
             ],
+            inside: false,
         };
         let mut stack = ItemStack::new("minecraft:filled_map", 1);
         stack.data_mut().map_id = Some(map_id);

@@ -792,7 +792,7 @@ impl Chat {
         let bottom_to_text =
             (8.0 * (o.line_spacing + 1.0) - 4.0 * o.line_spacing + 0.5).floor() as i32;
         // Vanilla's 200-tick fade reads the whole GUI ticks
-        // (`Gui.getGuiTicks`); only the smooth chat extra eases it per frame.
+        // (`Hud.getGuiTicks`); only the smooth chat extra eases it per frame.
         let fade_ticks = if self.smooth { ticks } else { ticks.floor() };
         let alpha_of = |line: &Line| {
             if focused {
@@ -1082,7 +1082,7 @@ impl Chat {
         }
         Some((self.lines.get(self.scroll + row)?, x))
     }
-    /// ChatComponent.getClickedComponentStyleAt.
+    /// ChatComponent.captureClickableText (through `ActiveTextCollector.ClickableStyleFinder`).
     pub fn style_at(
         &self,
         font: &crate::font::Font,
@@ -2025,8 +2025,21 @@ impl ChatScreen {
             self.history_pos = new;
         }
     }
-    /// A left click (`ChatScreen.mouseClicked`): a suggestion, else the input.
+    /// A live left click: `MouseHandler` recognizes a double click after a handled click.
     pub fn click(&mut self, m: &Measure, c: &Commands, x: f64, y: f64) -> bool {
+        let now = std::time::Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|at| now.duration_since(at).as_millis() < 250);
+        let handled = self.click_event(m, c, x, y, double);
+        if handled {
+            self.last_click = Some(now);
+        }
+        handled
+    }
+
+    /// `ChatScreen.mouseClicked`: the caller supplies the event's double-click flag.
+    pub fn click_event(&mut self, m: &Measure, c: &Commands, x: f64, y: f64, double: bool) -> bool {
         if let Some(mut l) = self.suggestions.take() {
             let (xi, yi) = (x as i32, y as i32);
             if l.contains(xi, yi) {
@@ -2040,13 +2053,6 @@ impl ChatScreen {
             }
             self.suggestions = Some(l);
         }
-        // MouseHandler: the same screen's click within 250 ms is a double
-        // click, which selects the word under the pointer.
-        let now = std::time::Instant::now();
-        let double = self
-            .last_click
-            .is_some_and(|at| now.duration_since(at).as_millis() < 250);
-        self.last_click = Some(now);
         if self.input.contains(x, y) {
             self.input.click(m, x, false, double);
             return true;

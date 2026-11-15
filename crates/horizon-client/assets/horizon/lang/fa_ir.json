@@ -241,10 +241,6 @@
   "Peak Brightness": "اوج روشنایی",
   "Black Level": "سطح سیاه",
   "UI Brightness": "روشنایی رابط کاربری",
-  "HDR Lighting": "نورپردازی HDR",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "منابع نور، خورشید و نور خورشید از سفیدی فراتر می‌روند. خاموش: درست مانند SDR.",
-  "Smooth Gradients": "گرادیان‌های نرم",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "قاب 16 بیتی: آسمان و سایه‌های تیره نواری نمی‌شوند. کمی VRAM بیشتر. در شروع بعدی.",
   "Battery Mode": "حالت باتری",
   "Graphics API": "API گرافیک",
   "Translucent Batching": "دسته بندی شفاف",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "منتظر تازه شدن نمایشگر است: بدون پارگی، کمی تأخیر.",
   "Size of menus and the HUD.": "اندازه منوها و HUD.",
   "Sets the options below together. Changing one makes it Custom.": "گزینه های زیر را با هم تنظیم می کند. تغییر یکی آن را سفارشی می کند.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "گدازه، آتش و نور خورشید درخشان تر از سفید است. به نمایشگر HDR نیاز دارد.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "سایه‌ها را به تاریک‌ترین سیاه نمایشگر شما می‌رساند. 0: سیاه واقعی، بدون بالا بردن.",
   "How bright highlights get. Auto: the peak your system reports.": "هایلایت ها چقدر روشن می شوند. خودکار: اوج گزارش سیستم شما.",
   "How bright white looks in the world. Auto: your desktop's white.": "سفیدی در دنیا چقدر روشن دیده می‌شود. خودکار: سفیدی میزکار شما.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "افزودن نشانگر",
   "horizon.studio.topbar.clear_keyframes": "🗑 پاک کردن کی‌فریم‌ها",
   "horizon.studio.topbar.timeline_hud": "⏱ تایم‌لاین",
-  "horizon.studio.topbar.split_scene": "برش صحنه"
+  "horizon.studio.topbar.split_scene": "برش صحنه",
+  "horizon.options.block_vibration": "بازخورد لمسی از Bedrock",
+  "horizon.options.split_vibration": "لرزش تقسیم دسته",
+  "horizon.options.impulse_triggers": "ماشه‌های ضربه‌ای",
+  "A tick when you break a block, as in Bedrock.": "وقتی بلوکی را می‌شکنید، مانند Bedrock می‌لرزد.",
+  "A short buzz when you split a stack, as in Bedrock.": "هنگام تقسیم یک دسته، مانند Bedrock، کوتاه می‌لرزد.",
+  "An Xbox One controller's triggers buzz with its handles.": "ماشه‌های دسته Xbox One همراه با دسته‌های آن می‌لرزند."
 }

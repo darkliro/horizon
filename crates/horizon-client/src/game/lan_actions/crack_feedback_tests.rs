@@ -167,6 +167,7 @@ fn crack_packets_follow_start_clock_and_strict_observer_radius() {
                 pos,
                 face: [0, 1, 0],
                 point: [0.5, 100.5, 0.5],
+                inside: false,
             });
             g.tick_mining().unwrap();
             g.forced_hit = None;

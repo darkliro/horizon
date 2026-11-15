@@ -241,10 +241,6 @@
   "Peak Brightness": "Piek Helderheid",
   "Black Level": "Zwart Niveau",
   "UI Brightness": "UI helderheid",
-  "HDR Lighting": "HDR-verlichting",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Leechbronne, de zon en zonleech sjiene veurbij wit. Aaf: gewoen wie SDR.",
-  "Smooth Gradients": "Gladde gradiënte",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-bit-frame: doonkere loch en sjeme gaon neet in bende. Get mie VRAM. Volgende start.",
   "Battery Mode": "Batterijmodus",
   "Graphics API": "Grafieke-API",
   "Translucent Batching": "Doorzichtige batching",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Wacht op ‘t verfrisse vaan ‘t sjerm: gein scheur, ‘n bietje vertraging.",
   "Size of menus and the HUD.": "Grootte vaan de menu’s en de HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Stel de opties heij oonder same. ‘t Verandere vaan ein maak ‘t Custom.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, vuur en zonleech schijne helderder es wit. ‘n HDR-display nuudig.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Tilt sjeme nao ‘t doonkste zwart vaan dien display. 0: ech zwart, gein verheffing.",
   "How bright highlights get. Auto: the peak your system reports.": "Wie heldere highlights were. Automatisch: de piek die eur systeem rapporteert.",
   "How bright white looks in the world. Auto: your desktop's white.": "Wie helder wit in de wereld oetzuut. Auto: ‘t wit vaan dien bureaublad.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Marker toeveuge",
   "horizon.studio.topbar.clear_keyframes": "🗑 Keyframes wisse",
   "horizon.studio.topbar.timeline_hud": "⏱ Tiedlien",
-  "horizon.studio.topbar.split_scene": "Scène splits"
+  "horizon.studio.topbar.split_scene": "Scène splits",
+  "horizon.options.block_vibration": "Haptische feedback van Bedrock",
+  "horizon.options.split_vibration": "Vibratie bie 't splitsen van 'ne stapel",
+  "horizon.options.impulse_triggers": "Impulstriggers",
+  "A tick when you break a block, as in Bedrock.": "Es te 'ne blok breuks, trilt hae, wie in Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "'n Korte vibratie es te 'n stapel splits, wie in Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "De triggers van 'ne Xbox One-controller trille mit zien handgrepe."
 }

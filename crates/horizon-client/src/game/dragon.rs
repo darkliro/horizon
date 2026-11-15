@@ -195,6 +195,9 @@ pub(super) struct Crystal {
     /// as loaded until `/tp` grounds it or a cobweb or powder snow resets the
     /// fall (`crystal.rs`).
     pub fall: (bool, f64),
+    /// `Motion` and `Rotation`, as loaded: `EndCrystal.tick` never moves or turns it.
+    pub motion: Vec3,
+    pub rotation: [f32; 2],
 }
 impl Crystal {
     /// `EntityType.END_CRYSTAL`: 2 x 2.
@@ -407,7 +410,7 @@ pub(super) struct Dragon {
     /// after (`strafe_after_crystal`), taken on its next tick.
     strafe_request: Option<FightWho>,
     /// `Mob.isNoAi` (`NoAI`): it flaps in place, with no phase or flight.
-    no_ai: bool,
+    pub(super) no_ai: bool,
     random: LegacyRandom,
 }
 /// A player in the fight: the window's own player, or a guest by
@@ -3516,7 +3519,7 @@ impl Game<'_> {
                     normal: [0; 4],
                     pos: m.transform_point3(p).to_array(),
                     uv,
-                    // HDR output: the healing beam shines (entity.wgsl fs_hdr_mark).
+                    // HDR output: the healing beam shines (entity.wgsl hdr_entity_mark).
                     layer: 6 | u32::from(horizon_client::mesher::BRIGHT) << 16,
                     color: c,
                     light: wrap_light,
@@ -3631,7 +3634,10 @@ impl Dragon {
         let mut d = Self::new(position, yaw, seed);
         d.velocity = velocity;
         // Vanilla getFloatOr/getIntOr accept any numeric tag type.
-        d.health = nbt_value::float(tag.get("Health")).map_or(d.health, |h| h as f32);
+        // LivingEntity.readAdditionalSaveData reads it through setHealth, which
+        // clamps it to the max health.
+        d.health =
+            nbt_value::float(tag.get("Health")).map_or(d.health, |h| (h as f32).min(MAX_HEALTH));
         d.sitting_damage =
             nbt_value::float(tag.get("sitting_damage_received")).unwrap_or(0.0) as f32;
         if let Some(p) = nbt_value::number(tag.get("DragonPhase")) {
@@ -3642,45 +3648,6 @@ impl Dragon {
         }
         d.no_ai = horizon_client::entity_nbt::flag(tag, "NoAI");
         Some(d)
-    }
-}
-impl Crystal {
-    pub(super) fn to_nbt(&self, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
-        let mut tag = horizon_client::entity_nbt::vehicle_to_nbt(
-            "minecraft:end_crystal",
-            self.position,
-            Vec3::ZERO,
-            [0.0, 0.0],
-            self.fall,
-            uuid,
-            raw,
-        );
-        if let Tag::Compound(map) = &mut tag {
-            map.insert("ShowBottom".into(), Tag::Byte(i8::from(self.show_bottom)));
-            if let Some(b) = self.beam {
-                map.insert("beam_target".into(), Tag::IntArray(b.to_vec()));
-            }
-            map.insert(
-                "Invulnerable".into(),
-                Tag::Byte(i8::from(self.invulnerable)),
-            );
-        }
-        tag
-    }
-    pub(super) fn from_nbt(tag: &Tag, time: i32) -> Option<Self> {
-        let (position, _, _) = horizon_client::entity_nbt::boat_from_nbt(tag)?;
-        Some(Self {
-            id: 0,
-            position,
-            show_bottom: horizon_client::entity_nbt::flag_or(tag, "ShowBottom", true),
-            time,
-            beam: match tag.get("beam_target") {
-                Some(Tag::IntArray(v)) if v.len() == 3 => Some([v[0], v[1], v[2]]),
-                _ => None,
-            },
-            invulnerable: horizon_client::entity_nbt::flag(tag, "Invulnerable"),
-            fall: horizon_client::entity_nbt::ground_from_nbt(tag),
-        })
     }
 }
 impl Game<'_> {
@@ -3803,6 +3770,7 @@ impl Game<'_> {
             head_yaw: d.yaw,
             on_ground: false,
             velocity: [d.velocity.x, d.velocity.y, d.velocity.z],
+            acceleration_power: None,
             minecart_steps: None,
             data: 0,
             meta,
@@ -3817,10 +3785,7 @@ impl Game<'_> {
             stepped: true,
             idle: false,
             bare: false,
-            leash: None,
-            spectator: false,
-            watching: false,
-            hidden: None,
+            ..Default::default()
         })
     }
 }
@@ -4301,7 +4266,7 @@ impl Game<'_> {
     }
     /// The dragon is the End fight's own (`EnderDragon.dragonFight`, set
     /// only for the dragon whose UUID is the fight's `dragonUUID`).
-    fn is_fight_dragon(&mut self) -> bool {
+    pub(super) fn is_fight_dragon(&mut self) -> bool {
         if !self.dimension_type().has_ender_dragon_fight {
             return false;
         }

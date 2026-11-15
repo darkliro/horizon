@@ -2,11 +2,16 @@
 //! egg's entity data on the mob it spawned.
 use super::*;
 
+#[cfg(test)]
+#[path = "spawn_egg_mob_tests.rs"]
+mod spawn_egg_mob_tests;
+
 impl Game<'_> {
     /// `Mob.checkAndHandleImportantInteractions` with a spawn egg of mob
     /// `index`'s own kind (`SpawnEggItem.spawnOffspringFromSpawnEgg`): a baby
-    /// at the mob's feet, taking the parent's variant as `getBreedOffspring`
-    /// does, and one egg used. False (PASS) when the mob has no baby form.
+    /// at the mob's feet, with the variant and colour `getBreedOffspring`
+    /// gives it (the parent's, but a mooshroom's colour rolled 1 in 1024), and
+    /// one egg used. False (PASS) when the mob has no baby form.
     pub(super) fn spawn_egg_offspring(&mut self, index: usize) -> bool {
         let Some(stack) = self.held().cloned() else {
             return false;
@@ -27,6 +32,21 @@ impl Game<'_> {
         );
         let (species, variant, color) =
             (parent.species(), parent.extra.variant, parent.extra.color);
+        // `MushroomCow.getBreedOffspring(level, this)`: the egg's mate is the
+        // parent itself, so the colour always rolls `nextInt(1024) == 0` to
+        // flip, and every other roll spends the coin flip that can only pick
+        // that same colour again. Both come from the parent's own random.
+        let variant = if species == Species::Mooshroom {
+            let random = &mut self.mobs[index].random;
+            if random.next_int_bound(1024).unwrap_or(1) == 0 {
+                if variant == 1 { 0 } else { 1 }
+            } else {
+                let _ = random.next_boolean();
+                variant
+            }
+        } else {
+            variant
+        };
         let target = self.mob_entity(&self.mobs[index]);
         // SpawnEggItem.spawnOffspringFromSpawnEgg: `type.create(level, SPAWN_ITEM_USE)`
         // creates the baby without finalizeSpawn, and `snapTo(pos, 0, 0)` faces
@@ -39,6 +59,15 @@ impl Game<'_> {
         if let Some(child) = self.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::mobs::finalize::spawn_egg_offspring(child, species, variant, color);
         }
+        // SpawnEggItem.spawnOffspringFromSpawnEgg: applyComponentsFromItemStack
+        // (the egg's name, custom data and variants), no entity data.
+        if let Some(child) = self.mobs.iter_mut().find(|m| m.id == id) {
+            horizon_client::entity_nbt::apply_item_components(child, &stack);
+        }
+        self.apply_spawn_egg_entity_data(id, &stack, false);
+        if species == Species::Piglin {
+            self.native_mobs_joined(self.mobs.len() - 1, false);
+        }
         // `Mob.checkAndHandleImportantInteractions` then calls
         // `onOffspringSpawnedFromEgg`: `Fox`'s makes the baby trust the player
         // who used the egg (a fox egg used on a block trusts nobody).
@@ -50,6 +79,10 @@ impl Game<'_> {
         }
         self.trigger_item_entity("minecraft:player_interacted_with_entity", &stack, &target);
         self.consume_held();
+        // `Mob.interact`: the egg's `SUCCESS_SERVER` consumes the click, so the
+        // interaction posts `ENTITY_INTERACT` with the player, at the mob.
+        let ctx = self.who_context(Some(Who::Player), None);
+        self.post_game_event("minecraft:entity_interact", at, ctx);
         true
     }
     /// `SpawnEggItem.use`: the SOURCE_ONLY ray must hit a liquid block.
@@ -82,6 +115,11 @@ impl Game<'_> {
             return Ok(false);
         };
         let kind = stack.item.trim_end_matches("_spawn_egg").to_owned();
+        // ItemStack.useOn in adventure mode: an egg used on a block without a
+        // matching `can_place_on` passes to `use`, whose fluid ray finds none.
+        if !fluid && !self.may_use_on(hit.pos) {
+            return Ok(false);
+        }
         if !self.spawn_egg_allowed(&stack.item) {
             self.use_failed = true;
             return Ok(true);
@@ -135,7 +173,7 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::entity_nbt::apply_item_components(m, stack);
         }
-        self.apply_spawn_egg_entity_data(id, stack);
+        self.apply_spawn_egg_entity_data(id, stack, true);
         self.post_block_game_event("minecraft:entity_place", p, Some(Who::Player), None);
         self.award_stat("used", &stack.item, 1);
         self.swing_arm();
@@ -149,22 +187,57 @@ impl Game<'_> {
         }
         Ok(true)
     }
-    /// `EntityType.updateCustomEntityTag`: the egg's `minecraft:entity_data` on
-    /// the mob it spawned, once the guards let it through, as
-    /// `TypedEntityData.loadInto`: the mob's own compound, the data merged over
-    /// it, loaded back into the same mob (`/data merge entity`'s loader).
-    pub(in crate::game) fn apply_spawn_egg_entity_data(&mut self, id: u32, stack: &ItemStack) {
+    /// `MobBucketItem.spawn`: the bucket's components, then
+    /// `EntityType.createDefaultStackConfig`.
+    pub(in crate::game) fn apply_bucket_stack_config(&mut self, id: u32, stack: &ItemStack) {
+        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            horizon_client::entity_nbt::apply_item_components(m, stack);
+        }
+        self.apply_spawn_egg_entity_data(id, stack, true);
+    }
+    /// `EntityType.createDefaultStackConfig` on the mob an egg or a bucket
+    /// spawned: the item's custom name (the whole text, style included) and
+    /// custom data (`Entity.applyImplicitComponent`, saved as `CustomName` and
+    /// `data`), then, with `entity_data`, `EntityType.updateCustomEntityTag`:
+    /// its `minecraft:entity_data`, once the guards let it through, merged
+    /// over the mob's own compound as `TypedEntityData.loadInto` does and
+    /// loaded back into the same mob (`/data merge entity`'s loader). An egg's
+    /// baby (`spawnOffspringFromSpawnEgg`) takes the components only.
+    pub(in crate::game) fn apply_spawn_egg_entity_data(
+        &mut self,
+        id: u32,
+        stack: &ItemStack,
+        entity_data: bool,
+    ) {
+        use horizon_world::nbt::Tag;
         let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
             return;
         };
         let kind = self.mobs[i].kind.id.clone();
         let op = self.acting_player_is_op();
-        let Some(data) = horizon_client::block_entity_item::spawn_egg_entity_data(stack, &kind, op)
-        else {
+        let name = stack.data().and_then(|d| d.custom_name.clone());
+        let custom = stack
+            .data()
+            .and_then(|d| d.other("minecraft:custom_data"))
+            .cloned();
+        let data = horizon_client::block_entity_item::spawn_egg_entity_data(stack, &kind, op)
+            .filter(|_| entity_data);
+        if name.is_none() && custom.is_none() && data.is_none() {
             return;
+        }
+        let mut own = self.mob_tree_nbt(i);
+        if let Tag::Compound(map) = &mut own {
+            if let Some(name) = name {
+                map.insert("CustomName".into(), name);
+            }
+            if let Some(custom) = custom {
+                map.insert("data".into(), custom);
+            }
+        }
+        let tag = match data {
+            Some(data) => horizon_client::data_cmd::merged(&own, data),
+            None => own,
         };
-        let own = self.mob_tree_nbt(i);
-        let tag = horizon_client::data_cmd::merged(&own, data);
         // Nothing to report: the mob's own compound always loads back.
         let _ = self.apply_entity_nbt(super::super::commands::Target::Mob(id), tag);
     }

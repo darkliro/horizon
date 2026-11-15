@@ -133,6 +133,7 @@ impl Game<'_> {
                     pos,
                     face: face.normal(),
                     point,
+                    inside: false,
                 }),
                 GuestUse::OnBlock(Hand::Main),
             ),

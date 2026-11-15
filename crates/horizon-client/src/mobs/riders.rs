@@ -30,28 +30,40 @@ fn avatar(m: &Mob) -> bool {
 /// rider's attachment point sits relative to the vehicle's feet, in its
 /// scale (`getDimensions` scales the attachments with the box).
 pub fn passenger_attachment(v: &Mob) -> [f64; 3] {
-    let [x, y, z] = base_attachment(v);
-    let s = scale(v);
+    let [x, y, z] = type_attachment(v);
     // AbstractHorse.getPassengerAttachmentPoint: a rearing horse slides it,
     // after the scaled attachment (`rear_offset` scales with age itself).
     let rear = super::equine::rear_offset(v);
-    [x * s + rear[0], y * s + rear[1], z * s + rear[2]]
+    [x + rear[0], y + rear[1], z + rear[2]]
 }
-/// An `EntityType` attachment point: the builder takes floats, so the double
-/// the position math sees is the float's widening (`Vec3(x, y, z)` of
-/// `0.86875F` is `0.8687499761581421`).
-fn pt(x: f32, y: f32, z: f32) -> [f64; 3] {
-    [f64::from(x), f64::from(y), f64::from(z)]
+/// The type's attachment alone, in its scale: what a vehicle's own
+/// `getPassengerAttachmentPoint` adds its offset to (a rearing horse's slide).
+pub fn type_attachment(v: &Mob) -> [f64; 3] {
+    let [x, y, z] = base_attachment(v);
+    let s = scale(v);
+    [x * s, y * s, z * s]
 }
-/// `EntityTypes` `passengerAttachments(y)` with one height.
+/// An `EntityType` attachment point from `passengerAttachments(float... offsetYs)`:
+/// the builder takes floats, so the double the position math sees is the
+/// float's widening (`0.86875F` is `0.8687499761581421`).
 fn up(y: f32) -> [f64; 3] {
-    pt(0.0, y, 0.0)
+    [0.0, f64::from(y), 0.0]
+}
+/// An attachment point the type attaches from `Vec3` doubles
+/// (`passengerAttachments(new Vec3(0.0, 1.37, -0.3))` keeps them).
+fn pt(x: f64, y: f64, z: f64) -> [f64; 3] {
+    [x, y, z]
+}
+/// An attachment point from the builder's float form
+/// (`attach(PASSENGER, 0.0F, 0.81F, -0.15F)`), widened like `up`.
+fn pt32(x: f32, y: f32, z: f32) -> [f64; 3] {
+    [f64::from(x), f64::from(y), f64::from(z)]
 }
 /// `EntityType.HAPPY_GHAST` `passengerAttachments`: four seats at the corners
 /// of the back (front, left, back, right), picked by the rider's place in
 /// `getPassengers` (`EntityAttachments.get` clamps the index to the last).
 pub fn happy_ghast_attachment(index: usize) -> [f64; 3] {
-    const SEATS: [[f32; 3]; 4] = [
+    const SEATS: [[f64; 3]; 4] = [
         [0.0, 4.0, 1.7],
         [-1.7, 4.0, 0.0],
         [0.0, 4.0, -1.7],
@@ -103,6 +115,10 @@ fn base_attachment(v: &Mob) -> [f64; 3] {
         Species::Sniffer => up(2.09375),
         Species::Fox => pt(0.0, 0.6375, -0.25),
         Species::Frog => pt(0.0, 0.375, -0.25),
+        Species::Llama | Species::TraderLlama if baby => {
+            // `Llama.BABY_DIMENSIONS`: `(1.87F - 0.25F) * 0.5F`, `-0.3F * 0.5F`.
+            pt32(0.0, 0.81, -0.15)
+        }
         Species::Llama | Species::TraderLlama => pt(0.0, 1.37, -0.3),
         Species::Turtle => pt(0.0, 0.55625, -0.25),
         Species::Wolf => pt(0.0, 0.81875, -0.0625),
@@ -130,9 +146,9 @@ pub fn vehicle_attachment(r: &Mob, vehicle_width: f32) -> f64 {
 }
 fn unscaled_vehicle_attachment(r: &Mob, vehicle_width: f32) -> f64 {
     use Species as S;
-    // Avatar.DEFAULT_VEHICLE_ATTACHMENT.
+    // Avatar.DEFAULT_VEHICLE_ATTACHMENT: a `Vec3(0.0, 0.6, 0.0)` of doubles.
     if avatar(r) {
-        return f64::from(0.6_f32);
+        return 0.6;
     }
     // `Spider.getVehicleAttachmentPoint` and `CaveSpider.getVehicleAttachmentPoint`:
     // a vehicle no wider than the rider takes the spider's fixed seat, and a
@@ -182,6 +198,19 @@ fn rotated([x, y, z]: [f64; 3], yaw: f32) -> [f64; 3] {
 pub fn seat(attachment: [f64; 3], rider_offset: f64, at: Vec3, yaw: f32) -> Vec3 {
     let [x, y, z] = rotated(attachment, yaw);
     Vec3::new(at.x + x, at.y + y - rider_offset, at.z + z)
+}
+
+/// `EntitySelector.notRiding(mob)`: whether the player the mobs see is the
+/// mob's rider, through any chain of vehicles (`isPassenger`).
+pub fn player_rides(m: &Mob, w: &MobWorld) -> bool {
+    let mut up = w.player.as_ref().and_then(|p| p.riding_vehicle);
+    while let Some(id) = up {
+        if id == m.id {
+            return true;
+        }
+        up = w.seen(id).and_then(|s| s.vehicle);
+    }
+    false
 }
 
 /// `Entity.startRiding`: the link it makes, `rider` on `vehicle` as its first
@@ -293,6 +322,38 @@ pub fn start_riding<M: super::MobSlot>(mobs: &mut [M], rider: u32, vehicle: u32)
     }
     link(mobs, rider, vehicle);
     true
+}
+/// `Mob.startRiding` for a brain's `StartRiding` event: link the rider, and
+/// when it is leashed replace the event with the `LeashBreak` the game applies
+/// (`dropLeash()`: the lead item at the mob). The game seats riders
+/// (`positionRider`) before it handles events, so the event keeps where the
+/// mob stood when it boarded. Returns the index after the event: one past it
+/// when kept, the same when removed.
+pub fn start_riding_event<M: super::MobSlot>(
+    mobs: &mut [M],
+    events: &mut Vec<super::MobEvent>,
+    i: usize,
+    rider: u32,
+    vehicle: u32,
+) -> usize {
+    let leashed_at = mobs
+        .iter()
+        .map(super::MobSlot::mob)
+        .find(|m| m.id == rider && m.extra.leash.is_some())
+        .map(|m| [m.position.x, m.position.y, m.position.z]);
+    let boarded = start_riding(mobs, rider, vehicle);
+    if let Some(at) = leashed_at.filter(|_| boarded) {
+        events[i] = super::MobEvent::LeashBreak {
+            mob: rider,
+            drop: true,
+            sound: false,
+            at: Some(at),
+        };
+        i + 1
+    } else {
+        events.remove(i);
+        i
+    }
 }
 /// `LivingEntity.stopRiding` for the mob itself: it leaves its vehicle (which
 /// forgets it when the riders are next synced), cannot board again for 60
@@ -496,7 +557,7 @@ pub fn tick<M: super::MobSlot>(
     mobs: &mut [M],
     index: usize,
     w: &MobWorld,
-    random: &mut horizon_core::random::LegacyRandom,
+    random: &mut horizon_core::random::LevelRandom,
     events: &mut Vec<super::MobEvent>,
 ) -> bool {
     let mut owner = index;
@@ -868,7 +929,7 @@ mod happy_ghast_seat_tests {
 
     #[test]
     fn passengers_take_separate_seats() {
-        assert_eq!(happy_ghast_attachment(0), [0.0, 4.0, f64::from(1.7_f32)]);
+        assert_eq!(happy_ghast_attachment(0), [0.0, 4.0, 1.7]);
         let seats: Vec<_> = (0..4).map(happy_ghast_attachment).collect();
         for (i, a) in seats.iter().enumerate() {
             assert!(seats[i + 1..].iter().all(|b| a != b));

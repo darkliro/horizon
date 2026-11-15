@@ -61,7 +61,7 @@ fn a_wind_burst_pushes_the_dragon_without_damage() {
         .expect("spawned dragon");
     game.dragon.as_mut().expect("dragon").velocity = Vec3::ZERO;
 
-    game.wind_burst([0.0, 66.0, 0.0], 5.0, 1.0, false, false)
+    game.wind_burst([0.0, 66.0, 0.0], 5.0, 1.0, super::Source::WIND_BURST)
         .unwrap();
 
     let dragon = game.dragon.as_ref().expect("dragon");
@@ -79,7 +79,7 @@ fn a_wind_burst_scales_the_dragons_push_by_its_multiplier() {
     game.spawn_dragon_spawned([0.0, 70.0, 0.0])
         .expect("spawned dragon");
     game.dragon.as_mut().expect("dragon").velocity = Vec3::ZERO;
-    game.wind_burst([0.0, 66.0, 0.0], 5.0, 1.22, false, false)
+    game.wind_burst([0.0, 66.0, 0.0], 5.0, 1.22, super::Source::WIND_BURST)
         .unwrap();
 
     let push = game.dragon.as_ref().expect("dragon").velocity.y;

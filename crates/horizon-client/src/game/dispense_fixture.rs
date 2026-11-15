@@ -334,8 +334,7 @@ impl Game<'_> {
                 center,
                 op["radius"].as_f64().unwrap_or(3.0) as f32,
                 1.0,
-                breeze,
-                !breeze,
+                super::wind::Source::charge(breeze, false),
             )?;
         } else if let Some(op) = case.get("remove") {
             used = self.fixture_remove(origin, op)?;
@@ -686,6 +685,7 @@ impl Game<'_> {
                 centre(pos.y, face[1]),
                 centre(pos.z, face[2]),
             ],
+            inside: false,
         });
         self.chat_capture = Some(Vec::new());
         let used = self.use_item_as_player();

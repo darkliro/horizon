@@ -179,11 +179,7 @@ impl Game<'_> {
     pub(super) fn cushion_spawn(&self, hit: &Hit) -> Option<(Vec3, Aabb)> {
         // CushionItem.recalculateContextForSpecialCollisionShapes: open containers
         // (cauldrons, hoppers and composters) use the collision ray's actual height.
-        let mut adjusted = Hit {
-            pos: hit.pos,
-            face: hit.face,
-            point: hit.point,
-        };
+        let mut adjusted = *hit;
         let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
         if self.items().block_in_tag(
             "minecraft:cushion_uses_collision_shape",
@@ -278,7 +274,9 @@ impl Game<'_> {
             yaw: snap_yaw(self.yaw),
             color,
             check_interval: 0,
-            custom_name: None,
+            // `EntityType.createDefaultStackConfig`: `Entity.applyImplicitComponents`
+            // copies the stack's `CUSTOM_NAME` onto the placed cushion.
+            custom_name: stack.data().and_then(|d| d.custom_name.clone()),
         });
         self.world
             .modified
@@ -378,20 +376,30 @@ impl Game<'_> {
         true
     }
 
-    /// `Cushion.dropItem`: the break sound and particles, then the coloured
-    /// item unless drops are off or the breaker has infinite materials.
+    /// `BlockAttachedEntity.hurtServer`: `kill` (the `entity_die` event), then
+    /// `Cushion.dropItem`.
     pub(super) fn break_cushion(&mut self, index: usize, by_player: bool) {
-        self.break_cushion_by(
-            index,
-            by_player,
-            by_player.then_some(super::commands::Target::Player),
-        )
+        self.break_cushion_by(index, by_player.then_some(super::commands::Target::Player))
     }
     pub(super) fn break_cushion_by(
         &mut self,
         index: usize,
-        by_player: bool,
         source: Option<super::commands::Target>,
+    ) {
+        self.remove_cushion(index, source, true);
+    }
+    /// `BlockAttachedEntity.tick` on lost support: `discard()` and then
+    /// `dropItem(level, null)`, which posts no game event.
+    pub(super) fn discard_cushion(&mut self, index: usize) {
+        self.remove_cushion(index, None, false);
+    }
+    /// The removal both paths share; `killed` posts `BlockAttachedEntity.kill`'s
+    /// `entity_die` event before `dropItem`'s sound and drop.
+    fn remove_cushion(
+        &mut self,
+        index: usize,
+        source: Option<super::commands::Target>,
+        killed: bool,
     ) {
         let c = self.cushions.remove(index);
         let p = c.position;
@@ -399,8 +407,10 @@ impl Game<'_> {
         if self.riding == Some(c.id) {
             self.dismount_removed_vehicle(p.y);
         }
-        // BlockAttachedEntity.kill, before dropItem.
-        self.entity_killed_event_by([p.x, p.y, p.z], source);
+        if killed {
+            // BlockAttachedEntity.kill, before dropItem.
+            self.entity_killed_event_by([p.x, p.y, p.z], source);
+        }
         self.audio.play(
             "minecraft:entity.cushion.break",
             Some([p.x, p.y, p.z]),
@@ -408,11 +418,26 @@ impl Game<'_> {
             1.0,
         );
         self.cushion_break_particles(&c);
-        if !self.ui.rules.bool("entity_drops") || (by_player && self.creative) {
+        // `Cushion.dropItem`: the item unless drops are off or the cause is a
+        // player with infinite materials (the TNT's owner for a blast).
+        if !self.ui.rules.bool("entity_drops") || self.infinite_materials(source.as_ref()) {
             return;
         }
         let stack = c.item_stack_with_data();
         self.spawn_item(stack, [p.x, p.y, p.z], [0.0; 3], 10);
+    }
+    /// `Player.hasInfiniteMaterials` of a hurt's cause: the mode of the body in
+    /// place, or of the guest the blast names.
+    fn infinite_materials(&self, source: Option<&super::commands::Target>) -> bool {
+        use super::commands::Target;
+        match source {
+            Some(Target::Player) => self.creative,
+            // The guest whose turn it is is in place already (the hub is out of
+            // `self.lan` while it acts), as `sculk::entity_event_by` reads it.
+            Some(Target::Guest(conn)) if self.lan_acting == Some(*conn) => self.creative,
+            Some(Target::Guest(conn)) => self.command_guest(*conn).is_some_and(|g| g.creative()),
+            _ => false,
+        }
     }
 
     /// `Entity.kill` of a cushion (`/kill`): gone with no drop, its rider let go.
@@ -504,8 +529,15 @@ impl Game<'_> {
                 return true;
             }
         }
-        if self.cushion_in_fire(&c) || !self.cushion_survives(&c) {
+        // `destroyIfInFire` hurts the cushion (`kill`), so it is removed before
+        // the survive check below.
+        if self.cushion_in_fire(&c) {
             self.break_cushion(i, false);
+            return true;
+        }
+        // BlockAttachedEntity.tick: `discard()` then `dropItem(level, null)`.
+        if !self.cushion_survives(&c) {
+            self.discard_cushion(i);
             return true;
         }
         false
@@ -662,16 +694,16 @@ impl Game<'_> {
                 glam::DVec3::new(hi.x, hi.y, hi.z),
             );
             let range = default_range(hi - lo, self.view_scale());
-            if !self.entity_in_view(camera, (lo + hi) / 2.0, range, lo, hi) {
+            let Some(sight) = self.entity_sight(camera, (lo + hi) / 2.0, range, lo, hi) else {
                 continue;
-            }
+            };
             let Some(uv) = sprites
                 .get(&format!("entity/cushion/{}_cushion", c.color_name()))
                 .map(|r| [r.u0, r.v0, r.u1, r.v1])
             else {
                 continue;
             };
-            let culling = self.entity_cull_decision(c, 1.0);
+            let culling = self.sighted_decision(sight, || self.entity_cull_decision(c, 1.0));
             if culling.hides_entity() {
                 continue;
             }
@@ -698,7 +730,7 @@ impl Game<'_> {
                 0,
                 out,
             );
-            self.finish_entity_occlusion(culling, c, out, entity_start);
+            self.finish_lit_entity(culling, c, out, entity_start);
         }
     }
 }
@@ -753,3 +785,7 @@ mod tests {
         assert!(c.item_stack_with_data().data().is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "cushion_drop_tests.rs"]
+mod cushion_drop_tests;

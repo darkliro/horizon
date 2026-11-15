@@ -16,7 +16,7 @@ use crate::{
 use horizon_core::{
     geometry::{Aabb, Direction, Vec3, sweep_intersected_blocks},
     position::BlockPos,
-    random::{LegacyRandom, RandomSource},
+    random::{EntityRandom, RandomSource},
 };
 use horizon_world::{
     block_collision::BlockCollisionRegistry,
@@ -208,7 +208,7 @@ pub struct ArrowState {
     pub dealt_damage: bool,
     pub removed: bool,
     /// The arrow's own random (`Entity.random`).
-    pub random: LegacyRandom,
+    pub random: EntityRandom,
     pub events: Vec<ArrowEvent>,
     /// The speed (`deltaMovement.length()`) it hit a block at, before it stuck.
     pub hit_speed: f64,
@@ -268,7 +268,7 @@ impl ArrowState {
         self.crossbow_hit_sound =
             matches!(saved, Some(Tag::String(s)) if s.to_string_lossy() == CROSSBOW_HIT);
     }
-    pub fn new(random: LegacyRandom) -> Self {
+    pub fn new(random: EntityRandom) -> Self {
         Self {
             in_ground: false,
             canceled_impact_inside: false,
@@ -310,6 +310,20 @@ impl ArrowState {
     pub fn potion_color(&self) -> Option<u32> {
         (!crate::brewing::contents_empty(&self.pickup_item))
             .then(|| crate::brewing::contents_color(&self.pickup_item))
+    }
+    /// Its entity type is `SpectralArrow`: the type it loaded with, or the
+    /// item it was fired as (a bow's spectral ammo).
+    pub fn is_spectral_type(&self) -> bool {
+        self.spectral || &*self.pickup_item.item == "minecraft:spectral_arrow"
+    }
+    /// `SpectralArrow.readAdditionalSaveData`: the glow `Duration` of the
+    /// compound being loaded, 200 when it has none. `getIntOr` is
+    /// `NumericTag.intValue`, so a float or double one floors.
+    pub fn read_spectral_duration(&mut self, tag: &Tag) {
+        self.spectral_duration = tag
+            .get("Duration")
+            .and_then(crate::nbt_path::int_value)
+            .unwrap_or(200);
     }
     /// The `AbstractArrow` constructor's `pickupItemStack`: the drawn ammo
     /// (one item). Ammo drawn without being used up (`INTANGIBLE_PROJECTILE`)

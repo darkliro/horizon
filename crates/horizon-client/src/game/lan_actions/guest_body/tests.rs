@@ -7,6 +7,8 @@ use horizon_core::random::RandomSource;
 use horizon_protocol::packets::configuration::ClientInformation;
 use std::sync::{Arc, atomic::AtomicI32, mpsc};
 
+mod fall_reset;
+
 fn guest(entity_id: i32) -> Guest {
     let (sender, _) = mpsc::channel();
     Guest::new(

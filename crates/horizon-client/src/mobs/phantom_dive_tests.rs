@@ -22,7 +22,7 @@ fn dive_ages(ticks: i32) -> Option<(i32, Vec<i32>)> {
             let mut m = Mob::new(1, kind, Vec3::new(0.5, 74.0, 0.5), 0.0);
             register(&mut m);
             m.persistent = true;
-            let mut lr = LegacyRandom::new(1);
+            let mut lr = horizon_core::random::LevelRandom::for_level(LegacyRandom::new(1));
             let mut events = Vec::new();
             let (mut started, mut swoops, mut was) = (None, Vec::new(), false);
             for _ in 0..ticks {
@@ -84,7 +84,7 @@ fn a_bite_is_level_event_1039_at_the_phantoms_block_unless_it_is_silent() {
             register(&mut m);
             m.ai.target = Some(Who::Player);
             m.extra.flag = true;
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut sweep = SweepAttack {
                 scared: false,
                 cat_search: 0,

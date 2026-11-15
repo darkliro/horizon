@@ -48,9 +48,7 @@ impl Renderer {
             timer.submitted(&self.queue);
             timer.collect(&self.device, &mut self.gpu_times);
         }
-        if let Some(Some(timer)) = Self::pass_timer(&mut self.pack_post, &mut self.native) {
-            timer.submitted(&self.queue);
-        }
+        self.pack_timing_submitted();
         if let Some(timer) = &mut self.own_timing {
             timer.submitted(&self.queue);
         }
@@ -96,7 +94,7 @@ impl Renderer {
             let size = [self.config.width, self.config.height];
             let format = self.config.format.remove_srgb_suffix();
             // The layered float frame maps the world to SDR, then adds the HUD as drawn.
-            // Other 16-bit frames keep their clipped 8-bit copy.
+            // Other float frames keep their clipped 8-bit copy.
             let copy = self
                 .hdr
                 .as_mut()

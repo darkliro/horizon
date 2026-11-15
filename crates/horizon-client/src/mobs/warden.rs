@@ -12,7 +12,7 @@ use super::{
 use crate::sculk::{self, Context, Info};
 use horizon_core::{
     geometry::{Vec3, trig::Mth},
-    random::{LegacyRandom, RandomSource},
+    random::{LevelRandom, RandomSource},
 };
 use horizon_protocol::entity_data::PositionSource;
 use std::{
@@ -505,7 +505,11 @@ pub fn hurt(m: &mut Mob, source: &Damage) {
     }
     let direct = !matches!(
         source.kind,
-        DamageKind::Arrow | DamageKind::Thrown | DamageKind::Fireball | DamageKind::WitherSkull
+        DamageKind::Arrow
+            | DamageKind::Thrown
+            | DamageKind::Fireball
+            | DamageKind::WitherSkull
+            | DamageKind::WindCharge
     );
     if let Some(st) = m.extra.warden.as_mut() {
         st.hurt_by.push((source.attacker, direct));
@@ -559,7 +563,7 @@ pub(super) fn do_hurt_target(
     m: &mut Mob,
     target: Who,
     w: &MobWorld,
-    lr: &mut LegacyRandom,
+    lr: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     m.anim.states[ROAR].stop();
@@ -789,7 +793,7 @@ pub fn pre_tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
 pub fn server_ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level_random: &mut LevelRandom,
     events: &mut Vec<MobEvent>,
 ) {
     if m.extra.warden.is_none() {

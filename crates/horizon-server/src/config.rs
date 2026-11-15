@@ -613,8 +613,40 @@ impl Config {
         self.chat_filter.check()?;
         self.prune_chunks.check()?;
         self.entities.check()?;
+        // The game opens these as given, appending player text or rewriting them, so they stay
+        // in the server folder: not absolute, not up a level, no drive (`C:x`) on Windows.
+        for (what, path) in [
+            ("chat_filter.log", &self.chat_filter.log),
+            ("chat_filter.words_file", &self.chat_filter.words_file),
+            ("anticheat.log", &self.anticheat.log),
+            ("anticheat.strikes", &self.anticheat.strikes),
+        ] {
+            let p = Path::new(path);
+            if p.is_absolute()
+                || p.has_root()
+                || path.contains(':')
+                || path.split(['/', '\\']).any(|part| part == "..")
+            {
+                return Err(format!(
+                    "{what} {path:?} must be a path inside the server folder"
+                ));
+            }
+        }
         if self.server.port == 0 {
             return Err("server.port must be a port number from 1 to 65535".into());
+        }
+        // `config set` refuses a `backups.keep` outside this range (settings::range); a file edited by
+        // hand must not get past it with 0, which deletes every automatic backup right after it is made
+        // (`backup::prune`), the new one included. `backups.every = "0"` is how automatic backups go off.
+        if let Some(range) = crate::settings::range("backups", "keep")
+            && !range.contains(&i64::from(self.backups.keep))
+        {
+            return Err(format!(
+                "backups.keep is {}: use {} to {} (to stop automatic backups, set backups.every = \"0\")",
+                self.backups.keep,
+                range.start(),
+                range.end()
+            ));
         }
         if let Some((section, field, key)) =
             TYPED.iter().find(|t| self.properties.contains_key(t.2))
@@ -924,6 +956,29 @@ mod tests {
             p.put(k, (*v).to_owned());
         }
         p
+    }
+
+    /// `server.toml` is checked as `config set` checks `backups.keep`: 0 would make the supervisor delete
+    /// every automatic backup (the one it just made too), so it is refused with the same range.
+    #[test]
+    fn backups_keep_is_checked_as_config_set_checks_it() {
+        let with = |keep: u32| {
+            Config::parse(&format!(
+                "[backups]
+keep = {keep}
+"
+            ))
+        };
+        let err = with(0).unwrap_err();
+        assert!(
+            err.contains("backups.keep is 0: use 1 to 1000"),
+            "got {err:?}"
+        );
+        assert!(with(1001).is_err());
+        assert!(with(1).is_ok() && with(1000).is_ok());
+        assert_eq!(Config::default().backups.keep, 12);
+        let table = toml::Table::try_from(Config::default()).unwrap();
+        assert!(crate::settings::parse_change(&table, "backups.keep=0").is_err());
     }
 
     #[test]
@@ -1237,5 +1292,32 @@ mod tests {
         assert!(!back.server.whitelist);
         assert_eq!(back.properties["spawn-protection"], toml::Value::Integer(4));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn written_files_stay_in_the_server_folder() {
+        for bad in [
+            "/home/mc/.bashrc",
+            "../outside.log",
+            "logs/../../x",
+            "logs\\..\\..\\x",
+            "C:x.log",
+            "C:\\Users\\mc\\x.log",
+        ] {
+            for set in [
+                |c: &mut Config, p: &str| c.chat_filter.log = p.into(),
+                |c: &mut Config, p: &str| c.chat_filter.words_file = p.into(),
+                |c: &mut Config, p: &str| c.anticheat.log = p.into(),
+                |c: &mut Config, p: &str| c.anticheat.strikes = p.into(),
+            ] {
+                let mut c = Config::default();
+                set(&mut c, bad);
+                let e = c.check().unwrap_err();
+                assert!(e.contains("inside the server folder"), "{bad:?}: {e}");
+            }
+        }
+        let mut c = Config::default();
+        c.chat_filter.log = "logs/chat-filter.log".into();
+        c.anticheat.strikes = String::new();
+        c.check().unwrap();
     }
 }

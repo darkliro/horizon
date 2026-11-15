@@ -8,6 +8,7 @@ use super::Game;
 use super::commands::Target;
 use horizon_core::geometry::Vec3;
 use horizon_protocol::packets::play::{self, Clientbound as C};
+use horizon_world::nbt::Tag;
 
 fn is_horse(species: horizon_client::mobs::Species) -> bool {
     use horizon_client::mobs::Species::*;
@@ -70,11 +71,66 @@ pub(super) struct PlacedRotation {
 
 /// The entity id a vehicle's riders point at, for the targets that carry some.
 fn vehicle_id(t: Target) -> Option<u32> {
-    match t {
-        Target::Boat(id) | Target::Cart(id) | Target::Mob(id) => Some(id),
-        _ => None,
+    super::native_entities::target_id(t)
+}
+
+/// `Entity.teleportSetPosition` with a command's transition: the destination
+/// and angles the command asked for, and the transition's zero motion. A
+/// hanging entity's `BlockAttachedEntity.setPos` (through `reapplyPosition`)
+/// floors the block it hangs in, so its `block_pos` follows the destination.
+/// `performTeleport`'s `setOnGround` lands on the old entity, which
+/// `teleportCrossDimension` has already removed, so the ground flag stays the
+/// saved one.
+fn place_transferred(tag: &mut Tag, at: [f64; 3], rotation: Option<[f32; 2]>) {
+    let Tag::Compound(c) = tag else {
+        return;
+    };
+    c.insert("Pos".into(), doubles(at));
+    c.insert("Motion".into(), doubles([0.0; 3]));
+    if let Some(rotation) = rotation {
+        c.insert("Rotation".into(), floats(rotation));
+    }
+    if c.contains_key(&"block_pos".into()) {
+        c.insert(
+            "block_pos".into(),
+            Tag::IntArray(at.map(|v| v.floor() as i32).to_vec()),
+        );
     }
 }
+
+/// A `Tag::List` of the doubles or floats vanilla's codecs write.
+fn doubles<const N: usize>(values: [f64; N]) -> Tag {
+    Tag::List(values.iter().map(|v| Tag::Double(v.to_bits())).collect())
+}
+fn floats<const N: usize>(values: [f32; N]) -> Tag {
+    Tag::List(values.iter().map(|v| Tag::Float(v.to_bits())).collect())
+}
+
+/// Load a saved entity of any kind into the level in place
+/// (`Entity.teleportCrossDimension`'s `restoreFrom` on the new entity).
+fn load_transferred(game: &mut Game<'_>, tag: Tag) {
+    let kind = horizon_client::entity_nbt::kind(&tag).unwrap_or_default();
+    let uuid = horizon_client::entity_nbt::uuid(&tag);
+    // `PrimedTnt.teleport` marks the entity it returns as having used a
+    // portal (`setUsedPortal(true)`), so the arrived TNT does not take the
+    // portal it lands in.
+    if kind == "minecraft:tnt" {
+        game.load_tnt_with_portal(tag, uuid, true);
+        return;
+    }
+    let at = horizon_client::entity_nbt::position(&tag).unwrap_or_default();
+    let key = ((at.x.floor() as i32) >> 4, (at.z.floor() as i32) >> 4);
+    if let Err(tag) = game.load_unlisted(key, &kind, uuid, tag)
+        && let Err(tag) = game.load_listed(&kind, uuid, game.level.player_uuid, tag)
+        && !kind.is_empty()
+        && horizon_client::entity_nbt::position(&tag).is_some()
+    {
+        game.load_other(tag, &kind);
+    }
+}
+
+#[cfg(test)]
+mod teleport_cross_tests;
 
 impl Game<'_> {
     /// `AbstractMinecart.getDismountLocationForPassenger` for a standing mob.
@@ -261,10 +317,10 @@ impl Game<'_> {
             // the transition's motion, which /tp's teleportTo makes zero. (The
             // ground flag performTeleport then sets lands on the old entity.)
             game.teleport_stops(target);
-            let mounts: Vec<_> = game.mobs.iter().map(|m| (m.id, m.extra.mount)).collect();
-            let tree = super::persist::vehicle_tree(root, &mounts);
-            let tag = game.vehicle_tree_nbt(root).ok_or("missing vehicle tree")?;
-            let kind = horizon_client::entity_nbt::kind(&tag).ok_or("missing vehicle type")?;
+            let tree = game.passenger_tree(root);
+            let tag = game
+                .vehicle_transfer_tag(root)
+                .ok_or("missing vehicle tree")?;
             let uuid = horizon_client::entity_nbt::uuid(&tag);
             let mut players = Vec::new();
             // A command runs with its source player swapped out of the hub.
@@ -296,27 +352,20 @@ impl Game<'_> {
                 .into_iter()
                 .map(|(conn, at, rotation, mount)| (conn, at, rotation, game.uuid_for(mount)))
                 .collect();
-            game.mobs.retain(|m| !tree.contains(&m.id));
-            game.boats.retain(|b| !tree.contains(&b.id));
-            game.carts.retain(|c| !tree.contains(&c.id));
-            for id in tree {
-                game.release_vehicle_container(id);
-                game.detach_entity(id);
-            }
+            game.take_passenger_entities(&tree, true);
             game.native_leaves_flush();
             game.enter_level(None, destination)?;
             // restoreFrom reloads saved state into fresh entities, rather than
             // retaining navigation paths or goals from the old level.
-            game.load_listed(&kind, uuid, game.level.player_uuid, tag)
-                .map_err(|_| "could not restore vehicle tree")?;
+            game.spawn_entity_from_nbt(tag)
+                .ok_or("could not restore vehicle tree")?;
             // AbstractHorse.addPassenger snaps a reattached passenger to the
             // new horse's getViewYRot(0) / getViewXRot(0). A fresh living
             // entity's previous head yaw is still zero, before its first tick.
             let new_root = uuid
                 .and_then(|uuid| game.vehicle_by_uuid(uuid))
                 .ok_or("restored vehicle is missing")?;
-            let mounts: Vec<_> = game.mobs.iter().map(|m| (m.id, m.extra.mount)).collect();
-            let restored = super::persist::vehicle_tree(new_root, &mounts);
+            let restored = game.passenger_tree(new_root);
             let horses: Vec<_> = game
                 .mobs
                 .iter()
@@ -353,6 +402,112 @@ impl Game<'_> {
         .unwrap_or(Ok(false))
     }
 
+    /// `Entity.teleportCrossDimension` for a command target that is not a
+    /// vehicle tree: save it where it is, remove it, and load the compound in
+    /// the destination level.
+    pub(super) fn teleport_any_across(
+        &mut self,
+        target: Target,
+        destination: super::Dim,
+        at: [f64; 3],
+        rotation: Option<[f32; 2]>,
+        turn_riders: bool,
+    ) -> horizon_client::Result<bool> {
+        if self.teleport_vehicle_across(target, destination, at, rotation, turn_riders)? {
+            return Ok(true);
+        }
+        self.teleport_entity_across(target, destination, at, rotation)
+    }
+
+    fn teleport_entity_across(
+        &mut self,
+        target: Target,
+        destination: super::Dim,
+        at: [f64; 3],
+        rotation: Option<[f32; 2]>,
+    ) -> horizon_client::Result<bool> {
+        let Some(id) = super::native_entities::target_id(target) else {
+            return Ok(false);
+        };
+        self.in_target_level(target, |game| {
+            let source = game.dim;
+            if source == destination {
+                return Ok(false);
+            }
+            // Open the destination before changing or removing any entity.
+            game.enter_level(None, destination)?;
+            game.enter_level(None, source)?;
+            // `restoreFrom` saves the entity where it stands (its raw
+            // compound is found by that position); `place_transferred` then
+            // moves the copy to the command's destination.
+            let Some(mut tag) = game.entity_nbt(target) else {
+                return Ok(false);
+            };
+            game.remove_for_transfer(target);
+            game.forget_entity(id);
+            game.native_leaves_flush();
+            game.enter_level(None, destination)?;
+            place_transferred(&mut tag, at, rotation);
+            load_transferred(game, tag);
+            game.native_joins_flush(false, 0);
+            game.enter_level(None, source)?;
+            Ok(true)
+        })
+        .unwrap_or(Ok(false))
+    }
+
+    /// `BlockAttachedEntity.setPos`: a frame or painting moves to the block
+    /// holding the position; its bounds follow from it.
+    pub(super) fn teleport_hanging(&mut self, t: Target, v: Vec3) {
+        let pos = [v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32];
+        match t {
+            Target::Frame(id) => {
+                if let Some(f) = self.item_frames.iter_mut().find(|f| f.id == id) {
+                    f.pos = pos;
+                }
+            }
+            Target::Painting(id) => {
+                if let Some(p) = self.paintings.iter_mut().find(|p| p.id == id) {
+                    p.pos = pos;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Remove a target that crossed dimensions without running its death or
+    /// discard side effects (`removeAfterChangingDimensions`).
+    fn remove_for_transfer(&mut self, t: Target) {
+        match t {
+            Target::Item(id) => {
+                if let Some(i) = self.dropped.iter().position(|e| e.id == id) {
+                    self.remove_dropped(i);
+                }
+            }
+            Target::Orb(id) => self.orbs.retain(|o| o.id != id),
+            Target::Projectile(id) => self.creatures.projectiles.retain(|p| p.id != id),
+            Target::Stand(id) => self.armor_stands.retain(|a| a.id != id),
+            Target::Frame(id) => self.item_frames.retain(|f| f.id != id),
+            Target::Painting(id) => self.paintings.retain(|p| p.id != id),
+            Target::Tnt(id) => self.tnts.retain(|t| t.id != id),
+            Target::Falling(id) => self.falling.retain(|f| f.id != id),
+            Target::Rocket(id) => self.rockets.retain(|r| r.id != id),
+            Target::Trident(id) => self.tridents.retain(|t| t.id != id),
+            Target::Cushion(id) => self.cushions.retain(|c| c.id != id),
+            Target::Other(id) => self.others.retain(|o| o.id != id),
+            Target::Fangs(id) => self.fangs.list.retain(|f| f.id != id),
+            Target::Crystal(id) => self.crystals.retain(|c| c.id != id),
+            Target::Dragon(id) => {
+                if self.dragon.as_ref().is_some_and(|d| d.id == id) {
+                    self.dragon = None;
+                }
+            }
+            Target::Spawner(id) => self.ominous_spawners.retain(|s| s.id != id),
+            Target::Cloud(id) => self.breath_clouds.retain(|c| c.id != id),
+            _ => {}
+        }
+    }
+
     /// `Entity.teleportSameDimension`: after `t` moved from `from` to `to`, its
     /// riders move by the same offset, and to the angles the vehicle was
     /// placed at when it turned (`calculatePassengerTransition`), staying
@@ -382,13 +537,30 @@ impl Game<'_> {
         new: Vec3,
         rotation: Option<PlacedRotation>,
     ) {
-        let riders: Vec<u32> = self
-            .mobs
-            .iter()
-            .filter(|m| m.extra.mount == Some(vehicle))
-            .map(|m| m.id)
-            .collect();
+        let riders = self.ordered_live_passengers(vehicle);
         for id in riders {
+            if !self.mobs.iter().any(|m| m.id == id) {
+                if let Some(target) = self.level_entity(id as i32)
+                    && let Some(at) = self.target_position(target)
+                {
+                    let at = passenger_destination(old, new, Vec3::new(at[0], at[1], at[2]));
+                    let turn = rotation.map(|placed| {
+                        passenger_rotation(
+                            placed.before,
+                            placed.after,
+                            self.target_rotation(target),
+                        )
+                    });
+                    if matches!(target, Target::Frame(_) | Target::Painting(_)) {
+                        self.place_saved_passenger(target, at);
+                        self.move_riders(id, old, new, rotation);
+                    } else {
+                        // This existing writer also carries this rider's descendants.
+                        self.teleport_to_in_level(target, [at.x, at.y, at.z], turn, true);
+                    }
+                }
+                continue;
+            }
             if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                 m.position = passenger_destination(old, new, m.position);
                 m.previous = m.position;

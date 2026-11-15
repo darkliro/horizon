@@ -4,7 +4,7 @@ use super::{Mob, MobEvent, MobWorld, Seen, Species, Who, world::TargetInfo};
 use horizon_core::{
     geometry::{Aabb, Vec3},
     jmath,
-    random::{LegacyRandom, RandomSource},
+    random::{LevelRandom, RandomSource},
 };
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub struct Cx<'a, 'w> {
     pub w: &'a MobWorld<'w>,
     /// The level's random (`level.getRandom()`), for the draws vanilla's
     /// behaviours make from it rather than from the mob's own.
-    pub lr: &'a mut LegacyRandom,
+    pub lr: &'a mut LevelRandom,
     pub events: &'a mut Vec<MobEvent>,
 }
 pub trait Goal: std::fmt::Debug + Send + Sync {
@@ -623,7 +623,7 @@ impl Mob {
         if let Some(v) = self.ai.seen_cache.iter().find(|(k, _)| *k == who) {
             return v.1;
         }
-        let Some(t) = w.target_info(who) else {
+        let Some(t) = w.target_info(who).filter(|_| !super::ravager::blind(self)) else {
             return false;
         };
         let eye = Vec3::new(self.position.x, self.eye_y(), self.position.z);
@@ -877,7 +877,7 @@ impl Goal for ClimbOnTopOfPowderSnow {
 #[derive(Clone, Debug)]
 pub struct Panic {
     pub speed: f64,
-    /// Only the damage of `#panic_environmental_causes` (an armadillo).
+    /// Only the damage of `#panic_environmental_causes` (a wolf).
     pub environmental: bool,
     /// `TurtlePanicGoal`: always look for water this far away, not only
     /// when on fire.
@@ -899,6 +899,10 @@ impl Panic {
         self
     }
 }
+#[path = "animal_panic.rs"]
+mod animal_panic;
+pub use animal_panic::{AnimalPanic, water_pos};
+
 pub fn should_panic(m: &Mob) -> bool {
     m.last_damage
         .is_some_and(|(d, t)| d.causes_panic() && i64::from(m.age) - t <= 40)
@@ -920,33 +924,11 @@ impl Goal for Panic {
         if !wanted {
             return false;
         }
-        let range = self.water_range.or((m.fire_ticks > 0).then_some(5));
-        if let Some(range) = range {
-            let (bx, by, bz) = (
-                m.position.x.floor() as i32,
-                m.position.y.floor() as i32,
-                m.position.z.floor() as i32,
-            );
-            if cx.w.data.state(cx.w.world.block(bx, by, bz)).top == 0.0 {
-                // findBlocksInBoxByManhattanDistance(pos, range, 1) for water.
-                let mut best: Option<([i32; 3], i32)> = None;
-                for dy in -1i32..=1 {
-                    for dx in -range..=range {
-                        for dz in -range..=range {
-                            let d = dx.abs() + dy.abs() + dz.abs();
-                            if cx.w.fluid(bx + dx, by + dy, bz + dz) == crate::blocks::Fluid::Water
-                                && best.is_none_or(|b| d < b.1)
-                            {
-                                best = Some(([bx + dx, by + dy, bz + dz], d));
-                            }
-                        }
-                    }
-                }
-                if let Some((p, _)) = best {
-                    self.pos = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
-                    return true;
-                }
-            }
+        if let Some(range) = self.water_range.or((m.fire_ticks > 0).then_some(5))
+            && let Some(p) = water_pos(m, cx.w, range)
+        {
+            self.pos = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
+            return true;
         }
         match m.default_random_pos(cx.w, 5, 4) {
             Some(p) => {
@@ -1147,8 +1129,8 @@ pub struct LookAtPlayer {
     pub only_horizontal: bool,
     /// `LookAtPlayerGoal(Mob.class, ...)`: the nearest mob, not the player.
     pub mobs: bool,
-    /// `LookAtPlayerGoal(Strider.class, ...)`: only mobs of this species.
-    pub only: Option<Species>,
+    /// `LookAtPlayerGoal(<species class>, ...)`: only these species, subclasses too.
+    pub only: &'static [Species],
     /// InteractGoal: LOOK and MOVE.
     pub interact: bool,
     look_at: Option<Who>,
@@ -1161,7 +1143,7 @@ impl LookAtPlayer {
             probability: 0.02,
             only_horizontal: false,
             mobs: false,
-            only: None,
+            only: &[],
             interact: false,
             look_at: None,
             look_time: 0,
@@ -1175,9 +1157,9 @@ impl LookAtPlayer {
         }
     }
     /// `LookAtPlayerGoal(this, <species class>, range)`.
-    pub fn species(species: Species, range: f32) -> Self {
+    pub fn species(list: &'static [Species], range: f32) -> Self {
         Self {
-            only: Some(species),
+            only: list,
             ..Self::mobs(range)
         }
     }
@@ -1226,8 +1208,8 @@ impl Goal for LookAtPlayer {
         self.look_at = None;
         let range = f64::from(self.range);
         if !self.mobs {
-            // level.getNearestPlayer(forNonCombat().range(lookDistance)).
-            if m.can_see_player(cx.w, range) {
+            // `EntitySelector.notRiding(mob)`: never the player riding it.
+            if !super::riders::player_rides(m, cx.w) && m.can_see_player(cx.w, range) {
                 self.look_at = Some(Who::Player);
             }
             return self.look_at.is_some();
@@ -1239,7 +1221,7 @@ impl Goal for LookAtPlayer {
         let candidates: Vec<(u32, Vec3)> =
             cx.w.others_near(area)
                 .filter(|s| s.id != id && s.alive && s.bounds.intersects(area))
-                .filter(|s| only.is_none_or(|o| s.species == o))
+                .filter(|s| only.is_empty() || only.contains(&s.species))
                 .map(|s| (s.id, s.position))
                 .collect();
         let mut best: Option<(u32, f64)> = None;
@@ -2155,8 +2137,8 @@ impl Goal for Breed {
         if tamable && !m.extra.tame {
             return false;
         }
-        // AbstractHorse.canMate is false and Mule keeps it: mules never breed.
-        if species == Species::Mule {
+        // Mule keeps AbstractHorse.canMate; CamelHusk.canMate and canFallInLove are false.
+        if matches!(species, Species::Mule | Species::CamelHusk) {
             return false;
         }
         // TurtleBreedGoal.canUse: not while carrying an egg.
@@ -2934,7 +2916,7 @@ mod eat_block_tests {
         with_built_test_world_rules(&[], griefing, true, build, |w, types| {
             let kind = Arc::new(types.types["minecraft:sheep"].clone());
             let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
-            let mut random = LegacyRandom::new(0);
+            let mut random = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             for _ in 0..6000 {
                 crate::mobs::ai::tick(&mut m, w, &mut random, &mut events);
@@ -3038,6 +3020,10 @@ mod built_by_player_tests {
 mod avoid_entity_targeting_tests;
 
 #[cfg(test)]
+#[path = "panic_tests.rs"]
+mod panic_tests;
+
+#[cfg(test)]
 mod peaceful_targets_tests {
     use super::*;
     use crate::mobs::world::{test_player, with_test_world};
@@ -3054,7 +3040,7 @@ mod peaceful_targets_tests {
             let mut wolf = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
             wolf.ai.last_hurt_by = Some(Who::Player);
             wolf.ai.last_hurt_by_time = 5;
-            let mut random = LegacyRandom::new(0);
+            let mut random = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w: &w,
@@ -3100,7 +3086,7 @@ mod peaceful_targets_tests {
         with_test_world(&seen, |w, types| {
             let kind = Arc::new(types.types["minecraft:cow"].clone());
             let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w,
@@ -3273,7 +3259,7 @@ mod melee_continue_tests {
 
     /// Tick one `<MeleeAttack>` goal through the real selector.
     fn tick(goals: &mut GoalSelector, m: &mut Mob, world: &MobWorld) {
-        let mut lr = LegacyRandom::new(0);
+        let mut lr = crate::mobs::world::level_random(0);
         let mut events = Vec::new();
         let mut cx = Cx {
             w: world,
@@ -3389,7 +3375,7 @@ mod hurt_by_anger_tests {
                 m.ai.last_hurt_by = Some(Who::Player);
                 m.ai.last_hurt_by_time = 1;
                 m.ai.goals.add(1, HurtByTarget::new());
-                let mut lr = LegacyRandom::new(0);
+                let mut lr = crate::mobs::world::level_random(0);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w: &world,
@@ -3439,7 +3425,7 @@ mod breed_continue_tests {
         let mut started = None;
         let calm = [partner.seen(None)];
         if !with_test_world(&calm, |w, _| {
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w,
@@ -3457,7 +3443,7 @@ mod breed_continue_tests {
         let panicking = [partner.seen(None)];
         let mut stopped = None;
         if !with_test_world(&panicking, |w, _| {
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::mobs::world::level_random(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w,

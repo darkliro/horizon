@@ -45,6 +45,9 @@ pub struct Resident<T> {
     slots: FxHashMap<SectionKey, u32>,
     columns: Vec<Column>,
     column_index: FxHashMap<(i32, i32), u32>,
+    /// Calls that removed sections so far: a user that keeps its own per-section state
+    /// (the ray scene) sees from it whether any went.
+    removals: u64,
 }
 
 impl<T> Default for Resident<T> {
@@ -57,6 +60,7 @@ impl<T> Default for Resident<T> {
             slots: FxHashMap::default(),
             columns: Vec::new(),
             column_index: FxHashMap::default(),
+            removals: 0,
         }
     }
 }
@@ -135,7 +139,12 @@ impl<T> Resident<T> {
     pub fn min_y(&self) -> i32 {
         self.min_y
     }
+    /// Changes whenever sections were removed (`remove`, `remove_columns`, `clear`).
+    pub fn removals(&self) -> u64 {
+        self.removals
+    }
     pub fn clear(&mut self) {
+        self.removals += 1;
         self.items.clear();
         self.bounds.clear();
         self.marked.clear();
@@ -226,6 +235,7 @@ impl<T> Resident<T> {
     /// marks: one pass over the store, where `remove` moves a slot and looks its column
     /// up for each.
     pub fn remove_columns(&mut self, gone: &FxHashSet<(i32, i32)>) -> Vec<T> {
+        self.removals += 1;
         // Every column (a far teleport): emptied, without a lookup per section.
         if self.columns.iter().all(|c| gone.contains(&(c.x, c.z))) {
             self.bounds.clear();
@@ -256,6 +266,7 @@ impl<T> Resident<T> {
     }
     pub fn remove(&mut self, key: SectionKey) -> Option<T> {
         let slot = self.slots.remove(&key)?;
+        self.removals += 1;
         self.mark_slot(slot, false);
         let c = self.column_index[&(key.0, key.2)] as usize;
         let column = &mut self.columns[c];
@@ -536,9 +547,7 @@ mod tests {
             for radius in [2, 6, 10] {
                 let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
                 let view = crate::camera::view_matrix(yaw, pitch);
-                let frustum = Frustum {
-                    planes: super::super::frustum(projection * view),
-                };
+                let frustum = Frustum::from_planes(super::super::frustum(projection * view));
                 let mut fast = Vec::new();
                 // Columns past the distance kept for distant terrain.
                 let beyond = |x: i32, z: i32| (x + z).rem_euclid(3) == 0;
@@ -596,9 +605,9 @@ mod tests {
         }
         let camera = DVec3::new(0.5, -8.0, 0.5);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * crate::camera::view_matrix(0.0, 5.0)),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(
+            projection * crate::camera::view_matrix(0.0, 5.0),
+        ));
         let inside = r
             .columns
             .iter()
@@ -657,6 +666,31 @@ mod tests {
             assert!(r.contains(*key));
             assert_eq!(r.is_marked(*key), marked, "{key:?}");
         }
+    }
+
+    #[test]
+    fn every_removal_changes_the_count_and_nothing_else_does() {
+        let mut r = Resident::default();
+        let start = r.removals();
+        r.insert((0, 0, 0), 1u32);
+        r.insert((0, 1, 0), 2);
+        r.insert((1, 0, 0), 3);
+        r.insert((0, 0, 0), 4);
+        r.set_marked((0, 0, 0), true);
+        assert_eq!(r.remove((5, 0, 5)), None);
+        assert_eq!(
+            r.removals(),
+            start,
+            "inserts, replacements, marks and misses"
+        );
+        r.remove((0, 1, 0));
+        let one = r.removals();
+        assert_ne!(one, start);
+        r.remove_columns(&[(1, 0)].into_iter().collect());
+        let two = r.removals();
+        assert_ne!(two, one);
+        r.clear();
+        assert_ne!(r.removals(), two);
     }
 
     #[test]
@@ -783,9 +817,9 @@ mod tests {
             (DVec3::new(100.0, -60.0, -3.0), 270.0, -80.0),
             (DVec3::new(8.0, 64.0, 8.0), 45.0, 89.0),
         ] {
-            let view = Frustum {
-                planes: super::super::frustum(projection * crate::camera::view_matrix(yaw, pitch)),
-            };
+            let view = Frustum::from_planes(super::super::frustum(
+                projection * crate::camera::view_matrix(yaw, pitch),
+            ));
             inside += r
                 .columns
                 .iter()
@@ -840,9 +874,9 @@ mod tests {
         }
         let camera = DVec3::new(8.5, 100.0, 8.5);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 1024.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * crate::camera::view_matrix(30.0, 35.0)),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(
+            projection * crate::camera::view_matrix(30.0, 35.0),
+        ));
         let (mut old, mut new) = (Duration::MAX, Duration::MAX);
         let (mut list, mut keys) = (Vec::new(), Vec::new());
         let mut sum = 0i64;
@@ -884,9 +918,7 @@ mod tests {
         let camera = DVec3::new(8.0, f64::from(crate::chunk::MIN_Y + 15), -2.0);
         let projection = super::super::world_projection(70.0, 16.0 / 9.0, 512.0);
         let view = crate::camera::view_matrix(0.0, -60.0);
-        let frustum = Frustum {
-            planes: super::super::frustum(projection * view),
-        };
+        let frustum = Frustum::from_planes(super::super::frustum(projection * view));
 
         // Tight bounds culls the section whose geometry is entirely outside the frustum
         let mut out = Vec::new();
@@ -948,9 +980,7 @@ mod tests {
 
         for (desc, yaw, pitch) in test_views {
             let view = crate::camera::view_matrix(yaw, pitch);
-            let frustum = Frustum {
-                planes: super::super::frustum(projection * view),
-            };
+            let frustum = Frustum::from_planes(super::super::frustum(projection * view));
 
             let mut out_fallback = Vec::new();
             let mut out_tight = Vec::new();

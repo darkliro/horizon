@@ -24,7 +24,7 @@ use horizon_client::{
 use horizon_core::{
     geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
     position::BlockPos,
-    random::{LegacyRandom, RandomSource},
+    random::{EntityRandom, RandomSource},
 };
 use horizon_world::collision_context::CollisionContext;
 use horizon_world::nbt::Tag;
@@ -101,7 +101,8 @@ pub(super) struct Boat {
     /// and loaded (`fall_distance`).
     pub fall_distance: f64,
     /// `Entity.stuckSpeedMultiplier`: set where the boat sits in powder snow
-    /// (`PowderSnowBlock.entityInside`), spent by the next move.
+    /// (`PowderSnowBlock.entityInside`) or a cobweb (`WebBlock.entityInside`),
+    /// spent by the next move.
     stuck: Vec3,
     /// `ChestBoat`: a chest with 27 slots in the back seat.
     pub chest: bool,
@@ -116,7 +117,7 @@ pub(super) struct Boat {
     pub leash_spin: f64,
     /// `Entity.tickCount`, for the 100 ticks a saved holder is waited for.
     pub age: i32,
-    pub random: LegacyRandom,
+    pub random: EntityRandom,
 }
 /// `ChestBoat.CONTAINER_SIZE`.
 pub(super) const CHEST_SLOTS: usize = 27;
@@ -131,9 +132,9 @@ pub(super) const BUBBLE_UP_EVENT: i8 = 72;
 fn powder_snow_stuck() -> Vec3 {
     Vec3::new(f64::from(0.9_f32), 1.5, f64::from(0.9_f32))
 }
-/// The powder snow cells a box reaches into (deflated by 1e-5, as `Entity.checkInsideBlocks`
-/// does), in x, y, z order.
-fn powder_snow_cells(bounds: Aabb, is_snow: impl Fn([i32; 3]) -> bool) -> Vec<[i32; 3]> {
+/// The cells a box reaches into (deflated by 1e-5, as `Entity.checkInsideBlocks` does),
+/// in x, y, z order.
+fn reached_cells(bounds: Aabb, is: impl Fn([i32; 3]) -> bool) -> Vec<[i32; 3]> {
     let e = f64::from(1.0e-5_f32);
     let bounds = bounds.deflate(Vec3::new(e, e, e));
     let (lo, hi) = (bounds.min_position(), bounds.max_position());
@@ -141,7 +142,7 @@ fn powder_snow_cells(bounds: Aabb, is_snow: impl Fn([i32; 3]) -> bool) -> Vec<[i
     for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
         for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
             for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
-                if is_snow([x, y, z]) {
+                if is([x, y, z]) {
                     cells.push([x, y, z]);
                 }
             }
@@ -242,7 +243,7 @@ impl Boat {
             leash_pending: None,
             leash_spin: 0.0,
             age: 0,
-            random: horizon_client::random_source::entity(),
+            random: EntityRandom::own(horizon_client::random_source::entity()),
         }
     }
     /// A chest boat or chest raft.
@@ -882,11 +883,9 @@ impl Game<'_> {
                 b.velocity.y = 0.0;
             }
         }
-        // AbstractBoat.tick's applyEffectsFromBlocks: powder snow makes the boat stuck,
-        // which slows its next move (`PowderSnowBlock.entityInside`).
-        if !self.boat_powder_snow_cells(&b).is_empty() {
-            b.stuck = powder_snow_stuck();
-        }
+        // AbstractBoat.tick's applyEffectsFromBlocks: powder snow or a cobweb makes the
+        // boat stuck, which slows its next move, and resets its fall.
+        self.boat_stuck_in_blocks(&mut b);
         // Entity.move's last step: soul sand and honey slow the boat too.
         let factor = crate::motion::block_speed_factor_at(
             &self.world,
@@ -1038,8 +1037,13 @@ impl Game<'_> {
             self.boat_powder_snow_snowflakes(i);
         }
         // `AbstractBoat.tick` counts submersion on the server even when
-        // its controlling client owns the boat's movement.
+        // its controlling client owns the boat's movement. Its
+        // `applyEffectsFromBlocks` still runs here: a cobweb or powder snow
+        // resets the fall of the boat the guest drives.
         if driven.contains(&id) {
+            let mut b = self.boats[i].clone();
+            self.boat_stuck_in_blocks(&mut b);
+            self.boats[i] = b;
             self.refresh_boat_status(i);
         }
         if self.boats[i].out_of_control >= 60.0 {
@@ -1237,15 +1241,49 @@ impl Game<'_> {
     /// `PowderSnowBlock.entityInside` for a boat: the powder snow cells its box, and the box it
     /// had before its move, reach into (`Entity.checkInsideBlocks` along the move).
     fn boat_powder_snow_cells(&self, b: &Boat) -> Vec<[i32; 3]> {
-        let mut cells = powder_snow_cells(b.bounds(), |p| self.is_powder_snow(p));
+        self.boat_reached_cells(b, |p| self.is_powder_snow(p))
+    }
+    /// The cells a boat's box, and the box it had before its move, reach into
+    /// (`Entity.checkInsideBlocks` along the move), in x, y, z order.
+    fn boat_reached_cells(&self, b: &Boat, is: impl Fn([i32; 3]) -> bool) -> Vec<[i32; 3]> {
+        let mut cells = reached_cells(b.bounds(), &is);
         if b.previous != b.position {
-            for p in powder_snow_cells(Boat::bounds_at(b.previous), |p| self.is_powder_snow(p)) {
+            for p in reached_cells(Boat::bounds_at(b.previous), &is) {
                 if !cells.contains(&p) {
                     cells.push(p);
                 }
             }
         }
         cells
+    }
+    /// `Entity.makeStuckInBlock` from the powder snow (`PowderSnowBlock.entityInside`) and
+    /// cobweb (`WebBlock.entityInside`) cells a boat's box reaches into: each resets its fall
+    /// and the last one reached leaves the multiplier its next move spends.
+    fn boat_stuck_in_blocks(&self, b: &mut Boat) {
+        // `forEachBlockIntersectedBetween` visits the box before the move first and the box
+        // after it last, so a block the boat moves into wins over one it leaves.
+        let mut cells = Vec::new();
+        if b.previous != b.position {
+            cells.extend(reached_cells(Boat::bounds_at(b.previous), |_| true));
+        }
+        for cell in reached_cells(b.bounds(), |_| true) {
+            if !cells.contains(&cell) {
+                cells.push(cell);
+            }
+        }
+        for cell in cells {
+            let name = &*self
+                .res
+                .facts()
+                .get(self.world.block(cell[0], cell[1], cell[2]))
+                .name;
+            b.stuck = match name {
+                "minecraft:powder_snow" => powder_snow_stuck(),
+                "minecraft:cobweb" => horizon_client::falling_block::web_multiplier(),
+                _ => continue,
+            };
+            b.fall_distance = 0.0;
+        }
     }
     /// `BaseFireBlock.fireDamage` of a fire block at `p`.
     fn fire_damage_at(&self, p: [i32; 3]) -> Option<f32> {
@@ -1291,11 +1329,14 @@ impl Game<'_> {
         let (at, top) = (b.position, b.bounds().max_position().y);
         let rain = self.in_rain(at, top);
         for _ in 0..2 {
+            if self.boat_cactus_pass(i, &steps) {
+                return true;
+            }
             let before = self.boats[i].fire_ticks;
             let mut in_snow = false;
             let mut seen = Vec::new();
             for &bounds in &steps {
-                let cells = powder_snow_cells(bounds, |p| !seen.contains(&p));
+                let cells = reached_cells(bounds, |p| !seen.contains(&p));
                 seen.extend_from_slice(&cells);
                 let fires: Vec<f32> = cells
                     .iter()
@@ -1360,9 +1401,9 @@ impl Game<'_> {
         self.fluid_height_of(p[0], p[1], p[2], Some(Fluid::Water))
             .is_some_and(|(height, _)| low + 1.0e-5 < f64::from(p[1]) + f64::from(height))
     }
-    /// `VehicleEntity.hurtServer` for fire (`inFire`, `onFire`), which an
-    /// `Invulnerable` boat ignores. True when the boat broke.
-    fn burn_boat(&mut self, i: usize, damage: f32) -> bool {
+    /// `VehicleEntity.hurtServer` for fire (`inFire`, `onFire`) or a cactus,
+    /// which an `Invulnerable` boat ignores. True when the boat broke.
+    pub(super) fn burn_boat(&mut self, i: usize, damage: f32) -> bool {
         let invulnerable = self
             .persist
             .raw
@@ -1644,8 +1685,8 @@ impl Game<'_> {
             return true;
         }
         let id = self.boats[i].id;
-        self.yaw = self.boats[i].yaw;
-        // Entity.startRiding (ServerPlayer.startRiding fires the trigger).
+        // Entity.startRiding (ServerPlayer.startRiding fires the trigger): the
+        // teleport is `Relative.ROTATION`, so the rider keeps its view.
         self.start_riding(id);
         true
     }
@@ -1713,7 +1754,8 @@ impl Game<'_> {
         let (kind, id) = (self.boats[i].entity_type(), self.boats[i].id as i32);
         let (damage, scale, _, magic) = self.melee_damage(&kind, false);
         let chest = self.boats[i].chest;
-        let hurt = self.hurt_boat_result(i, damage, self.creative);
+        let by = Some(super::commands::Target::Player);
+        let hurt = self.hurt_boat_result(i, damage, self.creative, by);
         // AbstractChestBoat.destroy -> ContainerEntity.chestVehicleDestroyed:
         // with entity_drops on, a player whose hit breaks a chest boat (not a
         // creative discard) angers the piglins that see it.
@@ -1748,7 +1790,7 @@ impl Game<'_> {
     /// itself only drops on the death path (`VehicleEntity.destroy`), not when
     /// a creative hit discards it. True when the boat was removed.
     pub(super) fn hurt_boat(&mut self, i: usize, damage: f32, creative: bool) -> bool {
-        self.hurt_boat_result(i, damage, creative).unwrap_or(false)
+        self.hurt_boat_by(i, damage, creative, None)
     }
     /// Whether a spectator must be refused this boat's menu.
     pub(super) fn boat_loot_pending(&self, id: u32) -> bool {
@@ -1832,6 +1874,7 @@ impl Game<'_> {
         i: usize,
         mut damage: f32,
         creative: bool,
+        by: Option<super::commands::Target>,
     ) -> Option<bool> {
         let mut cancel = false;
         self.native_vehicle_damage("boat", &mut damage, &mut cancel);
@@ -1843,8 +1886,9 @@ impl Game<'_> {
         b.hurt_time = 10;
         b.damage += damage * 10.0;
         let destroyed = creative || b.damage > 40.0;
+        let at = [b.position.x, b.position.y, b.position.z];
+        self.vehicle_damage_event(at, by);
         if destroyed {
-            let at = [b.position.x, b.position.y, b.position.z];
             self.native_vehicle_destroy("boat", at);
             self.eject_boat_mobs(i, true);
             let id = self.boats[i].id;
@@ -1895,14 +1939,18 @@ impl Game<'_> {
             self.view_scale(),
         );
         for b in &self.boats {
-            // EntityRenderer.shouldRender.
-            let (previous, position) = (at(b.previous), at(b.position));
-            if !self.standing_entity_in_view(
-                camera, previous, position, alpha, WIDTH, HEIGHT, range, 0.0,
-            ) {
+            // LevelExtractor: the camera entity is not drawn from its own eyes.
+            if self.hides_as_camera(b.id) {
                 continue;
             }
-            let culling = self.entity_cull_decision(b, alpha);
+            // EntityRenderer.shouldRender.
+            let (previous, position) = (at(b.previous), at(b.position));
+            let Some(sight) = self.standing_entity_sight(
+                camera, previous, position, alpha, WIDTH, HEIGHT, range, 0.0,
+            ) else {
+                continue;
+            };
+            let culling = self.sighted_decision(sight, || self.entity_cull_decision(b, alpha));
             if culling.hides_entity() {
                 continue;
             }
@@ -2009,7 +2057,7 @@ impl Game<'_> {
                     out,
                 );
             }
-            self.finish_entity_occlusion(culling, b, out, entity_start);
+            self.finish_lit_entity(culling, b, out, entity_start);
         }
     }
 }
@@ -2112,18 +2160,18 @@ mod tests {
         let snow = |cells: &'static [[i32; 3]]| move |p: [i32; 3]| cells.contains(&p);
         // Inside, a corner cell, and a cell the box only ends against.
         assert_eq!(
-            powder_snow_cells(b.bounds(), snow(&[[10, 64, 10]])),
+            reached_cells(b.bounds(), snow(&[[10, 64, 10]])),
             vec![[10, 64, 10]]
         );
         assert_eq!(
-            powder_snow_cells(b.bounds(), snow(&[[9, 64, 11], [12, 64, 10], [10, 65, 10]])),
+            reached_cells(b.bounds(), snow(&[[9, 64, 11], [12, 64, 10], [10, 65, 10]])),
             vec![[9, 64, 11]],
             "the cell beyond the edge and the one above the box are not reached"
         );
         let edge = Boat::new(1, "oak".into(), Vec3::new(11.3125, 64.0, 10.5), 0.0);
-        assert!(powder_snow_cells(edge.bounds(), snow(&[[12, 64, 10]])).is_empty());
+        assert!(reached_cells(edge.bounds(), snow(&[[12, 64, 10]])).is_empty());
         // x, y, z order.
-        let all = powder_snow_cells(b.bounds(), |_| true);
+        let all = reached_cells(b.bounds(), |_| true);
         assert_eq!(all.len(), 9);
         assert_eq!((all[0], all[8]), ([9, 64, 9], [11, 64, 11]));
     }
@@ -2222,4 +2270,129 @@ pub(super) fn fall_reset(
         moved,
     );
     if hit { 0.0 } else { fall }
+}
+
+#[cfg(test)]
+mod cobweb_tests {
+    use super::super::native_machines::tests::server_game;
+    use super::Boat;
+    use horizon_client::chunk::Chunk;
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    /// `AbstractBoat.tick`'s `applyEffectsFromBlocks` calls `WebBlock.entityInside`, which
+    /// makes the boat stuck: its next move goes a quarter of the speed across and a
+    /// twentieth down, its velocity is spent and its fall is reset. A boat outside the web
+    /// moves as it did and keeps falling.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_cobweb_slows_a_boat_and_resets_its_fall() {
+        let mut game = server_game();
+        let web = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:cobweb")
+            .unwrap();
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.world.set(8, 64, 8, web).unwrap();
+        let boat = |x: f64| {
+            let mut b = Boat::new(1, Arc::from("oak"), Vec3::new(x, 64.0, 8.5), 0.0);
+            b.velocity = Vec3::new(1.0, 0.0, 0.0);
+            b.fall_distance = 5.0;
+            b
+        };
+        let (mut in_web, mut outside) = (boat(8.5), boat(12.5));
+        // The tick in the web sets the multiplier and resets the fall.
+        in_web = game.tick_boat(in_web, false);
+        outside = game.tick_boat(outside, false);
+        let (web_fall, free_fall) = (in_web.fall_distance, outside.fall_distance);
+        // The next move spends the multiplier.
+        let (web_from, free_from) = (in_web.position, outside.position);
+        in_web = game.tick_boat(in_web, false);
+        outside = game.tick_boat(outside, false);
+        let (web_moved, free_moved) = (
+            in_web.position.subtract(web_from),
+            outside.position.subtract(free_from),
+        );
+        assert!(
+            free_moved.x > 0.5,
+            "the boat outside the web moves: {free_moved:?}"
+        );
+        assert_eq!(
+            web_moved.x,
+            free_moved.x * 0.25,
+            "a quarter of the speed across"
+        );
+        assert_eq!(web_moved.z, 0.0);
+        assert!(
+            (web_moved.y - free_moved.y * f64::from(0.05_f32)).abs() < 1e-12,
+            "a twentieth down: {} against {}",
+            web_moved.y,
+            free_moved.y
+        );
+        assert_eq!(
+            in_web.velocity,
+            Vec3::ZERO,
+            "the multiplier and velocity are spent"
+        );
+        assert_eq!(web_fall, 0.0, "makeStuckInBlock resets the fall");
+        assert!(
+            free_fall > 5.0,
+            "a boat outside the web keeps falling: {free_fall}"
+        );
+    }
+
+    /// A boat whose box reaches a cobweb and, after the move, powder snow takes
+    /// the multiplier of the block vanilla's traversal reaches last: the one
+    /// after the move, not the one it leaves.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_boat_leaving_a_cobweb_for_powder_snow_takes_the_powder_snow() {
+        let mut game = server_game();
+        let (web, snow) = {
+            let registry = &game.pack.assets.registry;
+            (
+                registry.default_state("minecraft:cobweb").unwrap(),
+                registry.default_state("minecraft:powder_snow").unwrap(),
+            )
+        };
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.world.set(8, 64, 8, web).unwrap();
+        game.world.set(10, 64, 8, snow).unwrap();
+        let mut boat = Boat::new(1, Arc::from("oak"), Vec3::new(8.5, 64.0, 8.5), 0.0);
+        // Far enough in one move to leave the cobweb's cell and reach the snow's.
+        boat.velocity = Vec3::new(2.0, 0.0, 0.0);
+        boat = game.tick_boat(boat, false);
+        // The same boat without the stored multiplier: the next move is the full one.
+        let mut free = boat.clone();
+        free.stuck = Vec3::ZERO;
+        let (from, free_from) = (boat.position, free.position);
+        boat = game.tick_boat(boat, false);
+        free = game.tick_boat(free, false);
+        let (moved, free_moved) = (
+            boat.position.subtract(from),
+            free.position.subtract(free_from),
+        );
+        assert!(
+            free_moved.x > 1.0,
+            "the boat outside the blocks moves: {free_moved:?}"
+        );
+        assert!(
+            (moved.x - free_moved.x * f64::from(0.9_f32)).abs() < 1e-12,
+            "powder snow's across multiplier: {} against {}",
+            moved.x,
+            free_moved.x
+        );
+        assert!(
+            (moved.y - free_moved.y * 1.5).abs() < 1e-12,
+            "powder snow's down multiplier: {} against {}",
+            moved.y,
+            free_moved.y
+        );
+    }
 }

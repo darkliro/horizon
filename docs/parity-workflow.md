@@ -131,6 +131,11 @@ The LAN checks open and fill machines through the guest's inventory packets, obs
 powered dispenser's projectile on both clients, and open a chest to activate a sculk sensor
 and shrieker. They supplement the deterministic component comparisons.
 
+A new `command_exec` group goes into a file of its own under `tools/command_exec_groups/`: a module
+with `GROUP` (its name) and `cases(cmd, setup)` (its ops). The corpus finds it by file name, so two
+pull requests that each add a group don't touch the same lines (#16833). Most existing groups are
+still functions in `tools/command_exec_corpus.py`.
+
 ### Randoms that repeat
 
 Vanilla seeds every unseeded random (`RandomSource.create()`: each entity's own, the level's, a raid's...) from `RandomSupport.generateUniqueSeed`, a shared uniquifier XORed with `System.nanoTime()`, and numbers entities from `ServerLevel.ENTITY_COUNTER`; Horizon ports both (`random_source::unique_seed`, `Game.next_entity`). A command script can make what they decide comparable exactly: a dropped item's position, primed TNT's kick, a dispensed item's motion, which tick of four a resting item moves on.
@@ -161,7 +166,7 @@ python3 tools/parity_fuzz.py --replay scenarios.json                            
 ## Reading vanilla
 
 Game jars, decompiled sources and reports live in the gitignored `.local/`, rebuilt from your own copy of the game;
-nothing of Mojang's is committed or downloaded by the tools ([README](../README.md#build-from-source)):
+nothing of Mojang's is committed or downloaded by the tools ([README](native-client.md#run-from-a-checkout)):
 
 ```sh
 python3 tools/lab.py prepare --server-jar ~/Downloads/server.jar   # checks the pinned jars (research-lock.json)

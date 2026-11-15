@@ -84,6 +84,7 @@ fn click_sign(
             70.5,
             0.5 + 0.5 * f64::from(face[2]),
         ],
+        inside: false,
     };
     crate::game::sculk::TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
     // The player caused it (`GameEvent.Context.of(player, state)`).

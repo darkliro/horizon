@@ -3,7 +3,9 @@
 //! `hurtServer` (take the item out, then break the frame) and
 //! `ItemFrameRenderer` (the frame model and the item at a 45 degree step).
 use super::{Game, Hit, InteractTarget};
-use horizon_assets::{bake::bake_model, model::CuboidModel, resolve::ModelLibrary};
+use horizon_assets::{
+    bake::bake_model, item_model::OwnerState, model::CuboidModel, resolve::ModelLibrary,
+};
 use horizon_client::{entities::ItemFrame, items::ItemStack, mesher::Vertex};
 use horizon_core::{
     geometry::{Aabb, Vec3},
@@ -87,6 +89,41 @@ fn sound(f: &ItemFrame, what: &str) -> String {
 fn center(f: &ItemFrame) -> [f64; 3] {
     let (lo, hi) = f.bounds();
     std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0)
+}
+/// A frame's item, waiting for its model: the frames' borrow of `self` ends
+/// before `resolve_item` reads the pack.
+struct FramedItem {
+    stack: ItemStack,
+    id: u32,
+    matrix: glam::Mat4,
+    light: u8,
+    cull: bool,
+    kind: &'static str,
+    owner: OwnerState,
+}
+/// `ItemFrameRenderer.extractRenderState`'s `ItemOwner` (`updateForNonLiving`
+/// with the frame entity): `ItemFrame.position` and
+/// `ItemFrame.getVisualRotationYInDegrees`.
+fn frame_owner(f: &ItemFrame) -> OwnerState {
+    super::item_draw::owner_at(center(f), visual_rotation_y_degrees(f), f.kind())
+}
+/// `ItemFrame.getVisualRotationYInDegrees`: the frame's own yaw, as an item
+/// model's owner reads it (a framed compass's needle turns with it).
+fn visual_rotation_y_degrees(f: &ItemFrame) -> f32 {
+    // `Direction.get2DDataValue` of a wall frame, and the axis direction's
+    // step for the two flat ones.
+    let s = f.step();
+    let (two_d, correction) = match (s[0], s[1], s[2]) {
+        (0, 0, 1) => (0, 0),
+        (-1, 0, 0) => (1, 0),
+        (0, 0, -1) => (2, 0),
+        (1, 0, 0) => (3, 0),
+        (0, y, _) => (-1, 90 * y),
+        _ => (0, 0),
+    };
+    crate::camera::wrap_degrees(
+        180.0 + (two_d * 90) as f32 + f32::from(f.rotation) * 45.0 + correction as f32,
+    )
 }
 impl Game<'_> {
     /// `ItemFrame.survives` (not fixed): no collision, a solid block behind
@@ -184,7 +221,7 @@ impl Game<'_> {
             check_interval: 0,
             // `applyComponentsFromItemStack` sets `CUSTOM_NAME`.
             custom_name: stack.data().and_then(|d| d.custom_name.clone()),
-            random: horizon_client::random_source::entity(),
+            random: horizon_core::random::EntityRandom::own(horizon_client::random_source::entity()),
         };
         // `EntityType.createDefaultStackConfig`: the item's `custom_data`, then its
         // `entity_data` merged over the frame (`TypedEntityData.loadInto`), before
@@ -339,6 +376,12 @@ impl Game<'_> {
         };
         if !self.before_block(d) || self.mob_hit().is_some_and(|m| m.1 < d) {
             return false;
+        }
+        // BlockAttachedEntity.skipAttackInteraction: `mayInteract` refuses the
+        // hit before the frame is asked, fixed or not.
+        let at = self.item_frames[i].pos;
+        if !self.may_interact_at(BlockPos::new(at[0], at[1], at[2])) {
+            return true;
         }
         if self.item_frames[i].fixed {
             // A fixed frame refuses the hit of a player who isn't in creative
@@ -589,11 +632,15 @@ impl Game<'_> {
         // Each with its frame's type: a pack tells a glow frame and what it holds apart by its
         // `entityId` (`glow_item_frame` in entity.properties), the item drawn within its frame.
         let mut maps: Vec<(i32, glam::Mat4, u32, bool, &'static str)> = Vec::new();
-        let mut items: Vec<(ItemStack, u32, glam::Mat4, u8, bool, &'static str)> = Vec::new();
+        let mut items: Vec<FramedItem> = Vec::new();
         // ItemFrame.shouldRenderAtSqrDistance: 1024 blocks at a view scale
         // of 1.
         let range = 16.0 * 64.0 * self.view_scale();
         for f in &self.item_frames {
+            // LevelExtractor: the camera entity is not drawn from its own eyes.
+            if self.hides_as_camera(f.id) {
+                continue;
+            }
             let entity_start = out.len();
             self.mark_entity(entity_start, f.kind());
             let map = f.item.as_ref().and_then(super::maps::map_id);
@@ -610,10 +657,10 @@ impl Game<'_> {
                     }
                 }
             }
-            if !self.entity_in_view(camera, (lo + hi) / 2.0, range, lo, hi) {
+            let Some(sight) = self.entity_sight(camera, (lo + hi) / 2.0, range, lo, hi) else {
                 continue;
-            }
-            let culling = self.entity_cull_decision(f, 1.0);
+            };
+            let culling = self.sighted_decision(sight, || self.entity_cull_decision(f, 1.0));
             if culling.hides_entity() {
                 continue;
             }
@@ -698,14 +745,19 @@ impl Game<'_> {
                     );
                 }
             }
-            // HDR output: a glow frame shines softly (entity.wgsl fs_hdr_mark); the item in it
+            // HDR output: a glow frame shines softly (entity.wgsl hdr_entity_mark); the item in it
             // is only lit, as vanilla draws it.
             if f.glow {
                 for v in &mut out[frame_start..] {
                     v.layer |= u32::from(horizon_client::mesher::INCANDESCENT) << 16;
                 }
             }
-            self.finish_entity_occlusion(culling, f, out, entity_start);
+            self.finish_lit_entity(culling, f, out, entity_start);
+            // The frame; what it shows is an item or a map, Horizon's to light: not the layer's.
+            self.lit_entity(entity_start..out.len());
+            if culling.rays_only() {
+                continue;
+            }
             let cull_contents = culling.checks_vertices();
             if let Some(stack) = &f.item {
                 let mut canceled = false;
@@ -741,38 +793,41 @@ impl Game<'_> {
                 * glam::DMat4::from_translation(glam::DVec3::new(0.0, 0.0, depth))
                 * glam::DMat4::from_rotation_z((f64::from(f.rotation) * 45.0).to_radians())
                 * glam::DMat4::from_scale(glam::DVec3::splat(0.5));
-            items.push((
+            items.push(FramedItem {
                 stack,
-                f.id,
-                m.as_mat4(),
-                item_light,
-                cull_contents,
-                f.kind(),
-            ));
+                id: f.id,
+                matrix: m.as_mat4(),
+                light: item_light,
+                cull: cull_contents,
+                kind: f.kind(),
+                // `ItemFrameRenderer.extractRenderState` hands the frame entity
+                // itself to the item model (`updateForNonLiving`), so a framed
+                // compass's needle reads the frame's position and yaw.
+                owner: frame_owner(f),
+            });
         }
         // `extractRenderState`: FIXED, seeded by the frame entity.
         let skinning = self.skinning();
         let lights = horizon_client::block_entity_render::diffuse_lights(self.nether_lighting());
-        for (stack, id, m, light, cull, kind) in items {
+        for item in items {
             let entity_start = out.len();
-            self.mark_entity(entity_start, kind);
-            self.mark_motion(entity_start, Self::MOTION_FRAME_ITEM | u64::from(id));
-            let owner = super::item_draw::owner_at([0.0; 3], 0.0, "minecraft:item_frame");
+            self.mark_entity(entity_start, item.kind);
+            self.mark_motion(entity_start, Self::MOTION_FRAME_ITEM | u64::from(item.id));
             let state = self.resolve_item(
-                &stack,
+                &item.stack,
                 horizon_assets::item_model::DisplayContext::Fixed,
-                Some(&owner),
-                id as i32,
+                Some(&item.owner),
+                item.id as i32,
             );
-            let light = horizon_client::block_entity_render::vertex_light(light);
+            let light = horizon_client::block_entity_render::vertex_light(item.light);
             // Posed on the GPU when every layer can be.
             let skinned = skinning
-                .then(|| self.submit_item_skinned(&state, &[m], light, lights))
+                .then(|| self.submit_item_skinned(&state, &[item.matrix], light, lights))
                 .flatten();
             if skinned.is_none() {
-                self.submit_item_world(&state, m, light, out);
+                self.submit_item_world(&state, item.matrix, light, out);
             }
-            if cull {
+            if item.cull {
                 self.cull_skinned(out, entity_start, skinned);
             }
         }
@@ -833,7 +888,9 @@ mod map_limit_tests {
             invisible: false,
             check_interval: 0,
             custom_name: None,
-            random: horizon_core::random::LegacyRandom::new(0),
+            random: horizon_core::random::EntityRandom::own(
+                horizon_core::random::LegacyRandom::new(0),
+            ),
         }
     }
     /// A map whose `count` frame markers all count toward the limit.
@@ -907,7 +964,9 @@ mod game_event_tests {
             invisible: false,
             check_interval: 0,
             custom_name: None,
-            random: horizon_core::random::LegacyRandom::new(0),
+            random: horizon_core::random::EntityRandom::own(
+                horizon_core::random::LegacyRandom::new(0),
+            ),
         }
     }
     fn at(id: u32) -> Option<InteractTarget> {
@@ -1005,3 +1064,7 @@ mod game_event_tests {
         assert_eq!(posted(), [("minecraft:block_change", center, None)]);
     }
 }
+
+#[cfg(test)]
+#[path = "lodestone_compass_tests.rs"]
+mod lodestone_compass_tests;

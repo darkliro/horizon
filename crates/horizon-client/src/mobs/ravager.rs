@@ -49,6 +49,10 @@ pub fn register(m: &mut Mob) {
 pub fn immobile(m: &Mob) -> bool {
     m.extra.counter > 0 || m.extra.counter2 > 0 || m.extra.anim_ticks > 0
 }
+/// `Ravager.hasLineOfSight`: false while stunned or roaring (not while biting, unlike [`immobile`]).
+pub fn blind(m: &Mob) -> bool {
+    m.species() == Species::Ravager && (m.extra.counter2 > 0 || m.extra.anim_ticks > 0)
+}
 /// `Ravager.doHurtTarget`: the bite animation (entity event 4 for clients).
 pub fn on_attack(m: &mut Mob, events: &mut Vec<MobEvent>) {
     m.extra.counter = 10;
@@ -114,8 +118,10 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
             for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
                 for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
-                    let name = w.block_name(x, y, z);
-                    if name.ends_with("_leaves") {
+                    // `block instanceof LeavesBlock`: the class chain, which a
+                    // content mod's block copies from its template.
+                    let facts = w.facts.get(w.world.block(x, y, z));
+                    if facts.has_class("LeavesBlock") {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],
                             drop: true,
@@ -140,15 +146,10 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
             for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
                 for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
-                    if matches!(
-                        w.block_name(x, y, z),
-                        "minecraft:wheat"
-                            | "minecraft:carrots"
-                            | "minecraft:potatoes"
-                            | "minecraft:beetroots"
-                            | "minecraft:torchflower_crop"
-                            | "minecraft:pitcher_crop"
-                    ) {
+                    // `state.getBlock() instanceof CropBlock`: the class chain,
+                    // so a mod crop that copies `wheat` breaks too.
+                    let facts = w.facts.get(w.world.block(x, y, z));
+                    if facts.has_class("CropBlock") || facts.has_class("PitcherCropBlock") {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],
                             drop: true,
@@ -332,4 +333,75 @@ pub fn anim(m: &Mob, s: &State, p: &mut Poses) {
     p.xrot("left_hind_leg", (pos * 0.6662 + PI).mcos() * leg);
     p.xrot("right_front_leg", (pos * 0.6662 + PI).mcos() * leg);
     p.xrot("left_front_leg", (pos * 0.6662).mcos() * leg);
+}
+
+#[cfg(test)]
+#[path = "ravager_crush_tests.rs"]
+mod ravager_crush_tests;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mobs::world::{test_player, with_built_test_world};
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    /// `Ravager.hasLineOfSight` (`Sensing.hasLineOfSight` calls it): a stunned or roaring ravager sees nobody,
+    /// a biting one still sees. The player stands ten blocks away on a flat floor with nothing between.
+    #[test]
+    fn a_stunned_or_roaring_ravager_does_not_see_the_player() {
+        let build = |world: &mut crate::world::World,
+                     registry: &horizon_world::registry::BlockRegistry| {
+            for cx in -1..1 {
+                for cz in -1..1 {
+                    world
+                        .chunks
+                        .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
+                }
+            }
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in -4..5 {
+                for z in -4..15 {
+                    world.set(x, 64, z, stone).unwrap();
+                }
+            }
+        };
+        let ran = with_built_test_world(&[], build, |w, types| {
+            let mut world = w.clone();
+            world.player = Some(test_player(Vec3::new(0.5, 65.0, 10.5)));
+            // (the mob's state, whether it sees the player), each on a new mob: sight is cached per tick.
+            let sees = |stunned: i32, roar: i32, bite: i32| {
+                let mut m = Mob::new(
+                    1,
+                    Arc::new(types.types["minecraft:ravager"].clone()),
+                    Vec3::new(0.5, 65.0, 0.5),
+                    0.0,
+                );
+                (m.extra.counter2, m.extra.anim_ticks, m.extra.counter) = (stunned, roar, bite);
+                m.sees(&world, Who::Player)
+            };
+            assert!(sees(0, 0, 0), "a plain ravager sees a player in the open");
+            assert!(
+                sees(0, 0, 10),
+                "a biting ravager still sees (attackTick is not in hasLineOfSight)"
+            );
+            assert!(!sees(40, 0, 0), "a stunned ravager sees nobody");
+            assert!(!sees(0, 20, 0), "a roaring ravager sees nobody");
+            assert!(
+                !blind_of_other_species(&world, types),
+                "only a ravager is blind"
+            );
+        });
+        let _ = ran;
+    }
+
+    fn blind_of_other_species(world: &MobWorld, types: &crate::mobs::MobTypes) -> bool {
+        let mut m = Mob::new(
+            2,
+            Arc::new(types.types["minecraft:pillager"].clone()),
+            Vec3::new(0.5, 65.0, 0.5),
+            0.0,
+        );
+        (m.extra.counter2, m.extra.anim_ticks) = (40, 20);
+        !m.sees(world, Who::Player)
+    }
 }

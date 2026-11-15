@@ -241,10 +241,6 @@
   "Peak Brightness": "Högsta ljusstyrka",
   "Black Level": "Svart nivå",
   "UI Brightness": "UI-ljusstyrka",
-  "HDR Lighting": "HDR-belysning",
-  "Light sources, the sun and sunlight shine past white. Off: just as SDR.": "Ljuskällor, solen och solljus lyser förbi vitt. Av: precis som SDR.",
-  "Smooth Gradients": "Mjuka gradienter",
-  "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-bitars bildruta: mörka himlar och skuggor bandar inte. Lite mer VRAM. Nästa start.",
   "Battery Mode": "Batteriläge",
   "Graphics API": "Grafik API",
   "Translucent Batching": "Genomskinlig batchning",
@@ -305,7 +301,6 @@
   "Waits for the display's refresh: no tearing, a little latency.": "Väntar på skärmens uppdatering: ingen rivning, lite latens.",
   "Size of menus and the HUD.": "Storlek på menyer och HUD.",
   "Sets the options below together. Changing one makes it Custom.": "Ställer in alternativen nedan tillsammans. Att ändra en gör det Custom.",
-  "Lava, fire and sunlight shine brighter than white. Needs an HDR display.": "Lava, eld och solljus lyser starkare än vitt. Behöver en HDR-skärm.",
   "Lifts shadows onto your display's darkest black. 0: true black, no lift.": "Lyfter skuggor till skärmens mörkaste svart. 0: äkta svart, ingen lyftning.",
   "How bright highlights get. Auto: the peak your system reports.": "Hur ljusa höjdpunkter blir. Auto: den topp som ditt system rapporterar.",
   "How bright white looks in the world. Auto: your desktop's white.": "Hur ljust vitt ser ut i världen. Auto: skrivbordets vitt.",
@@ -1045,5 +1040,11 @@
   "horizon.studio.topbar.add_marker": "Lägg till markör",
   "horizon.studio.topbar.clear_keyframes": "🗑 Rensa nyckelbilder",
   "horizon.studio.topbar.timeline_hud": "⏱ Tidslinje",
-  "horizon.studio.topbar.split_scene": "Dela scen"
+  "horizon.studio.topbar.split_scene": "Dela scen",
+  "horizon.options.block_vibration": "Haptisk återkoppling från Bedrock",
+  "horizon.options.split_vibration": "Vibration när en stapel delas",
+  "horizon.options.impulse_triggers": "Impulstriggers",
+  "A tick when you break a block, as in Bedrock.": "När du bryter ett block vibrerar det, som i Bedrock.",
+  "A short buzz when you split a stack, as in Bedrock.": "En kort vibration när du delar en stapel, som i Bedrock.",
+  "An Xbox One controller's triggers buzz with its handles.": "En Xbox One-kontrolls triggers vibrerar tillsammans med handtagen."
 }

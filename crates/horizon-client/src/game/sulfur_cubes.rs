@@ -337,6 +337,32 @@ impl Game<'_> {
             }
         }
     }
+    /// `AbstractCubeMob.remove`'s `convertTo(getType(), SPLIT_ON_DEATH, TRIGGERED)` for its `i`th
+    /// child: a new cube of the parent's type (`EntityType.create`, no spawn yaw drawn) half the
+    /// parent's width apart (`(i % 2 - 0.5) * width / 2`, in floats), half a block up, carrying
+    /// `ConversionType.convertCommon`'s effects and flags.
+    pub(super) fn spawn_split_cube(&mut self, from: &Mob, i: i32) -> Option<u32> {
+        let offset = from.width() / 2.0;
+        let xd = ((i % 2) as f32 - 0.5) * offset;
+        let zd = ((i / 2) as f32 - 0.5) * offset;
+        let at = [
+            from.position.x + f64::from(xd),
+            from.position.y + 0.5,
+            from.position.z + f64::from(zd),
+        ];
+        let id = self.spawn_mob_internal(
+            &from.kind.id,
+            at,
+            from.persistent,
+            false,
+            false,
+            false,
+            super::creatures::SpawnYaw::Fixed(0.0),
+        )?;
+        let c = self.mobs.iter_mut().find(|c| c.id == id)?;
+        horizon_client::mobs::conversion::common(from, c, false);
+        Some(id)
+    }
     /// `AbstractCubeMob.remove`: a dead adult splits into two babies (none
     /// when it was primed).
     pub(super) fn split_sulfur_cube(&mut self, m: &Mob) {
@@ -344,25 +370,32 @@ impl Game<'_> {
         if size <= 1 {
             return;
         }
-        let offset = f64::from(m.width()) / 2.0;
+        // Each child's yaw comes from the dying cube's own random (its copy: the body goes now).
+        let mut own = m.random.clone();
         for i in 0..sulfur_cube::split_count(m) {
-            let xd = (f64::from(i % 2) - 0.5) * offset;
-            let zd = (f64::from(i / 2) - 0.5) * offset;
-            let at = [m.position.x + xd, m.position.y + 0.5, m.position.z + zd];
-            let yaw = self.world.random.next_float() * 360.0;
-            if let Some(id) = self.spawn_mob_raw(&m.kind.id, at, m.persistent)
+            if let Some(id) = self.spawn_split_cube(m, i)
                 && let Some(c) = self.mobs.iter_mut().find(|c| c.id == id)
             {
                 c.extra.age = -24000;
                 sulfur_cube::set_size(c, size / 2, true);
-                c.yaw = yaw;
-                c.body_yaw = yaw;
-                c.head_yaw = yaw;
+                snap_split_yaw(c, own.next_float() * 360.0);
             }
         }
     }
 }
 
+/// `setUpSplitCube`'s `snapTo(.., yaw, 0)` for a split cube's child: it faces `yaw` from its
+/// first frame.
+pub(super) fn snap_split_yaw(c: &mut Mob, yaw: f32) {
+    c.yaw = yaw;
+    c.previous_yaw = yaw;
+    // A client takes the body's from it (`LivingEntity.recreateFromPacket`); a cube has no head
+    // of its own to turn.
+    c.body_yaw = yaw;
+    c.previous_body_yaw = yaw;
+    c.head_yaw = yaw;
+    c.previous_head_yaw = yaw;
+}
 #[cfg(test)]
 mod tests {
     use super::*;

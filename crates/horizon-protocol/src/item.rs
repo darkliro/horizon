@@ -399,11 +399,15 @@ impl Component {
                         .collect::<Result<_>>()?,
                 )
             }
+            // An older client's enchantments in its own numbering are read as the pinned ones (ids::synced_up).
             ENCHANTMENTS | STORED_ENCHANTMENTS => {
                 let n = r.count(r.remaining())?;
                 Self::Enchantments(
                     (0..n)
-                        .map(|_| Ok((r.varint()?, r.varint()?)))
+                        .map(|_| {
+                            let e = ids::synced_up("minecraft:enchantment", r.varint()?);
+                            Ok((e, r.varint()?))
+                        })
                         .collect::<Result<_>>()?,
                 )
             }
@@ -529,9 +533,10 @@ impl Component {
                 let material = TrimHolder::read(r, TrimMaterial::read)?;
                 let pattern = TrimHolder::read(r, TrimPattern::read)?;
                 match (material, pattern) {
-                    (TrimHolder::Id(material), TrimHolder::Id(pattern)) => {
-                        Self::Trim { material, pattern }
-                    }
+                    (TrimHolder::Id(material), TrimHolder::Id(pattern)) => Self::Trim {
+                        material: ids::synced_up("minecraft:trim_material", material),
+                        pattern: ids::synced_up("minecraft:trim_pattern", pattern),
+                    },
                     (material, pattern) => Self::TrimDirect { material, pattern },
                 }
             }
@@ -555,7 +560,9 @@ impl Component {
                 let bytes = r.since(start);
                 let mut ids = Reader::new(bytes);
                 match ids.varint() {
-                    Ok(id @ 1..) if ids.remaining() == 0 => Self::PaintingVariant(id - 1),
+                    Ok(id @ 1..) if ids.remaining() == 0 => {
+                        Self::PaintingVariant(ids::synced_up("minecraft:painting_variant", id - 1))
+                    }
                     _ => Self::Raw(bytes.to_vec()),
                 }
             }
@@ -592,7 +599,10 @@ impl Component {
             if pattern < 1 {
                 return None;
             }
-            layers.push((pattern - 1, color));
+            layers.push((
+                ids::synced_up("minecraft:banner_pattern", pattern - 1),
+                color,
+            ));
         }
         (r.remaining() == 0).then_some(layers)
     }
@@ -608,23 +618,40 @@ impl Component {
                 };
                 w.bytes(legacy.as_deref().unwrap_or(bytes));
             }
-            Self::BannerPatterns(layers) => {
+            // Nothing renumbered (a 26.3 client): written as they are, as the enchantments below.
+            Self::BannerPatterns(layers) if !ids::synced_set() => {
                 w.varint(layers.len() as i32);
                 for (pattern, color) in layers {
                     w.varint(pattern + 1);
                     w.varint(*color);
                 }
             }
+            Self::BannerPatterns(layers) => {
+                // A pattern an older client lacks is left out (ids::synced_down).
+                let layers: Vec<(i32, i32)> = layers
+                    .iter()
+                    .filter_map(|(p, c)| {
+                        ids::synced_down("minecraft:banner_pattern", *p).map(|p| (p, *c))
+                    })
+                    .collect();
+                w.varint(layers.len() as i32);
+                for (pattern, color) in layers {
+                    w.varint(pattern + 1);
+                    w.varint(color);
+                }
+            }
             Self::Trim { material, pattern } => {
-                w.varint(material + 1);
-                w.varint(pattern + 1);
+                w.varint(ids::synced_down_or_first("minecraft:trim_material", *material) + 1);
+                w.varint(ids::synced_down_or_first("minecraft:trim_pattern", *pattern) + 1);
             }
             Self::TrimDirect { material, pattern } => {
                 material.write(w, TrimMaterial::write);
                 pattern.write(w, TrimPattern::write);
             }
             Self::Instrument(id) => w.varint(id + 1),
-            Self::PaintingVariant(id) => w.varint(id + 1),
+            Self::PaintingVariant(id) => {
+                w.varint(ids::synced_down_or_first("minecraft:painting_variant", *id) + 1)
+            }
             Self::Int(v) if kind == component::DYED_COLOR => w.i32(*v),
             Self::Int(v) => w.varint(*v),
             Self::Unit => {}
@@ -634,6 +661,26 @@ impl Component {
             Self::Lore(lines) => {
                 w.varint(lines.len() as i32);
                 lines.iter().for_each(|l| w.nbt(l));
+            }
+            Self::Enchantments(list)
+                if ids::synced_set()
+                    && matches!(
+                        kind,
+                        component::ENCHANTMENTS | component::STORED_ENCHANTMENTS
+                    ) =>
+            {
+                // An enchantment an older client lacks is left out (ids::synced_down).
+                let list: Vec<(i32, i32)> = list
+                    .iter()
+                    .filter_map(|(e, l)| {
+                        ids::synced_down("minecraft:enchantment", *e).map(|e| (e, *l))
+                    })
+                    .collect();
+                w.varint(list.len() as i32);
+                for (e, level) in list {
+                    w.varint(e);
+                    w.varint(level);
+                }
             }
             Self::Enchantments(list) | Self::StewEffects(list) => {
                 w.varint(list.len() as i32);
@@ -1329,12 +1376,15 @@ impl Codec<Option<Stack>> for DelimitedSlot {
             v1_21_4::write_stack(v.as_ref(), w);
             return;
         }
-        let Some(s) = v else {
+        // What the other side lacks (-1) is left out, as `write_slot` does: an item as an empty slot,
+        // a component dropped from the patch.
+        let item = v.as_ref().map_or(-1, |s| ids::item(s.item));
+        let Some(s) = v.as_ref().filter(|_| item >= 0) else {
             w.varint(0);
             return;
         };
         w.varint(s.count);
-        w.varint(ids::item(s.item));
+        w.varint(item);
         // The patch as read holds the pinned version's component ids: written again from the values when
         // they are being renumbered.
         if let Some(patch) = &s.wire.0
@@ -1343,15 +1393,18 @@ impl Codec<Option<Stack>> for DelimitedSlot {
             w.bytes(patch);
             return;
         }
-        w.varint(s.added.len() as i32);
-        w.varint(s.removed.len() as i32);
-        for (kind, c) in &s.added {
+        let has = |kind: i32| ids::component(kind) >= 0;
+        let added: Vec<_> = s.added.iter().filter(|(k, _)| has(*k)).collect();
+        let removed: Vec<_> = s.removed.iter().filter(|k| has(**k)).collect();
+        w.varint(added.len() as i32);
+        w.varint(removed.len() as i32);
+        for (kind, c) in added {
             w.varint(ids::component(*kind));
             let mut value = Writer::new();
             write_value(*kind, c, &mut value);
             w.byte_array(&value.data);
         }
-        for kind in &s.removed {
+        for kind in removed {
             w.varint(ids::component(*kind));
         }
     }
@@ -1417,14 +1470,17 @@ impl Codec<Option<Hashed>> for HashedSlot {
         if !r.bool()? {
             return Ok(None);
         }
-        let item = r.varint()?;
+        // An older client's own item and component ids, as every other stack reader maps them.
+        let item = ids::item(r.varint()?);
         let count = r.varint()?;
         let n = r.count(256)?;
         let added = (0..n)
-            .map(|_| Ok((r.varint()?, r.i32()?)))
+            .map(|_| Ok((ids::component(r.varint()?), r.i32()?)))
             .collect::<Result<_>>()?;
         let n = r.count(256)?;
-        let removed = (0..n).map(|_| r.varint()).collect::<Result<_>>()?;
+        let removed = (0..n)
+            .map(|_| r.varint().map(ids::component))
+            .collect::<Result<_>>()?;
         Ok(Some(Hashed {
             item,
             count,
@@ -1433,19 +1489,35 @@ impl Codec<Option<Hashed>> for HashedSlot {
         }))
     }
     fn write(v: &Option<Hashed>, w: &mut Writer) {
-        w.bool(v.is_some());
-        if let Some(h) = v {
-            w.varint(ids::item(h.item));
-            w.varint(h.count);
-            w.varint(h.added.len() as i32);
-            for (k, hash) in &h.added {
-                w.varint(ids::component(*k));
-                w.i32(*hash);
-            }
-            w.varint(h.removed.len() as i32);
-            for k in &h.removed {
-                w.varint(ids::component(*k));
-            }
+        // As in `DelimitedSlot::write`: an item the other side lacks as no stack, its components left out.
+        let item = v.as_ref().map_or(-1, |h| ids::item(h.item));
+        let Some(h) = v.as_ref().filter(|_| item >= 0) else {
+            w.bool(false);
+            return;
+        };
+        w.bool(true);
+        w.varint(item);
+        w.varint(h.count);
+        let added: Vec<(i32, i32)> = h
+            .added
+            .iter()
+            .map(|(k, hash)| (ids::component(*k), *hash))
+            .filter(|(k, _)| *k >= 0)
+            .collect();
+        w.varint(added.len() as i32);
+        for (k, hash) in added {
+            w.varint(k);
+            w.i32(hash);
+        }
+        let removed: Vec<i32> = h
+            .removed
+            .iter()
+            .map(|k| ids::component(*k))
+            .filter(|k| *k >= 0)
+            .collect();
+        w.varint(removed.len() as i32);
+        for k in removed {
+            w.varint(k);
         }
     }
 }
@@ -1453,6 +1525,51 @@ impl Codec<Option<Hashed>> for HashedSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hashed_stacks_go_to_an_older_side_and_back_in_its_ids() {
+        use crate::adapter::{ServerVersion, ids::Way};
+        let old = ServerVersion::V1_21_5.ids().unwrap();
+        // An item whose id moved since 1.21.5.
+        let moved = {
+            let _down = ids::renumbering(old, Way::Down);
+            (1..2000)
+                .find(|&id| ids::item(id) >= 0 && ids::item(id) != id)
+                .unwrap()
+        };
+        let hashed = Some(Hashed {
+            item: moved,
+            count: 3,
+            added: Vec::new(),
+            removed: Vec::new(),
+        });
+        let mut w = Writer::new();
+        {
+            let _down = ids::renumbering(old, Way::Down);
+            HashedSlot::write(&hashed, &mut w);
+        }
+        let _up = ids::renumbering(old, Way::Up);
+        assert_eq!(HashedSlot::read(&mut Reader::new(&w.data)).unwrap(), hashed);
+    }
+
+    #[test]
+    fn an_item_the_older_side_lacks_goes_as_no_stack_not_as_minus_one() {
+        use crate::adapter::{ServerVersion, ids::Way};
+        let old = ServerVersion::V1_21_5.ids().unwrap();
+        let _down = ids::renumbering(old, Way::Down);
+        let missing = (1..3000)
+            .find(|&id| ids::item(id) < 0)
+            .expect("an item 1.21.5 lacks");
+        let hashed = Some(Hashed {
+            item: missing,
+            count: 1,
+            added: Vec::new(),
+            removed: Vec::new(),
+        });
+        let mut w = Writer::new();
+        HashedSlot::write(&hashed, &mut w);
+        assert_eq!(w.data, [0]);
+    }
     use crate::text::literal;
 
     fn round<T: PartialEq + std::fmt::Debug, C: Codec<T>>(v: T) {
