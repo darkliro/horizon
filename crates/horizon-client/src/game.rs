@@ -11839,7 +11839,11 @@ impl<'a> Game<'a> {
             debug_paint: Default::default(),
             debug_refresh: Default::default(),
             gpu_utilization: 0.0,
-            gpu_culling_auto: horizon_client::autotune::GpuCullingAuto::new(),
+            gpu_culling_auto: horizon_client::autotune::GpuCullingAuto::with_integrated(
+                horizon_client::gfx::adapter()
+                    .map(|a| a.kind == "integrated")
+                    .unwrap_or(false),
+            ),
             dynamic_resolution: Default::default(),
             rendered_mobs: Default::default(),
             screen_blur_requested: Default::default(),

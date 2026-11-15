@@ -31,19 +31,15 @@ pub(super) fn observe(
         && horizon_client::graphics::gpu_culling_offer()
             .reason()
             .is_none()
+        && let Some(on) = culling.observe(cpu_ms, gpu_ms, frame_ms)
     {
-        if let Some(adapter) = horizon_client::gfx::adapter() {
-            culling.set_integrated(adapter.kind == "integrated");
-        }
-        if let Some(on) = culling.observe(cpu_ms, gpu_ms, frame_ms) {
-            log::info!(
-                "Horizon: GPU Culling Auto turns it {} ({})",
-                if on { "on" } else { "off" },
-                culling.state()
-            );
-            if r.set_gpu_culling(on).is_err() {
-                culling.reset();
-            }
+        log::info!(
+            "Horizon: GPU Culling Auto turns it {} ({})",
+            if on { "on" } else { "off" },
+            culling.state()
+        );
+        if r.set_gpu_culling(on).is_err() {
+            culling.reset();
         }
     }
     // Dynamic Resolution: gentle while a shader pack runs (its history starts over at each
