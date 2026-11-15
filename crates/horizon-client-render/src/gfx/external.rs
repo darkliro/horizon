@@ -71,15 +71,57 @@ pub struct ShadowView {
 /// (`shadow_casters`): a box must meet all of them.
 #[derive(Clone, Copy, Debug)]
 pub struct ShadowCull {
-    pub light: Frustum,
-    pub casters: Option<[Frustum; 2]>,
+    pub(crate) light: Frustum,
+    pub(crate) casters: Option<[Frustum; 2]>,
     /// `shadowDistance × shadowDistanceRenderMul`: only what lies within this many blocks of the
     /// camera along each axis, a cube around it. Our probe's Iris 1.11.7 maps keep the sections
     /// whose box, grown by `SHADOW_CASTER_MARGIN` as for the casters, meets that cube (#8464):
     /// out to its corners, and a section 1 block past its side but not one 1.5 blocks past.
-    pub reach: Option<f32>,
+    pub(crate) reach: Option<f32>,
 }
 impl ShadowCull {
+    /// Construct a shadow cull for the shadow camera's box `light`.
+    #[inline]
+    pub fn new(light: Frustum) -> Self {
+        Self {
+            light,
+            casters: None,
+            reach: None,
+        }
+    }
+
+    /// Set optional shadow casters (`[near, far]`) that can shade the view.
+    #[inline]
+    pub fn with_casters(mut self, casters: Option<[Frustum; 2]>) -> Self {
+        self.casters = casters;
+        self
+    }
+
+    /// Set the maximum reach cube distance along each axis.
+    #[inline]
+    pub fn with_reach(mut self, reach: Option<f32>) -> Self {
+        self.reach = reach;
+        self
+    }
+
+    /// The shadow camera's light frustum box.
+    #[inline]
+    pub fn light(&self) -> &Frustum {
+        &self.light
+    }
+
+    /// The casters frustums, if any.
+    #[inline]
+    pub fn casters(&self) -> Option<&[Frustum; 2]> {
+        self.casters.as_ref()
+    }
+
+    /// The reach limit in blocks along each axis, if set.
+    #[inline]
+    pub fn reach(&self) -> Option<f32> {
+        self.reach
+    }
+
     /// Whether the camera-relative box `min..max`, grown by the margin, meets (`whole`: lies
     /// within) `reach`'s cube.
     fn within_reach(&self, min: Vec3, max: Vec3, whole: bool) -> bool {
