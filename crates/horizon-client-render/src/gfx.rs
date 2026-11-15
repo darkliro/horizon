@@ -8245,23 +8245,18 @@ impl Renderer {
         shadow_visible.clear();
         if let Some(v) = &shadow_view {
             let radius = (frame.detail_distance / 16.0) as i32;
-            let light = ShadowCull {
-                light: shadow_box(v),
-                casters: v.view_casters.then(|| shadow_casters(cull_proj, v.light)),
-                reach: v.distance,
-            };
+            let light = ShadowCull::new(shadow_box(v))
+                .with_casters(v.view_casters.then(|| shadow_casters(cull_proj, v.light)))
+                .with_reach(v.distance);
             let mut boxed = std::mem::take(&mut self.shadow_boxed_scratch);
             let mut seen = std::mem::take(&mut self.shadow_seen_scratch);
             crate::spans::time("shadow visibility", || {
                 // Within the unculled distance every section, then those in the light's box.
                 if let Some(d) = v.unculled {
-                    let all = ShadowCull {
-                        light: Frustum {
-                            planes: [glam::Vec4::W; 6],
-                        },
-                        casters: None,
-                        reach: v.distance,
-                    };
+                    let all = ShadowCull::new(Frustum {
+                        planes: [glam::Vec4::W; 6],
+                    })
+                    .with_reach(v.distance);
                     let near = radius.min((d / 16.0).ceil() as i32);
                     self.sections.visible(
                         camera,
@@ -14182,13 +14177,10 @@ mod shadow_caster_tests {
     fn kept_looking(forward: Vec3, light: Vec3, min: [f32; 3]) -> bool {
         let camera = world_projection(70.0, 16.0 / 9.0, 192.0)
             * Mat4::look_to_rh(Vec3::ZERO, forward, Vec3::Y);
-        let cull = ShadowCull {
-            light: Frustum {
-                planes: [Vec4::W; 6],
-            },
-            casters: Some(shadow_casters(camera, light)),
-            reach: None,
-        };
+        let cull = ShadowCull::new(Frustum {
+            planes: [Vec4::W; 6],
+        })
+        .with_casters(Some(shadow_casters(camera, light)));
         let min = Vec3::from(min);
         cull.intersects(min, min + 16.0)
     }
@@ -14229,13 +14221,10 @@ mod shadow_caster_tests {
         let kept = |yaw: f32, column: [f32; 2]| {
             let camera =
                 world_projection(77.0, 16.0 / 9.0, 1024.0) * crate::camera::view_matrix(yaw, 0.0);
-            let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
-                casters: Some(shadow_casters(camera, Vec3::Y)),
-                reach: None,
-            };
+            let cull = ShadowCull::new(Frustum {
+                planes: [Vec4::W; 6],
+            })
+            .with_casters(Some(shadow_casters(camera, Vec3::Y)));
             let min = Vec3::new(
                 column[0] * 16.0 - 13.5,
                 64.0 - 69.62,
@@ -14264,13 +14253,10 @@ mod shadow_caster_tests {
             for &(x, z) in keys {
                 sections.insert_with_bounds((x, y, z), (), None);
             }
-            let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
-                casters: None,
-                reach: Some(reach),
-            };
+            let cull = ShadowCull::new(Frustum {
+                planes: [Vec4::W; 6],
+            })
+            .with_reach(Some(reach));
             let mut out = Vec::new();
             sections.visible(camera, 12, &cull, |_| true, |_, _| false, &mut out);
             let mut kept: Vec<_> = out.iter().map(|v| (v.key.0, v.key.2)).collect();
@@ -14309,11 +14295,7 @@ mod shadow_caster_tests {
         let all = Frustum {
             planes: [Vec4::W; 6],
         };
-        let shadow = ShadowCull {
-            light: all,
-            casters: Some(shadow_casters(up, Vec3::Y)),
-            reach: None,
-        };
+        let shadow = ShadowCull::new(all).with_casters(Some(shadow_casters(up, Vec3::Y)));
         assert_eq!(
             drawn(&|out| sections.visible(camera, 4, &shadow, |_| true, |_, _| false, out)),
             [key]
@@ -14349,11 +14331,7 @@ mod shadow_caster_tests {
                 view_casters: false,
                 depth_planes: depth,
             };
-            let cull = ShadowCull {
-                light: shadow_box(&view),
-                casters: None,
-                reach: None,
-            };
+            let cull = ShadowCull::new(shadow_box(&view));
             let min = Vec3::from(min);
             cull.intersects(min, min + 16.0)
         };
@@ -14380,13 +14358,10 @@ mod shadow_caster_tests {
         let kept = |fov: f32, yaw: f32, pitch: f32, section: [f32; 3]| {
             let camera = world_projection(fov * 1.1, 16.0 / 9.0, 1024.0)
                 * crate::camera::view_matrix(yaw, pitch);
-            let cull = ShadowCull {
-                light: Frustum {
-                    planes: [Vec4::W; 6],
-                },
-                casters: Some(shadow_casters(camera, Vec3::Y)),
-                reach: None,
-            };
+            let cull = ShadowCull::new(Frustum {
+                planes: [Vec4::W; 6],
+            })
+            .with_casters(Some(shadow_casters(camera, Vec3::Y)));
             let min = Vec3::new(
                 section[0] * 16.0 - 13.5,
                 section[1] * 16.0 - 69.62,
