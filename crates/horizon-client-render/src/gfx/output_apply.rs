@@ -5,7 +5,11 @@
 //! the snapshot says so. One that fails is never published as active, and is not tried again
 //! until the request, the capabilities or the surface change. Auto keeps HDR on through a
 //! moment's loss of the display's report ([`auto_grace`]).
-use super::{DisplayReading, DisplayWatch, Renderer, hdr, output};
+use super::{
+    DisplayReading, Renderer,
+    display_watch::{DISPLAY_POLL, DisplayWatch, flush_display_log},
+    hdr, output,
+};
 use crate::graphics::HdrMode;
 use output::{EffectiveOutput, FrameRequest, OutputCapabilities};
 use std::time::{Duration, Instant};
@@ -182,7 +186,7 @@ fn poll_display(
         return over;
     };
     if let (Some(since), Some(next)) = (since.filter(|_| over), &mut watch.polled)
-        && *next < since + AUTO_OFF_DELAY + super::DISPLAY_POLL
+        && *next < since + AUTO_OFF_DELAY + DISPLAY_POLL
     {
         *next = now;
     }
@@ -439,7 +443,7 @@ impl Renderer {
     /// reports the same. So does the end of Auto's grace (`auto_grace`), with or without a
     /// poll or an event then.
     pub fn display_changed(&mut self) -> bool {
-        super::flush_display_log();
+        flush_display_log();
         if std::mem::take(&mut self.display_fresh) {
             return true;
         }
@@ -552,13 +556,13 @@ mod tests {
         let mut watch = DisplayWatch {
             #[cfg(target_os = "linux")]
             wayland: None,
-            polled: Some(start + super::super::DISPLAY_POLL),
+            polled: Some(start + DISPLAY_POLL),
         };
         let same = reading;
         assert_eq!(watch.poll(reading, start, || unreachable!()), None);
-        let due = start + super::super::DISPLAY_POLL;
+        let due = start + DISPLAY_POLL;
         assert_eq!(watch.poll(reading, due, || same), Some(same));
-        assert_eq!(watch.polled, Some(due + super::super::DISPLAY_POLL));
+        assert_eq!(watch.polled, Some(due + DISPLAY_POLL));
         assert!(observe(&mut reading, &mut caps, same, Some(Some(ScRgb))));
         // Nothing changed at the next poll, and offscreen nothing is offered to read.
         assert!(!observe(&mut reading, &mut caps, same, Some(Some(ScRgb))));
