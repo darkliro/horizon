@@ -249,8 +249,8 @@ horizon-client game::commands::execute::execute_facing_tests::facing_wraps_and_u
 horizon-client game::commands::execute::execute_facing_tests::over_world_surface_skips_cave_air_and_void_air lib daily resources
 horizon-client game::commands::execute::passenger_relation_tests::h150_actual_registered_passengers_select_direct_live_mob_and_boat_children lib daily resources
 horizon-client game::commands::execute::terminal_fork_tests::terminal_conditions_keep_the_fork_state_and_callbacks lib daily resources
-horizon-client game::commands::fake_travel_tests::a_fake_player_is_not_teleported_to_another_dimension lib daily resources
-horizon-client game::commands::fake_travel_tests::a_mod_sends_a_player_to_another_level_and_not_a_missing_entity lib daily resources
+horizon-client game::commands::teleport_player_rider_tests::fake_travel_tests::a_fake_player_is_not_teleported_to_another_dimension lib daily resources
+horizon-client game::commands::teleport_player_rider_tests::fake_travel_tests::a_mod_sends_a_player_to_another_level_and_not_a_missing_entity lib daily resources
 horizon-client game::commands::fill_note_instrument_tests::an_existing_default_state_does_not_skip_note_normalization lib daily resources
 horizon-client game::commands::fill_note_instrument_tests::ordinary_fill_normalizes_a_note_block_against_real_stone lib daily resources
 horizon-client game::commands::fill_note_instrument_tests::strict_explicit_and_filtered_out_inputs_keep_their_existing_contracts lib daily resources
@@ -307,8 +307,8 @@ horizon-client game::commands::teleport_level_tests::portal_arrival_effects_expl
 horizon-client game::commands::teleport_level_tests::portal_arrival_effects_mod_items_merge_immediately lib daily resources
 horizon-client game::commands::teleport_mob_tests::command_stops_navigation_and_dismounts lib daily resources
 horizon-client game::commands::teleport_pitch_tests::teleport_and_rotate_resolve_pitch_at_their_own_boundary lib daily resources
-horizon-client game::commands::teleport_player_tests::command_moves_velocity_per_axis_and_keeps_fall_distance lib daily resources
-horizon-client game::commands::teleport_rider_tests::a_vehicle_carries_its_riders_and_a_rider_leaves_its_vehicle lib daily resources
+horizon-client game::commands::teleport_player_rider_tests::teleport_player_tests::command_moves_velocity_per_axis_and_keeps_fall_distance lib daily resources
+horizon-client game::commands::teleport_player_rider_tests::teleport_rider_tests::a_vehicle_carries_its_riders_and_a_rider_leaves_its_vehicle lib daily resources
 horizon-client game::commands::terrain_cmds::loot_kill_target_tests::loot_kill_uses_actual_sheep_state_without_killing_the_target lib daily resources
 horizon-client game::commands::terrain_cmds::loot_mine_component_tests::loot_mine_copies_actual_empty_and_right_pot_components_into_the_chest lib daily resources
 horizon-client game::commands::terrain_cmds::loot_mine_component_tests::loot_mine_uses_the_actual_stand_or_server_executor_presence lib daily resources
