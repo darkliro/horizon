@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod owner_attachment_save_tests {
-    use super::*;
     use horizon_core::nbt::Tag;
     use horizon_mod_runtime::attachments::{
         AttachmentCodec, AttachmentError, AttachmentType, Attachments,
