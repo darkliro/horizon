@@ -109,10 +109,7 @@ impl Hooks for CancelImpacts {
     }
 }
 
-fn with_batch(
-    remove: bool,
-    test: impl FnOnce(&mut Game<'_>, [u32; 3], [JoinSeq; 3], u32, u32),
-) {
+fn with_batch(remove: bool, test: impl FnOnce(&mut Game<'_>, [u32; 3], [JoinSeq; 3], u32, u32)) {
     let observed = Arc::new(Mutex::new(Observed::default()));
     let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
         "cancel-projectile-batch",
@@ -219,8 +216,7 @@ fn no_impact_expiration_retires_only_the_expired_owner() {
             .chunks
             .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
         for (id, age, x) in [(71, 5999, 0.5), (72, 0, 5.5)] {
-            let mut p =
-                Projectile::new(ProjectileKind::Snowball, Vec3::new(x, 70.0, 0.5), None);
+            let mut p = Projectile::new(ProjectileKind::Snowball, Vec3::new(x, 70.0, 0.5), None);
             p.id = id;
             p.age = age;
             p.velocity = Vec3::new(0.25, 0.0, 0.0);

@@ -25,11 +25,7 @@ fn the_golems_preserved_equipment_and_a_broken_stand_reach_living_drops() {
     struct Observer(Arc<Mutex<Vec<String>>>, Arc<AtomicBool>);
     #[mod_api::__subscriptions]
     impl Hooks for Observer {
-        fn living_drops(
-            &self,
-            _: &mut dyn ServerHost,
-            event: &mut LivingDropsEvent<'_>,
-        ) -> Flow {
+        fn living_drops(&self, _: &mut dyn ServerHost, event: &mut LivingDropsEvent<'_>) -> Flow {
             let items: Vec<_> = event
                 .drops
                 .iter()

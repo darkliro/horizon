@@ -264,8 +264,7 @@ fn nautilus_breath_lands_in_creative_as_ambient() {
     );
     assert!(e.ambient && e.visible);
     // Survival gets the same ambient instance.
-    let e =
-        mob_effect_instance("minecraft:breath_of_the_nautilus", 60, 0, true, false).unwrap();
+    let e = mob_effect_instance("minecraft:breath_of_the_nautilus", 60, 0, true, false).unwrap();
     assert!(e.ambient);
 }
 

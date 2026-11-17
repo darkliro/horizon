@@ -54,8 +54,8 @@ fn a_mod_keeps_one_stared_at_enderman_calm() {
                 .get("minecraft:enderman")
                 .unwrap()
                 .clone();
-            let endermen = [calm, angry]
-                .map(|id| Mob::new(id, kind.clone(), Vec3::new(8.0, 64.0, 10.0), 0.0));
+            let endermen =
+                [calm, angry].map(|id| Mob::new(id, kind.clone(), Vec3::new(8.0, 64.0, 10.0), 0.0));
             let eye = endermen[0].eye_y();
             view.position = Vec3::new(8.0, 64.0, 2.0);
             view.eye = [8.0, eye, 2.0];

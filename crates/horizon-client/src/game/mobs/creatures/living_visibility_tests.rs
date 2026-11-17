@@ -6,11 +6,7 @@ use std::sync::{Arc, Mutex};
 struct Halve(Arc<Mutex<Vec<(u32, Option<u32>, f64)>>>);
 #[mod_api::__subscriptions]
 impl mod_api::Hooks for Halve {
-    fn living_visibility(
-        &self,
-        _: &dyn mod_api::Host,
-        event: &mut mod_api::LivingVisibilityEvent,
-    ) {
+    fn living_visibility(&self, _: &dyn mod_api::Host, event: &mut mod_api::LivingVisibilityEvent) {
         let looking = event.looking.map(|e| e.id());
         self.0
             .lock()

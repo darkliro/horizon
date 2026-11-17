@@ -98,8 +98,7 @@ fn a_kills_loot_uses_the_level_a_mod_answers() {
             // The mobs' ids, clear of the guest's.
             game.next_entity = 1000;
             game.as_guest(5, |g| {
-                let mut sword =
-                    horizon_client::items::ItemStack::new("minecraft:iron_sword", 1);
+                let mut sword = horizon_client::items::ItemStack::new("minecraft:iron_sword", 1);
                 sword.enchant("minecraft:looting", 2);
                 g.inventory[g.selected] = Some(sword);
             })
@@ -260,14 +259,11 @@ fn loot_kill_asks_with_the_commands_source_as_the_attacker() {
             };
 
             game.as_guest(5, |g| {
-                let mut sword =
-                    horizon_client::items::ItemStack::new("minecraft:iron_sword", 1);
+                let mut sword = horizon_client::items::ItemStack::new("minecraft:iron_sword", 1);
                 sword.enchant("minecraft:looting", 2);
                 g.inventory[g.selected] = Some(sword);
                 g.ui.registries.permission = 4;
-                assert!(
-                    g.run_command("loot spawn 0 64 0 kill @e[type=minecraft:zombie,limit=1]")
-                );
+                assert!(g.run_command("loot spawn 0 64 0 kill @e[type=minecraft:zombie,limit=1]"));
             })
             .unwrap();
             assert_eq!(*seen.lock().unwrap(), [looted(2), looted(2)]);
@@ -380,9 +376,7 @@ fn a_draw_made_during_loot_kill_stays_in_the_level_random() {
                 entity: None,
                 ..source
             });
-            assert!(
-                game.run_command("loot spawn 0 64 0 kill @e[type=minecraft:zombie,limit=1]")
-            );
+            assert!(game.run_command("loot spawn 0 64 0 kill @e[type=minecraft:zombie,limit=1]"));
             game.command_source = None;
             let mut expected = LegacyRandom::new(7);
             expected.next_int();

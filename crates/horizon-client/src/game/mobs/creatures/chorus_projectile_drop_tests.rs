@@ -183,8 +183,7 @@ fn default_drop_rng_continues_identically_with_table_sequence_or_level_fallback(
             let root =
                 std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
             let mut table: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(root.join("data/minecraft/loot_table/blocks/gravel.json"))
-                    .unwrap(),
+                &std::fs::read(root.join("data/minecraft/loot_table/blocks/gravel.json")).unwrap(),
             )
             .unwrap();
             if !named {

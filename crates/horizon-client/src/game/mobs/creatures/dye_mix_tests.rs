@@ -17,10 +17,8 @@ fn two_dyes_mix_by_their_crafting_recipe() {
     let facts = crate::blocks::BlockFacts::load(&root, &registry).unwrap();
     let overlay = horizon_world::loot::PackOverlay::NONE;
     let defaults = horizon_world::item_defaults::read(&root).unwrap();
-    let items =
-        crate::items::Items::load(&root, &registry, &facts, &overlay, &defaults).unwrap();
-    let recipes =
-        Recipes::load(&root, &items, &overlay, &crate::game::test_server_load()).unwrap();
+    let items = crate::items::Items::load(&root, &registry, &facts, &overlay, &defaults).unwrap();
+    let recipes = Recipes::load(&root, &items, &overlay, &crate::game::test_server_load()).unwrap();
     let dye = |name: &str| {
         u8::try_from(
             horizon_client::mobs::render::DYE_NAMES

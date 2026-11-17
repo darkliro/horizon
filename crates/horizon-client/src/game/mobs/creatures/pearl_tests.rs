@@ -10,9 +10,7 @@ fn a_pearl_feels_the_water_its_box_touches() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../.local/horizon-client")
         .join(horizon_core::VANILLA_VERSION);
-    if !root.join("entity-types.json").exists()
-        || !root.join("movement-properties.nbt").exists()
-    {
+    if !root.join("entity-types.json").exists() || !root.join("movement-properties.nbt").exists() {
         return;
     }
     let assets = horizon_client::assets::Assets::load(&root).unwrap();
@@ -41,8 +39,7 @@ fn a_pearl_feels_the_water_its_box_touches() {
         &defaults,
     )
     .unwrap();
-    let collision =
-        std::sync::Arc::new(horizon_client::collisions::load(&root, registry).unwrap());
+    let collision = std::sync::Arc::new(horizon_client::collisions::load(&root, registry).unwrap());
     let suffocation =
         horizon_client::mobs::suffocation::bind(collision.clone(), &motion.causes_suffocation)
             .unwrap();

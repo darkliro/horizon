@@ -49,8 +49,7 @@ fn the_entity_destroy_block_names_reaches_the_listener() {
         std::fs::write(dir.join(format!("{block}.json")), table).unwrap();
     }
     let tables =
-        horizon_world::loot::shared_tables(&root, &horizon_world::loot::PackOverlay::NONE)
-            .unwrap();
+        horizon_world::loot::shared_tables(&root, &horizon_world::loot::PackOverlay::NONE).unwrap();
     let _ = std::fs::remove_dir_all(&root);
     with_game(|game| {
         game.options.dedicated = Some(Vec::new());

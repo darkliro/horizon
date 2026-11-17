@@ -1,8 +1,6 @@
 use super::*;
 use crate::game::native_entity_refs::tests::with_game;
-use mod_api::{
-    EnderPearlTeleportEvent, EntityTeleportEvent, Flow, Hooks, ModEntry, ServerHost,
-};
+use mod_api::{EnderPearlTeleportEvent, EntityTeleportEvent, Flow, Hooks, ModEntry, ServerHost};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU8, Ordering},

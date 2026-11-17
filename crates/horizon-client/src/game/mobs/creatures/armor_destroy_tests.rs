@@ -183,9 +183,8 @@ fn a_break_effect_follows_only_an_applied_break() {
                 super::SpawnSite::Plain,
             )
             .unwrap();
-        let jump = |game: &mut super::Game<'_>| {
-            game.mobs.iter().find(|m| m.id == id).unwrap().ai.jumping
-        };
+        let jump =
+            |game: &mut super::Game<'_>| game.mobs.iter().find(|m| m.id == id).unwrap().ai.jumping;
         let ifbroke = || MobEvent::IfBroke {
             mob: id,
             effects: Vec::new(),

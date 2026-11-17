@@ -3415,9 +3415,9 @@ impl Game<'_> {
                 | MobEvent::SchoolSize { .. }
                 | MobEvent::PufferfishSting { .. } => {}
                 e @ MobEvent::LeashBreak { at: Some(_), .. } => self.leash_break_event(e),
-                MobEvent::LeashBreak { mob, drop, sound, .. } => {
-                    self.tick_break_leash(mob, drop, sound)
-                }
+                MobEvent::LeashBreak {
+                    mob, drop, sound, ..
+                } => self.tick_break_leash(mob, drop, sound),
                 MobEvent::NotifyLeashHolder { holder } => {
                     if let Some(m) = self.mobs.iter_mut().find(|m| m.id == holder) {
                         horizon_client::mobs::happy_ghast::notify_leash_holder(m);
@@ -8696,21 +8696,18 @@ mod mob_griefing_tests;
 #[cfg(test)]
 mod living_visibility_tests;
 
-
 #[cfg(test)]
 mod enchanted_entity_loot_tests;
 
 #[cfg(test)]
 mod enderman_anger_tests;
 
-
 #[cfg(test)]
 mod local_sound_event_tests;
 
-
 #[cfg(test)]
-mod general_creature_tests;
-
+#[path = "general_creature_tests.rs"]
+mod tests;
 
 /// Whether the killing blow's causing entity (`DamageSource.getEntity`) was a
 /// mob, such as a tame wolf whose owner gets the kill credit.
@@ -8776,10 +8773,8 @@ fn breeding_credit(
 #[cfg(test)]
 mod mob_subscription_tests;
 
-
 #[cfg(test)]
 mod shulker_arrow_tests;
-
 
 #[cfg(test)]
 mod breeding_tests;
@@ -8790,10 +8785,8 @@ mod projectile_batch_tests;
 #[cfg(test)]
 mod breeze_random_tests;
 
-
 #[cfg(test)]
 mod damage_type_tests;
-
 
 #[cfg(test)]
 mod pearl_tests;
@@ -8801,10 +8794,8 @@ mod pearl_tests;
 #[cfg(test)]
 mod knockback_tests;
 
-
 #[cfg(test)]
 mod dye_mix_tests;
-
 
 impl horizon_client::arrows::OwnerLookup for Game<'_> {
     fn non_player_entity(&self, uuid: [i32; 4]) -> bool {
@@ -8819,10 +8810,8 @@ impl horizon_client::arrows::OwnerLookup for Game<'_> {
 #[cfg(test)]
 mod conversion_subscriber_tests;
 
-
 #[cfg(test)]
 mod living_drops_tests;
-
 
 #[cfg(test)]
 mod armor_destroy_tests;
@@ -8830,10 +8819,8 @@ mod armor_destroy_tests;
 #[cfg(test)]
 mod conversion_tag_tests;
 
-
 #[cfg(test)]
 mod pickable_projectile_tests;
-
 
 #[cfg(test)]
 mod mob_pearl_hook_tests;
@@ -8843,7 +8830,6 @@ mod breeding_orb_tests;
 
 #[cfg(test)]
 mod enchanted_block_loot_breaker_tests;
-
 
 #[cfg(test)]
 #[path = "rabbit_colour_tests.rs"]
@@ -9048,11 +9034,15 @@ mod loaded_arrow_shot_tests {
         use horizon_client::entities::OrbMove;
         with_game(|game| {
             let slide = "minecraft:block.honey_block.slide";
-            for (block, slides, draws) in [("stone", 0, 0), ("honey_block", 1, 0), ("farmland", 0, 1)] {
+            for (block, slides, draws) in
+                [("stone", 0, 0), ("honey_block", 1, 0), ("farmland", 0, 1)]
+            {
                 assert!(game.run_command(&format!("setblock 6 200 10 {block}")));
                 game.orbs.clear();
                 assert!(
-                    game.run_command("summon experience_orb 6.5 201 10.5 {Value:1,fall_distance:2d}")
+                    game.run_command(
+                        "summon experience_orb 6.5 201 10.5 {Value:1,fall_distance:2d}"
+                    )
                 );
                 game.orbs[0].on_ground = true;
                 game.audio.heard.clear();
@@ -9171,7 +9161,9 @@ mod loaded_arrow_shot_tests {
     fn primed_tnt_landing_runs_the_blocks_fall_on() {
         with_game(|game| {
             let slide = "minecraft:block.honey_block.slide";
-            for (block, slides, draws) in [("stone", 0, 0), ("honey_block", 1, 0), ("farmland", 0, 1)] {
+            for (block, slides, draws) in
+                [("stone", 0, 0), ("honey_block", 1, 0), ("farmland", 0, 1)]
+            {
                 assert!(game.run_command(&format!("setblock 6 200 10 {block}")));
                 game.tnts.clear();
                 game.add_primed_tnt(
@@ -9601,7 +9593,6 @@ mod loaded_arrow_shot_tests {
 
 #[cfg(test)]
 mod loaded_mob_arrow_permission_tests;
-
 
 #[cfg(test)]
 mod h169_glide_travel_tests;

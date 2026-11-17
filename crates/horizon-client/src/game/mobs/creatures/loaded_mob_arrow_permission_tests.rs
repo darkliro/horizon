@@ -104,8 +104,7 @@ fn loaded_mob_arrow_predicate_survives_model_and_controls_actual_block_hit() {
             game.persist.raw.remove(&p.id);
             for (route, raw) in [("no-raw", None), ("stale-raw", Some(&stale))] {
                 let saved =
-                    entity_nbt::arrow_to_nbt(&p, [197, 0, n, 2], p.owner_uuid, None, raw)
-                        .unwrap();
+                    entity_nbt::arrow_to_nbt(&p, [197, 0, n, 2], p.owner_uuid, None, raw).unwrap();
                 let want = predicate.map(|id| parse(&format!("{{blocks:\"minecraft:{id}\"}}")));
                 if saved.get("can_break") != want.as_ref() {
                     missing.push(format!(

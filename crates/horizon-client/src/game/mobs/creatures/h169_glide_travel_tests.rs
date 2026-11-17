@@ -193,8 +193,7 @@ fn hostile_mobs_in_non_entity_ticking_chunks_do_not_despawn() {
     // The unopened fixture starts in Peaceful, which refuses /summon zombie.
     assert!(game.run_command("difficulty normal"));
     game.player = Some(
-        horizon_client::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 65.0, 0.5))
-            .unwrap(),
+        horizon_client::motion::PlayerMotion::new(game.motion, Vec3::new(0.5, 65.0, 0.5)).unwrap(),
     );
     game.settings.simulation_distance = 4;
     game.settings.render_distance = 24;

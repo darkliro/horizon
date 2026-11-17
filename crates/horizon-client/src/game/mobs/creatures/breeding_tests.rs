@@ -314,7 +314,8 @@ fn breeding_announces_the_orb_before_the_lower_id_child() {
                 .push(Mob::new(base + 2, cow, Vec3::new(1.0, 64.0, 0.0), 0.0));
             game.native_joins_skip();
             let parent = game.mobs.iter_mut().find(|mob| mob.id == base + 1).unwrap();
-            parent.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(0));
+            parent.random =
+                horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(0));
             parent.extra.variant = 1;
             parent.extra.age = 6000;
             let child = game.breed(
@@ -391,9 +392,8 @@ fn breeding_announces_the_orb_before_the_lower_id_child() {
             game.mobs
                 .push(Mob::new(fox_base + 2, fox, Vec3::new(1.0, 64.0, 0.0), 0.0));
             game.native_joins_skip();
-            game.player = Some(
-                horizon_client::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap(),
-            );
+            game.player =
+                Some(horizon_client::motion::PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
             let feeder = horizon_client::lan::playerdata::uuid_ints(game.native_acting_id());
             game.love_cause.insert(fox_base + 1, None);
             let fox_child = game.breed(
