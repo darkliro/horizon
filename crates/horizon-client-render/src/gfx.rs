@@ -412,51 +412,6 @@ fn end_fog_sky(frame: &Frame) -> bool {
     !frame.title && frame.end_sky && frame.boss_world_fog
 }
 
-/// The world pass's part that draws a shader pack's solid terrain: the world's colour and
-/// depth loaded, and its `surface` target, cleared on the first of these passes.
-fn surface_pass<'e>(
-    encoder: &'e mut wgpu::CommandEncoder,
-    view: &wgpu::TextureView,
-    surface: &wgpu::TextureView,
-    depth: &wgpu::TextureView,
-    clear: bool,
-) -> wgpu::RenderPass<'e> {
-    let keep = |load| wgpu::Operations {
-        load,
-        store: wgpu::StoreOp::Store,
-    };
-    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Horizon world, pack terrain"),
-        color_attachments: &[
-            Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: keep(wgpu::LoadOp::Load),
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: surface,
-                resolve_target: None,
-                depth_slice: None,
-                ops: keep(if clear {
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                } else {
-                    wgpu::LoadOp::Load
-                }),
-            }),
-        ],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
-        ..Default::default()
-    })
-}
-/// The point a `shaders/` pack's terrain is drawn relative to: the camera with the fraction of
 /// each coordinate rounded to the nearest 1/65536 block. Read back with a probe pack of ours,
 /// Iris 1.11.7's terrain `gl_Vertex` is the block's position minus this, for cameras from 13
 /// to 40000 blocks out (#8464); `cameraPosition` and the matrices keep the exact camera. Off by
@@ -770,25 +725,6 @@ pub struct ScreenshotRequest {
     /// `Renderer::screenshot_result` for the owning thread's hook before encoding.
     pub background: bool,
 }
-/// A solid terrain pipeline without HDR output's lighting (terrain.wgsl's `HDR_LIGHTING`),
-/// for the frames HDR is off, and with it where the display offers HDR output: the
-/// lighting's code, even never run, slows the shader on Apple GPUs (~15% of the solid
-/// pass at Retina sizes).
-pub struct SolidPipeline {
-    plain: wgpu::RenderPipeline,
-    hdr: Option<wgpu::RenderPipeline>,
-}
-
-impl SolidPipeline {
-    /// The pipeline for a frame with HDR output on (`hdr`) or off.
-    pub fn get(&self, hdr: bool) -> &wgpu::RenderPipeline {
-        match &self.hdr {
-            Some(lit) if hdr => lit,
-            _ => &self.plain,
-        }
-    }
-}
-
 pub struct Renderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -1460,6 +1396,8 @@ fn terrain_group(
 }
 mod prepared_textures;
 pub use prepared_textures::*;
+mod solid_pipeline;
+pub use solid_pipeline::*;
 /// The wgpu instance options, without wgpu's validation of indirect draws
 /// in release builds. That validation (meant for untrusted WebGPU content)
 /// copies every indirect draw through a compute pass before the render pass
