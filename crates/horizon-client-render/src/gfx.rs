@@ -42,9 +42,7 @@ fn terrain_shader() -> String {
     wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
 }
 
-fn border_shader() -> String {
-    wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("border.wgsl")
-}
+pub(super) use border::border_shader;
 
 fn entity_binding_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
     let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
@@ -203,8 +201,18 @@ fn static_entity_shader() -> String {
     entity_shader() + include_str!("static_entity.wgsl")
 }
 
+pub mod border;
 #[cfg(test)]
 mod crumbling_tests;
+mod gpu_checks;
+pub mod outline;
+mod overlay;
+pub use border::BorderDraw;
+use border::BorderUniform;
+use gpu_checks::GpuChecks;
+use outline::{debug_line_opaque, debug_lines_opaque_first, outline_vertices_into};
+pub use outline::{outline_params, outline_vertices, outline_width};
+use overlay::Overlay;
 mod entity_batch;
 mod entity_outline;
 #[cfg(any(test, feature = "test-support"))]
@@ -252,52 +260,6 @@ use section_fade::{
     section_visibility,
 };
 pub use view::{View, ViewSet};
-
-/// Window.getAppropriateLineWidth, in framebuffer pixels.
-pub fn outline_width(width: u32) -> f32 {
-    2.5f32.max(width as f32 / 1920.0 * 2.5)
-}
-
-/// ScreenSize, stroke width and ProjectionType.PERSPECTIVE layering.
-pub fn outline_params(width: u32, height: u32) -> [f32; 4] {
-    [
-        width as f32,
-        height.max(1) as f32,
-        outline_width(width),
-        1.0 - 1.0 / 4096.0,
-    ]
-}
-
-/// Camera-relative segment endpoints; no shape expansion in vanilla 26.3.
-pub fn outline_vertices(edges: &[[f64; 6]], camera: glam::DVec3) -> Vec<[f32; 6]> {
-    let mut out = Vec::with_capacity(edges.len());
-    outline_vertices_into(edges, camera, &mut out);
-    out
-}
-
-fn outline_vertices_into(edges: &[[f64; 6]], camera: glam::DVec3, out: &mut Vec<[f32; 6]>) {
-    let camera = camera.to_array();
-    out.clear();
-    out.extend(
-        edges
-            .iter()
-            .map(|e| std::array::from_fn(|i| (e[i] - camera[i % 3]) as f32)),
-    );
-}
-
-/// `DrawableGizmoPrimitives.getGroup`: a line whose ARGB alpha is 255 joins the
-/// opaque group, drawn with `RenderTypes.lines` (depth written); the rest
-/// with `RenderTypes.linesTranslucentNoDepthWrite`.
-fn debug_line_opaque(line: &[f32; 8]) -> bool {
-    line[6].to_bits() >> 24 == 0xFF
-}
-
-/// The depth-tested gizmo lines in their upload order: the opaque group first,
-/// then the translucent one, each in submission order.
-fn debug_lines_opaque_first(lines: &[[f32; 8]]) -> impl Iterator<Item = &[f32; 8]> {
-    let opaque = lines.iter().filter(|l| debug_line_opaque(l));
-    opaque.chain(lines.iter().filter(|l| !debug_line_opaque(l)))
-}
 
 /// Whether Translucent Batching is offered (`graphics::offer_translucent_batching`): where
 /// indirect multi-draws (`multi_draw`) take its batches, but not OpenGL's, which loop over
@@ -1207,22 +1169,6 @@ pub struct Frame<'a> {
     pub chunk_fade: f32,
     /// `GameRenderer.requestedPostEffects`: the chains that run over the world.
     pub post_effects: crate::post_chain::Request<'a>,
-}
-/// One frame of the world border wall (`WorldBorderRenderer.render`).
-#[derive(Clone, Debug)]
-pub struct BorderDraw {
-    /// The cached wall buffer; uploaded only when `rebuilt`.
-    pub vertices: [crate::border_render::BorderVertex; 16],
-    pub rebuilt: bool,
-    pub transforms: crate::border_render::BorderTransforms,
-    /// Walls to draw (indices of four-vertex quads), nearest first.
-    pub sides: Vec<usize>,
-}
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BorderUniform {
-    color: [f32; 4],
-    offset: [f32; 4],
 }
 /// A frame to save as a PNG: F2's screenshot, an agent's `game_screenshot`,
 /// or the icon the Select World list shows.
@@ -11717,23 +11663,6 @@ impl Renderer {
         readback
     }
 }
-/// Out-of-memory and validation error scopes, popped together: the first error either caught.
-struct GpuChecks {
-    memory: wgpu::ErrorScopeGuard,
-    validation: wgpu::ErrorScopeGuard,
-}
-impl GpuChecks {
-    fn push(device: &wgpu::Device) -> Self {
-        let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        Self { memory, validation }
-    }
-    fn pop(self) -> Option<wgpu::Error> {
-        let validation = pollster::block_on(self.validation.pop());
-        let memory = pollster::block_on(self.memory.pop());
-        memory.or(validation)
-    }
-}
 /// How many times the window's size a scaled screenshot is: the Resolution Scale
 /// `world_scale` when above 1, times `quality`, as far as a side fits in
 /// `max_side` pixels and the readback in `max_buffer` bytes.
@@ -11862,24 +11791,6 @@ fn camera_section(camera: DVec3, min_y: i32) -> SectionKey {
 
 /// The near plane of the world's projection, in blocks.
 const NEAR_PLANE: f32 = 0.05;
-
-/// Counts and offsets `Renderer::draw_overlay` draws from this frame's buffers.
-struct Overlay {
-    /// Zero when a shader pack draws the hand.
-    hand_quads: u32,
-    first_hand_vertex: i32,
-    crosshair: u32,
-    first_crosshair: u32,
-    /// The world drew into `depth` (post effects may read it), not a scaled target's.
-    world_depth: bool,
-    /// The real frame, not frame generation's made one: the world icon grabs it.
-    real: bool,
-    /// The game drew the first-person hand, in its own pass or at the end of the world's
-    /// (`hand_in_world`), not a shader pack.
-    hand_drawn: bool,
-    /// Camera-relative world to clip space for the hand: its own field of view and the bob.
-    hand_view_proj: Mat4,
-}
 
 pub(crate) fn world_projection(fov_degrees: f32, aspect: f32, far: f32) -> Mat4 {
     Mat4::perspective_rh(fov_degrees.to_radians(), aspect, far, NEAR_PLANE)
