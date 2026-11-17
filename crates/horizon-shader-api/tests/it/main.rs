@@ -3,7 +3,9 @@
 
 mod check;
 mod compute;
+mod entity_sky_reads;
 mod kept;
+mod material_reads;
 mod motion;
 mod names;
 mod override_step;

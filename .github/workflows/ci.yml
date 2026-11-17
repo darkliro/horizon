@@ -43,28 +43,29 @@ jobs:
   # to do. It runs even in a cancelled run (`always()`), so it fails there instead of being skipped, which GitHub
   # would count as passed. A failed part re-runs alone ("Re-run failed jobs"), not the other.
   #
-  # Where (docs/ci-runners.md): our checks runners (label horizon-checks) take pull requests whose number ends in 0 or 1,
+  # Where (docs/ci-runners.md): our checks runners (label horizon-checks) take pull requests whose number ends in 0,
   # this repository's own and approved forks' alike, and the whole merge queue (about 11 runs an hour; the
   # build folder persists there, so a queue run's Rust tests take about 3 min against about 9 on GitHub's runners);
   # GitHub's runners take the other pull requests and main's pushes (which also save the Rust cache GitHub's pull request runs
   # read), so both pools work at once. A fork's run starts only after a maintainer approves it, and its code runs on
   # an isolated runner user with no secret and a token that writes nothing. The repository variable SELF_HOSTED_CI
-  # moves this repository's own runs: `all` every job to ours, `light` (the desktop paused) or `off` every job to
+  # moves this repository's own runs: `all` every job to ours, `light` (the CI VPS down) or `off` every job to
   # GitHub's. A fork's pull request sees no repository variable, so no switch can move it off a machine that is off:
   # it waits there until the machine is back (runner-watch.yml opens an issue). On ours the build folder persists
   # (CARGO_TARGET_DIR, outside the checkout), so the apt packages, Python and the Rust cache steps are GitHub's only.
+  # "GitHub's runners" for these jobs are Blacksmith's (blacksmith.sh sponsors our minutes): GitHub's own image on
+  # faster machines, but they report themselves as self-hosted, so the steps tell them apart by runner.name.
   verify-static:
     name: verify (tree, lint and launcher)
     runs-on: >-
       ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' && (vars.SELF_HOSTED_CI == 'all' ||
       github.event_name == 'pull_request' &&
-      (endsWith(format('{0}', github.event.pull_request.number), '0') ||
-      endsWith(format('{0}', github.event.pull_request.number), '1')) ||
+      endsWith(format('{0}', github.event.pull_request.number), '0') ||
       github.event_name == 'merge_group') &&
-      fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'ubuntu-24.04' }}
+      fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           filter: blob:none
@@ -86,8 +87,8 @@ jobs:
             tested=true
           fi
           echo "tested=$tested" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@v7
-        if: runner.environment == 'github-hosted'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         with:
           python-version: '3.12'
       # A pull request or a merge group adds only its own commits to main, so it reads those; main's pushes read every
@@ -109,6 +110,7 @@ jobs:
       # toolchain, our runners' own rustup homes may not), and the GPU tests find no adapter there, so they return
       # early. Ours have Mesa's software Vulkan for parity; a backend Linux lacks keeps the tests from it, so a pull
       # request's verify doesn't depend on which pool took it (#8627: a GPU test that flakes on lavapipe).
+      # Blacksmith's runners too: their image has Mesa's llvmpipe, and the GPU tests fail on its GL backend.
       - name: Our runners as GitHub's (a default Rust toolchain, no GPU)
         if: runner.environment != 'github-hosted'
         run: |
@@ -148,7 +150,7 @@ jobs:
       - name: Install Rust toolchain and the ALSA and udev headers the client links against
         if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false'
         env:
-          HOSTED: ${{ runner.environment == 'github-hosted' }}
+          HOSTED: ${{ (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-')) }}
         run: |
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
@@ -156,17 +158,17 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       # Dependencies and the workspace crates' own clippy output, saved from main's runs (pull requests read main's
       # cache). rust-cache leaves the workspace crates out by default, so clippy re-checked all of them on every run;
-      # cache-workspace-crates keeps them, and a new key each UTC day makes main save a fresh copy once a day (the
-      # restore falls back to the newest older one). .ci-built holds the commit that copy was checked at.
+      # cache-workspace-crates keeps them. The UTC day is in shared-key (rust-cache ignores `key` when shared-key is
+      # set), so main's first push of each day saves a fresh copy and a pull request never starts from an older day's;
+      # before that push, it finds none. .ci-built holds the commit that copy was checked at.
       - name: Which day's lint cache
-        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         id: lint-day
         run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         with:
-          shared-key: verify-lint
-          key: ${{ steps.lint-day.outputs.day }}
+          shared-key: verify-lint-${{ steps.lint-day.outputs.day }}
           cache-workspace-crates: true
           cache-directories: .ci-built
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -177,8 +179,18 @@ jobs:
       - name: Date unchanged files as the cache saw them
         if: >-
           github.event_name == 'pull_request' && github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' &&
-          runner.environment == 'github-hosted'
+          (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         run: tools/ci/pin_mtimes.sh .ci-built
+      # rust-cache saves the dependencies from a registry and the workspace's crates, and deletes the rest of target/:
+      # the path-patched crates in third_party/. Clippy rebuilt them on every restore, then re-checked every crate
+      # above them, which is most of the workspace. So main carries their build in .ci-built (the step that records
+      # the commit moves it there) and a pull request moves it back. Main builds them anew each time, from files
+      # dated as a pull request's are: Cargo rebuilds a crate like these when its newest file time differs.
+      - name: Put back the path-patched crates' build, or prepare main's
+        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
+        env:
+          ACTION: ${{ github.event_name == 'pull_request' && 'restore .ci-built' || 'prepare' }}
+        run: python3 tools/ci/path_crates.py $ACTION
       - name: Check formatting and lint
         if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false'
         # A commit the queue verified skips the format check but still runs clippy: its build is what verify-static's
@@ -195,13 +207,15 @@ jobs:
       - name: Lint the server build
         if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false'
         run: cargo +stable clippy -p horizon-client --lib --bins --locked --no-default-features -- -D warnings
-      # Only main's passing run records its commit; pull requests restore it and never save it.
+      # Every run that may save the cache records its commit (save-if above: any event on main, a run started by
+      # hand included): a cache saved without it pins nothing, and pull requests then recheck every crate.
+      # Pull requests restore it and never save it.
       - name: Record the commit this lint cache was checked at
-        if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.environment == 'github-hosted'
+        if: github.ref == 'refs/heads/main' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         run: |
           mkdir -p .ci-built
           git rev-parse HEAD > .ci-built/sha
+          python3 tools/ci/path_crates.py save .ci-built
       # The launcher is its own workspace (launcher/Cargo.toml), so verify's cargo runs never build it. A pull request that
       # changes it or a crate it builds is checked here, and so are main's pushes when their range changes it: two pull
       # requests can each pass alone and break it together (#2059 and the registry ratings did, 2026-10-26), and the push
@@ -223,18 +237,22 @@ jobs:
       - name: Install Rust and the headers GPUI links against
         if: github.event_name != 'merge_group' && steps.launcher.outputs.required != 'false'
         env:
-          HOSTED: ${{ runner.environment == 'github-hosted' }}
+          HOSTED: ${{ (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-')) }}
         run: |
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-x11-dev libwayland-dev \
               libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev libudev-dev
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      # cache-bin: false: this step's save deletes the binaries ~/.cargo/bin held when it started, cargo among them.
+      # The lint cache above saves after it (post steps run in reverse), found no cargo, listed no crates and saved
+      # an empty target/ that every pull request then restored (main's run 43786916028, #17145's push).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: github.event_name != 'merge_group' && steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: github.event_name != 'merge_group' && steps.launcher.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         with:
           workspaces: launcher
           shared-key: launcher
+          cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the launcher's formatting, lint and tests
         if: github.event_name != 'merge_group' && steps.launcher.outputs.required != 'false'
@@ -255,13 +273,12 @@ jobs:
     runs-on: >-
       ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' && (vars.SELF_HOSTED_CI == 'all' ||
       github.event_name == 'pull_request' &&
-      (endsWith(format('{0}', github.event.pull_request.number), '0') ||
-      endsWith(format('{0}', github.event.pull_request.number), '1')) ||
+      endsWith(format('{0}', github.event.pull_request.number), '0') ||
       github.event_name == 'merge_group') &&
-      fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'ubuntu-24.04' }}
+      fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'blacksmith-32vcpu-ubuntu-2404' }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           filter: blob:none
@@ -300,24 +317,24 @@ jobs:
       - name: Install Rust toolchain, the ALSA and udev headers the client links against, and the mold linker
         if: steps.rust.outputs.required != 'false'
         env:
-          HOSTED: ${{ runner.environment == 'github-hosted' }}
+          HOSTED: ${{ (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-')) }}
         run: |
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev mold
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       # Dependencies, and for pull requests the workspace's own build too, saved from main's runs (pull requests read
-      # main's cache). The key is the UTC date, so main saves a fresh one each day and a pull request restores the
-      # latest. .ci-built/sha, written below, says which main commit that build is of.
+      # main's cache). The UTC date is in shared-key (rust-cache ignores `key` when shared-key is set), so main's first
+      # push of each day saves a fresh one; before that push, a pull request finds none. .ci-built/sha, written below,
+      # says which main commit that build is of.
       - name: Which day's build cache
-        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         id: build-day
         run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         with:
-          shared-key: verify
-          key: ${{ steps.build-day.outputs.day }}
+          shared-key: verify-${{ steps.build-day.outputs.day }}
           cache-workspace-crates: true
           cache-directories: .ci-built
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -327,20 +344,26 @@ jobs:
       - name: Rebuild only what this pull request changed
         if: >-
           github.event_name == 'pull_request' && steps.rust.outputs.required != 'false' &&
-          runner.environment == 'github-hosted'
+          (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         run: tools/ci/pin_mtimes.sh .ci-built
-      # sccache through GitHub's cache, GitHub's runners only (ours keep their build folder): rust-cache keeps the
-      # dependencies but cleans the workspace crates and the path-patched ones (third_party), so cargo rebuilt ~70
-      # crates on every run. sccache knows them by their content. Only main's pushes write to it: an entry a pull
-      # request writes is scoped to that pull request, no other run can read it, and it would push main's entries out
-      # of the repository's 10 GB. Pull requests and the merge queue read main's. RUSTC_WRAPPER is set after
+      # As in verify-static: rust-cache drops the path-patched crates' build, and rebuilding them rebuilt most of the
+      # workspace above them. The step that records main's commit moves it into .ci-built.
+      - name: Put back the path-patched crates' build, or prepare main's
+        if: github.event_name != 'merge_group' && steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
+        env:
+          ACTION: ${{ github.event_name == 'pull_request' && 'restore .ci-built' || 'prepare' }}
+        run: python3 tools/ci/path_crates.py $ACTION
+      # sccache through GitHub's cache, GitHub's runners only (ours keep their build folder): a pull request still
+      # rebuilds what main changed since its cached build, and sccache knows those crates by their content. Only
+      # main's pushes write to it: an entry a pull request writes is scoped to that pull request, no other run can
+      # read it, and it would push main's entries out of the repository's 10 GB. Pull requests and the merge queue read main's. RUSTC_WRAPPER is set after
       # rust-cache, whose key hashes the RUST* variables.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         with:
           version: v0.19.0
       - name: Compile through sccache
-        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         env:
           WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
@@ -352,7 +375,7 @@ jobs:
       # -fuse-ld applies. Set after rust-cache, whose key hashes the RUST* variables, and the same on every event so
       # sccache's hashes match between main and pull requests.
       - name: Link with mold
-        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C linker-features=-lld -C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
       # Libraries, binaries and integration tests, then doc tests: not the ~275 examples, which verify-static's clippy
       # type-checks and the parity job builds and runs (they were most of this step's build and link time).
@@ -388,17 +411,19 @@ jobs:
       # What main's cache holds is a build of this commit: pull requests compare their files against it.
       - name: Record the commit this build is of
         if: >-
-          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-          steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
-        run: mkdir -p .ci-built && git rev-parse HEAD > .ci-built/sha
+          github.ref == 'refs/heads/main' &&
+          steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
+        run: |
+          mkdir -p .ci-built && git rev-parse HEAD > .ci-built/sha
+          python3 tools/ci/path_crates.py save .ci-built
       - name: What sccache reused
-        if: always() && steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        if: always() && steps.rust.outputs.required != 'false' && (runner.environment == 'github-hosted' || startsWith(runner.name, 'blacksmith-'))
         run: |
           "$SCCACHE_PATH" --show-stats
   verify:
     needs: [verify-static, verify-test]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - name: Every part of verify passed or had nothing to do
@@ -422,7 +447,7 @@ jobs:
     env:
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Use every runner core for Cargo
@@ -517,7 +542,7 @@ jobs:
     outputs:
       run: ${{ steps.scope.outputs.run }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -551,11 +576,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, horizon-game]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '25'

@@ -193,8 +193,11 @@ fn ray_tracing() -> String {
          named as one of these functions.\n\n\
          In the material stage only `material` traces: `displacement` and the vertex stage's `vertex`, whose files share\n\
          its module, run in vertex shaders, and the check refuses a pack where either reaches a trace function.\n\
-         `material` runs for every terrain fragment drawn, so a ray costs more there than in a post pass: keep its rays for\n\
-         translucent surfaces (`input.translucent`), which leave no surface for a post pass to light.\n\n",
+         A ray in `material` is paid for every terrain fragment drawn, overdraw included; a ray in a post pass once a\n\
+         pixel. But a post pass knows only the solid terrain's surface (`surface_at` isn't `present` behind water,\n\
+         glass or entities) and has no albedo, so direct light that must be right there is traced in `material`. With\n\
+         `[material] reads`, a pack can also trace in a compute or `[[before_world]]` pass and apply the result in\n\
+         `material`.\n\n",
     );
     out += &table(&RAY_HIT, None);
     out += &format!(
@@ -236,11 +239,23 @@ fn kept() -> String {
          own `output`.\n\n\
          A compute file defines `fn compute(input: ComputeInput)`, and Horizon adds the `@compute` entry with the pass's\n\
          workgroup size. Every invocation of every workgroup runs it, so `var<workgroup>` and `workgroupBarrier()`\n\
-         reductions stay uniform: one beyond the dispatch has `in_bounds` false and touches no resource. A compute\n\
+         reductions stay uniform: one beyond the dispatch has `in_bounds` false and touches no resource. WGSL's\n\
+         `storageBarrier()` is allowed too: it orders one workgroup's accesses to its kept buffers, as\n\
+         `workgroupBarrier()` does `var<workgroup>`; neither orders different workgroups, and the next pass sees all of a\n\
+         pass's writes. A compute\n\
          `[[post]]` pass's prelude is the post stage's with `ComputeInput` for `PostInput`; a `[[before_world]]` pass has\n\
          the frame, the samplers and the shadow maps (bindings below) with `shadow_position`. Under `[ray_tracing]` either\n\
          may trace (see Ray tracing); a `[[before_world]]` pass traces this frame's scene, built before it runs.\n\n\
-         **Not yet, in a later step:** `[material]` can't read kept resources.\n\n"
+         `[material] reads` lists the kept resources the terrain reads (no `writes`): `x` for this frame's version of a\n\
+         texture a `[[before_world]]` pass writes, which the terrain sees in the same frame, `x_previous` for last\n\
+         frame's, and a buffer as it is. A texture only `[[post]]` passes write is written after the terrain draws, so\n\
+         the check refuses its `x` there: read `x_previous`. Its declarations are in the material's module at the same\n\
+         bindings, for `material`'s fragments only: the check refuses `displacement` reaching one, and the `[vertex]`\n\
+         file naming one, as both also draw the shadow map, which gets no kept resources. On a frame that clears a\n\
+         resource the terrain reads zeros, or what a `[[before_world]]` pass wrote since.\n\n\
+         `[entity] reads` and `[sky] reads` follow the same rules: the entities and the sky draw after `[[before_world]]`\n\
+         and before `[[post]]`, as the terrain does, and read the same versions. Their declarations are in the stage's\n\
+         module, for its fragments only; the shadow map's entities are Horizon's own draw and read none.\n\n"
     );
     out += &table(&COMPUTE_INPUT, None);
     out += &format!(
@@ -279,7 +294,7 @@ fn kept() -> String {
     out + &format!(
         "\nLimits: {MAX_RESOURCES} resources, {MAX_BEFORE_WORLD} `[[before_world]]` entries, {MAX_COMPUTE_POST} compute\n\
          `[[post]]` entries; {} MiB of buffers and {} MiB of fixed-size textures, both versions counted; each R-relative\n\
-         kept texture takes 2 of the post targets' budget (Limits); a workgroup of up to {MAX_WORKGROUP:?} and\n\
+         kept texture takes its two versions' size of the post targets' budget (Limits); a workgroup of up to {MAX_WORKGROUP:?} and\n\
          {MAX_WORKGROUP_INVOCATIONS} invocations; {MAX_DISPATCH_INVOCATIONS} invocations a dispatch and {MAX_FRAME_INVOCATIONS} a frame over every\n\
          compute pass, `[[before_world]]` and `[[post]]` together, counted as whole workgroups, a `\"pixels\"` dispatch as {}×{} (R isn't known at load).\n\n",
         MAX_BUFFER_BYTES >> 20,
@@ -527,8 +542,9 @@ pub fn markdown() -> String {
          ## Limits\n\n\
          - {MAX_POST_PASSES} post passes, {MAX_OPTIONS} options, `budget.gpu_ms` up to {MAX_GPU_MS}.\n\
          - Post targets: {MAX_POST_TARGETS} `output`s, and {POST_TARGET_BUDGET} render-size `rgba16float` textures of memory with the\n  \
-         R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture 2 (its\n  \
-         two versions, at any format and scale).\n\
+         R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture its two\n  \
+         versions at their size, `2 × scale² × bytes a texel / 8` (`rgba16float` at scale 0.5 takes 0.5, `r32uint` at\n  \
+         scale 1 takes 1, `rgba32float` at scale 1 takes 4).\n\
          - {} KiB per WGSL file, {} MiB per pack.\n\
          - Per stage: {MAX_EXPRESSIONS} naga expressions over all its functions, {MAX_TEXTURE_READS} texture reads (samples,\n  \
          gathers and loads, the prelude's included).\n\n\

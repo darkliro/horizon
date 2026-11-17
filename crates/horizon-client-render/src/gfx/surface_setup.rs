@@ -5,9 +5,9 @@ use super::{
     Renderer, check_layers, cull, describe_adapter, is_software, oit, pack_timing, startup_step,
     surface_format, timing,
 };
-// Ray tracing on request, which the device needs from its creation (gfx.rs may not grow).
-#[path = "ray_query.rs"]
-pub(super) mod ray_query;
+// Mesh shader capability negotiation on request (spec #17243 step 1).
+#[path = "mesh_shader.rs"]
+pub(super) mod mesh_shader;
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -154,7 +154,8 @@ pub(super) async fn open_adapter(
         | pack_timing::PassTiming::features(adapter)
         | cull::Cull::features(adapter)
         | oit::features(adapter)
-        | ray_query::features(adapter, needs.rays)
+        | super::rt::query::features(adapter, needs.rays)
+        | mesh_shader::features(adapter)
         | (adapter.features()
             & (wgpu::Features::INDIRECT_FIRST_INSTANCE
                 | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
@@ -187,7 +188,7 @@ pub(super) async fn open_adapter(
         // with the larger blocks a few small buffers kept whole blocks the arena's pages had
         // left, and over half the video memory reserved was unused (1,344 MiB for 500).
         memory_hints: wgpu::MemoryHints::MemoryUsage,
-        experimental_features: ray_query::experimental(features),
+        experimental_features: mesh_shader::experimental(features),
         ..Default::default()
     };
     #[cfg(not(target_os = "macos"))]

@@ -338,6 +338,8 @@ fn data_directory_leaf_never_leases_ancestors_outside_data() {
     if let Some(root) = std::env::var_os(ENV) {
         let data = std::path::PathBuf::from(root).join("data");
         fs::create_dir_all(&data).unwrap();
+        // Registry entry consumes an authoritative path; shared() resolves the same root.
+        let data = data.canonicalize().unwrap();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.current_dir(&data).env("HORIZON_HOME", &data);
         let _claims = shared(&command).unwrap();
@@ -362,4 +364,36 @@ fn data_directory_leaf_never_leases_ancestors_outside_data() {
         .status()
         .unwrap()
         .success());
+}
+
+#[test]
+fn a_java_editions_command_is_not_read_as_horizons() {
+    // Minecraft: Java Edition's command, as `backend::java_game` gives it (#17950): Horizon's
+    // option grammar pairs it up and finds `release` with no value.
+    let root = tempfile::tempdir().unwrap();
+    let mut java = Command::new("java");
+    java.args([
+        "-Xmx2G",
+        "-Djava.library.path=natives",
+        "-cp",
+        "client.jar",
+        "net.minecraft.client.main.Main",
+        "--username",
+        "Steve",
+        "--versionType",
+        "release",
+    ])
+    .current_dir(root.path())
+    .env("HORIZON_HOME", root.path().join("logs"));
+    let java = crate::launch::wrap(java, &crate::launch::Launch::default());
+    shared(&java)
+        .map_err(crate::native_mods::cache_error)
+        .unwrap();
+    assert!(override_value(&java, GAME).is_none());
+    // Horizon's own game keeps the command its leases are read from.
+    let mut game = Command::new(root.path().join("horizon-client"));
+    game.current_dir(root.path());
+    mark(&mut game, root.path());
+    let game = crate::launch::wrap(game, &crate::launch::Launch::default());
+    assert!(override_value(&game, GAME).is_some());
 }

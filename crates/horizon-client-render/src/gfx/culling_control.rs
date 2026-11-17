@@ -16,7 +16,7 @@ impl Renderer {
     /// Whether one of Horizon's own packs reads the water mirror, which needs the frame's
     /// `water_plane`.
     pub fn wants_water_plane(&self) -> bool {
-        self.native.as_ref().is_some_and(|n| n.frame.reflects)
+        self.executor.is_some_and(|c| c.reflection)
     }
     /// Whether solid quads facing away from the eye are left out.
     pub fn section_sides(&self) -> bool {
@@ -207,7 +207,7 @@ impl Renderer {
     /// Whether one of Horizon's own packs with `[shadow]` draws, whose shadow pass takes the
     /// frame's `shadow_only` quads.
     pub fn native_shadow(&self) -> bool {
-        self.native.as_ref().is_some_and(|n| n.shadow.is_some())
+        self.executor.is_some_and(|c| c.shadow)
     }
     /// What a shader pack's shadow pass draws of the entities this frame: (entities or block
     /// entities other than the player, so those Horizon's culling hides from the camera are

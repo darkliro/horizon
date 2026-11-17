@@ -394,8 +394,11 @@ named as one of these functions.
 
 In the material stage only `material` traces: `displacement` and the vertex stage's `vertex`, whose files share
 its module, run in vertex shaders, and the check refuses a pack where either reaches a trace function.
-`material` runs for every terrain fragment drawn, so a ray costs more there than in a post pass: keep its rays for
-translucent surfaces (`input.translucent`), which leave no surface for a post pass to light.
+A ray in `material` is paid for every terrain fragment drawn, overdraw included; a ray in a post pass once a
+pixel. But a post pass knows only the solid terrain's surface (`surface_at` isn't `present` behind water,
+glass or entities) and has no albedo, so direct light that must be right there is traced in `material`. With
+`[material] reads`, a pack can also trace in a compute or `[[before_world]]` pass and apply the result in
+`material`.
 
 ### `RayHit`
 
@@ -447,12 +450,25 @@ own `output`.
 
 A compute file defines `fn compute(input: ComputeInput)`, and Horizon adds the `@compute` entry with the pass's
 workgroup size. Every invocation of every workgroup runs it, so `var<workgroup>` and `workgroupBarrier()`
-reductions stay uniform: one beyond the dispatch has `in_bounds` false and touches no resource. A compute
+reductions stay uniform: one beyond the dispatch has `in_bounds` false and touches no resource. WGSL's
+`storageBarrier()` is allowed too: it orders one workgroup's accesses to its kept buffers, as
+`workgroupBarrier()` does `var<workgroup>`; neither orders different workgroups, and the next pass sees all of a
+pass's writes. A compute
 `[[post]]` pass's prelude is the post stage's with `ComputeInput` for `PostInput`; a `[[before_world]]` pass has
 the frame, the samplers and the shadow maps (bindings below) with `shadow_position`. Under `[ray_tracing]` either
 may trace (see Ray tracing); a `[[before_world]]` pass traces this frame's scene, built before it runs.
 
-**Not yet, in a later step:** `[material]` can't read kept resources.
+`[material] reads` lists the kept resources the terrain reads (no `writes`): `x` for this frame's version of a
+texture a `[[before_world]]` pass writes, which the terrain sees in the same frame, `x_previous` for last
+frame's, and a buffer as it is. A texture only `[[post]]` passes write is written after the terrain draws, so
+the check refuses its `x` there: read `x_previous`. Its declarations are in the material's module at the same
+bindings, for `material`'s fragments only: the check refuses `displacement` reaching one, and the `[vertex]`
+file naming one, as both also draw the shadow map, which gets no kept resources. On a frame that clears a
+resource the terrain reads zeros, or what a `[[before_world]]` pass wrote since.
+
+`[entity] reads` and `[sky] reads` follow the same rules: the entities and the sky draw after `[[before_world]]`
+and before `[[post]]`, as the terrain does, and read the same versions. Their declarations are in the stage's
+module, for its fragments only; the shadow map's entities are Horizon's own draw and read none.
 
 ### `ComputeInput`
 
@@ -504,7 +520,7 @@ says the world changed, not the camera's distance or `frame_index`.
 
 Limits: 8 resources, 4 `[[before_world]]` entries, 8 compute
 `[[post]]` entries; 32 MiB of buffers and 32 MiB of fixed-size textures, both versions counted; each R-relative
-kept texture takes 2 of the post targets' budget (Limits); a workgroup of up to [256, 256, 64] and
+kept texture takes its two versions' size of the post targets' budget (Limits); a workgroup of up to [256, 256, 64] and
 256 invocations; 33554432 invocations a dispatch and 67108864 a frame over every
 compute pass, `[[before_world]]` and `[[post]]` together, counted as whole workgroups, a `"pixels"` dispatch as 3840×2160 (R isn't known at load).
 
@@ -755,8 +771,9 @@ Each `[[options]]` entry sets the WGSL `override` of the same name when the pipe
 
 - 12 post passes, 64 options, `budget.gpu_ms` up to 16.
 - Post targets: 16 `output`s, and 6 render-size `rgba16float` textures of memory with the
-  R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture 2 (its
-  two versions, at any format and scale).
+  R-relative kept textures: an `output` takes its `scale`² (1, 0.25 or 0.0625), an R-relative kept texture its two
+  versions at their size, `2 × scale² × bytes a texel / 8` (`rgba16float` at scale 0.5 takes 0.5, `r32uint` at
+  scale 1 takes 1, `rgba32float` at scale 1 takes 4).
 - 256 KiB per WGSL file, 8 MiB per pack.
 - Per stage: 20000 naga expressions over all its functions, 64 texture reads (samples,
   gathers and loads, the prelude's included).

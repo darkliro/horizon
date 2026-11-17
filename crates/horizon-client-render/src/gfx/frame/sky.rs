@@ -60,7 +60,7 @@ impl Renderer {
                 if frame.end_sky {
                     self.end_sky.draw(pass);
                     // The End's custom sky layers go over its sky box.
-                    if self.custom_sky.is_drawing() && !pack_draws_sky && self.native.is_none() {
+                    if self.custom_sky.is_drawing() && !pack_draws_sky && self.executor.is_none() {
                         self.custom_sky.draw(pass);
                         pass.set_pipeline(&self.celestial.added);
                         pass.set_bind_group(0, &self.entity_group, &[]);
@@ -69,11 +69,7 @@ impl Renderer {
                 if celestial_vertices > 0 && !pack_draws_celestial {
                     // The Overworld's bodies start with the sun's quad
                     // (`Game::celestial_geometry`): a pack sky drawing its own skips it.
-                    let own_sun = !frame.end_sky
-                        && self
-                            .native
-                            .as_ref()
-                            .is_some_and(native_pack::NativePack::hides_sun);
+                    let own_sun = !frame.end_sky && self.executor.is_some_and(|c| c.hides_sun);
                     let first = if own_sun { 6 } else { 0 };
                     // A resource pack's core/sky isn't vanilla's sky times the sky's
                     // lift, which the sun's disc pass assumes: today's add there.
@@ -86,10 +82,7 @@ impl Renderer {
                 }
                 pass.set_bind_group(0, &self.group, &[]);
             }
-            let own_stars = self
-                .native
-                .as_ref()
-                .is_some_and(native_pack::NativePack::hides_stars);
+            let own_stars = self.executor.is_some_and(|c| c.hides_stars);
             if !frame.title && frame.stars.is_some() && !pack_draws_sky && !own_stars {
                 match self.core_sky.as_ref().filter(|c| c.draws_stars()) {
                     Some(core) => core.draw_stars(pass),

@@ -121,7 +121,7 @@ impl Renderer {
         // TAA runs where the world post pass does, not under a shader pack's own.
         let taa = !frame.title
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.is_none();
+            && self.executor.is_none();
         let hdr_lighting = self.shader_pack_kind().is_none();
         if let Some(hdr) = &mut self.hdr {
             hdr.lighting = hdr_lighting && hdr.look;
@@ -360,9 +360,7 @@ impl Renderer {
             .and_then(|p| p.shadow_view(frame))
             .or_else(|| {
                 // One of Horizon's own packs with `[shadow]` uses the same lists.
-                let native = self.native.as_ref().filter(|_| !frame.title)?;
-                native.shadow.as_ref()?;
-                native.frame.shadow_view(frame)
+                (self.native.as_ref().filter(|_| !frame.title)?).shadow_request(frame)
             })
             .or_else(|| {
                 self.external
@@ -400,10 +398,7 @@ impl Renderer {
         // `visible`. Decided before the walk, so that a pass whose buffers no longer fit can
         // still switch GPU culling off.
         let radius = (frame.detail_distance / 16.0) as i32;
-        let displaced = self
-            .native
-            .as_ref()
-            .is_some_and(native_pack::NativePack::displaces);
+        let displaced = self.executor.is_some_and(|c| c.displacement);
         let mut gpu_frame = self.gpu_culling.is_some()
             && !frame.title
             && !pack_terrain
@@ -1320,7 +1315,7 @@ impl Renderer {
             - native_solid_quads
             - native_cutout_quads
             - native_cutout_mipped_quads;
-        let native_clouds = self.native.as_ref().is_none_or(|n| n.vanilla_clouds);
+        let native_clouds = self.executor.is_none_or(|c| !c.hides_clouds);
         let cloud_quads = if let Some(input) = frame.clouds.as_ref().filter(|_| native_clouds) {
             let (rebuilt, uniform) =
                 crate::spans::time("clouds", || self.cloud_mesh.prepare(input));
@@ -1733,7 +1728,7 @@ impl Renderer {
                 flat.page_instances = self.visbuf.is_some()
                     && !pack_terrain
                     && shadow_view.is_none()
-                    && self.native.as_ref().is_none_or(|n| n.material.is_none());
+                    && self.executor.is_none_or(|c| !c.material);
                 let sections = &self.sections;
                 let lods = &self.lods;
                 let (sorted, lists) = (&self.sorted_indices, &self.world_views.sections);
@@ -1819,7 +1814,7 @@ impl Renderer {
         // The world's targets: the screen, or the scaled target of `post`.
         let pack_post = !frame.title && self.pack_post.as_ref().is_some_and(|p| p.1.is_some());
         // One of Horizon's own packs reads the same world target.
-        let native_post = !frame.title && self.native.is_some();
+        let native_post = !frame.title && self.executor.is_some();
         self.set_up_pack_timing();
         let pack_reads_world = pack_post || native_post;
         laps.lap("r_uploads");
@@ -2044,7 +2039,7 @@ impl Renderer {
         // its layers, and the entities with its pipelines, which read the pack's frame at group 3.
         let native = self.native.as_ref().filter(|_| !frame.title);
         let material = native.and_then(native_pack::NativePack::terrain_layers);
-        let entity_stage = native.and_then(|n| Some((n.entity.as_ref()?, &n.frame.group)));
+        let entity_stage = native.and_then(|n| n.entities());
         // Without HDR output, the solid shaders without its lighting (`SolidPipeline`).
         let hdr = self.hdr.is_some();
         let solid_pipeline = material.map_or(self.solid.get(hdr), |m| m.solid);

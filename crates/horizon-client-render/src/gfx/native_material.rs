@@ -11,8 +11,9 @@
 use horizon_shader_api::{check::CheckedStage, stages::GROUP};
 
 use super::displace::{Displacement, MAX_SECTIONS, Near};
+use super::native_post::kept::StageReads;
 use super::native_post::trace::{TerrainTrace, Traced};
-use super::native_post::{NativeFrame, present_constants};
+use super::native_post::{NativeFrame, NativePost, present_constants};
 use super::wgsl_prefix::{TERRAIN, prefixed, section};
 
 const PREFIX: &str = "horizon_terrain_";
@@ -320,6 +321,8 @@ pub struct NativeMaterial {
     pub(super) scene: Option<TerrainTrace>,
     /// The stage calls `set_surface`: its solid pipelines also write the surface target.
     pub writes_surface: bool,
+    /// `[material] reads`: none without.
+    pub(super) kept: Option<StageReads>,
 }
 
 /// terrain.wgsl's group 0 (`TerrainShape::globals`): its globals, the sprite arrays and their
@@ -469,6 +472,7 @@ impl NativeMaterial {
         coverage: horizon_shader_api::Coverage,
         vertex: bool,
         displaced: Option<&DisplacedShape<'_>>,
+        kept: Option<StageReads>,
     ) -> Result<Self, String> {
         let writes_surface = horizon_shader_api::stages::calls_set_surface(&stage.source);
         let linear = frame.linear;
@@ -477,21 +481,49 @@ impl NativeMaterial {
             let terrain = (shape, displaced, constants);
             Self::pipelines(device, terrain, (stage, source), group, flags, linear)
         };
+        let limits = device.limits();
+        if let Some(why) = (kept.as_ref()).and_then(|k| k.over(frame, &terrain_entries(), &limits))
+        {
+            return Err(format!("{}: {why}", stage.file));
+        }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let built = build(&stage.source, &frame.layout);
+        let built = build(
+            &stage.source,
+            kept.as_ref().map_or(&frame.layout, |k| &k.layout),
+        );
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(format!("{}: {e}", stage.file));
         }
         let pipelines = built?;
         let scene = stage.scene_source.as_deref().and_then(|source| {
             let terrain = (shape, stage.traces_entities());
-            TerrainTrace::new(device, frame, terrain, |group| build(source, group))
+            let own = kept.as_ref().map_or(&[][..], |k| &k.entries);
+            TerrainTrace::new(device, frame, terrain, own, |group| build(source, group))
         });
         Ok(Self {
             pipelines,
             scene,
             writes_surface,
+            kept,
         })
+    }
+
+    /// Makes the groups the terrain draws with this frame, for the frame's group as it is now,
+    /// `scene`, this frame's, where it traces, and the kept resources of `post` it reads.
+    pub(super) fn bind(
+        &mut self,
+        device: &wgpu::Device,
+        frame: &NativeFrame,
+        scene: Option<&Traced<'_>>,
+        post: &NativePost,
+    ) {
+        if let Some(trace) = &mut self.scene {
+            let reads = self.kept.as_ref().and_then(|k| k.reads(post));
+            trace.bind(device, frame, scene, reads);
+        }
+        if let Some(k) = &mut self.kept {
+            k.bind(device, frame, post);
+        }
     }
 
     /// This frame's `frame.ray_distance` when the terrain traces `scene`.
@@ -500,12 +532,17 @@ impl NativeMaterial {
     }
 
     /// The pipelines and group 3 the terrain draws with this frame: against the scene where
-    /// it traces, else the ones whose `trace` misses with the frame's own `group`.
+    /// it traces, else the ones whose `trace` misses with the frame's own `group`, or with the
+    /// kept resources it reads, this frame's version `parity`.
     pub(super) fn drawn<'a>(
         &'a self,
         group: &'a wgpu::BindGroup,
+        parity: usize,
     ) -> (&'a MaterialPipelines, &'a wgpu::BindGroup) {
-        let traced = self.scene.as_ref().and_then(TerrainTrace::drawn);
+        let traced = self.scene.as_ref().and_then(|t| t.drawn(parity));
+        let group = (self.kept.as_ref())
+            .and_then(|k| k.group(parity))
+            .unwrap_or(group);
         traced.unwrap_or((&self.pipelines, group))
     }
 
@@ -701,6 +738,28 @@ impl NativeMaterial {
     }
 }
 
+#[cfg(test)]
+impl NativeMaterial {
+    /// The layout of the group 3 `drawn` gives this frame, where the material reads kept
+    /// resources, for a test's own entry points.
+    pub(in crate::gfx) fn drawn_layout(&self) -> &wgpu::BindGroupLayout {
+        match (
+            self.scene.as_ref().filter(|t| t.drawn(0).is_some()),
+            &self.kept,
+        ) {
+            (Some(t), _) => t.layout(),
+            (None, Some(k)) => &k.layout,
+            (None, None) => unreachable!("the material reads no kept resources"),
+        }
+    }
+}
+
+/// The terrain shader of a material's composed `source`, for a test's own entry points.
+#[cfg(test)]
+pub(in crate::gfx) fn test_shader(source: &str) -> String {
+    shader_source(source, &[], &[], (false, false), false)
+}
+
 /// The pack's terrain layers, which the renderer's terrain passes draw in place of its own
 /// (`NativePack::terrain_layers`).
 #[derive(Clone, Copy)]
@@ -773,12 +832,6 @@ impl super::native_pack::NativePack {
         if let Some(color) = color {
             self.frame.copy_opaque(device, encoder, color);
         }
-    }
-
-    /// Whether `[displacement]`'s grid takes its quads from the frame's visible sections, which
-    /// GPU culling doesn't list.
-    pub fn displaces(&self) -> bool {
-        self.displacement.is_some()
     }
 
     /// Writes out the solid quads of the sections `[displacement]` reaches and picks this

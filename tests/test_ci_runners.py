@@ -1,7 +1,7 @@
 """Which jobs may run on our own runners (docs/ci-runners.md).
 
 - horizon-light (playhorizon's and other small runners, which refuse a fork's pull request): main's own scripts only.
-- horizon-checks (isolated runners; an approved fork's pull request ending in 0 or 1 runs there too): no secret and
+- horizon-checks (isolated runners; an approved fork's pull request ending in 0 runs there too): no secret and
   no token that writes.
 - Neither takes a job that holds a secret or whose token can push, publish or start workflows: playhorizon is a
   partner's server, and a checks runner keeps what a fork's job left behind.
@@ -71,10 +71,10 @@ class OwnRunnerTests(unittest.TestCase):
         for where, _, _, _, value, pools in routed():
             count += 1
             self.assertIn("vars.SELF_HOSTED_CI != 'off'", value, where)
-            # Both labels select a GitHub-hosted Ubuntu runner when our pools are disabled.
-            self.assertRegex(value, r"\|\| 'ubuntu-(?:latest|24\.04)' \}\}$", where)
+            # Both labels select a GitHub-hosted or Blacksmith Ubuntu runner when our pools are disabled.
+            self.assertRegex(value, r"\|\| '(?:ubuntu-(?:latest|24\.04)|blacksmith-\d+vcpu-ubuntu-2404)' \}\}$", where)
             if "checks" in pools:
-                # The desktop paused: every checks job back to GitHub, the bots stay.
+                # SELF_HOSTED_CI=light: every checks job back to GitHub, the bots stay.
                 self.assertIn("vars.SELF_HOSTED_CI != 'light'", value, where)
         self.assertGreaterEqual(count, 10)
 
@@ -124,7 +124,7 @@ class OwnRunnerTests(unittest.TestCase):
         self.assertIn("if: always()", ci["verify"])
 
     def test_forks_reach_only_the_checks_runners(self):
-        # An approved fork's pull request ending in 0 or 1 runs on horizon-checks like this repository's own (GitHub's
+        # An approved fork's pull request ending in 0 runs on horizon-checks like this repository's own (GitHub's
         # 20-job pool is not the only place it may wait). Never the light runners: every light job that a pull request
         # can start carries the fork guard (test_light_runners_take_main_code_only), and ci.yml's two runs-on
         # expressions (the other workflows keep their own guards) no longer test the head repository.

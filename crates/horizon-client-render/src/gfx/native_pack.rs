@@ -5,14 +5,16 @@ use horizon_shader_api::check::CheckedStage;
 use horizon_shader_api::{Report, StageKind};
 
 use super::displace::Displacement;
+use super::external::Capabilities;
 use super::native_entity::NativeEntity;
 use super::native_material::{DisplacedShape, MaterialPipelines, NativeMaterial, TerrainShape};
+use super::native_post::kept::StageReads;
 use super::native_post::{NativeFrame, NativePost};
 use super::native_shadow::{NativeShadow, ShadowGrid};
 use super::native_sky::NativeSky;
 use super::output::EffectiveOutput;
 use super::pack_timing::PassTiming;
-use super::surface_setup::ray_query::ray_scene::{RayScene, Traced};
+use super::rt::scene::{RayScene, Traced};
 use super::{Frame, SectionKey};
 use crate::fast_hash::FxHashMap;
 
@@ -189,17 +191,29 @@ impl NativePack {
     }
 
     /// Joins the frame's group with this frame's `scene` from `camera` for a material stage
-    /// that traces: after the frame's group changed for this frame, before the terrain draws.
+    /// that traces, and with the kept resources it reads: after the frame's group changed for
+    /// this frame and the kept resources' frame started (`before_world`), before the terrain
+    /// draws.
     pub(in crate::gfx) fn bind_scene(
         &mut self,
         device: &wgpu::Device,
         scene: Option<&RayScene>,
         camera: glam::DVec3,
     ) {
-        if let Some(trace) = self.material.as_mut().and_then(|m| m.scene.as_mut()) {
-            let scene = scene.and_then(|s| s.traced(camera));
-            trace.bind(device, &self.frame, scene.as_ref());
+        let scene = scene.and_then(|s| s.traced(camera));
+        self.bind_terrain(device, scene.as_ref());
+    }
+
+    /// `bind_scene` with this frame's `scene` as the camera traces it.
+    pub(in crate::gfx) fn bind_terrain(
+        &mut self,
+        device: &wgpu::Device,
+        scene: Option<&Traced<'_>>,
+    ) {
+        if let Some(m) = &mut self.material {
+            m.bind(device, &self.frame, scene, &self.post);
         }
+        self.bind_kept(device);
     }
 
     /// Whether the pack's rays read the scene's entity layer: its files name `RAY_ENTITY`, and
@@ -209,9 +223,19 @@ impl NativePack {
         self.post.traces_entities() || material.is_some_and(|t| t.traces_entities())
     }
 
+    /// The pack's entity stage and the group 3 it draws with this frame.
+    pub(in crate::gfx) fn entities(&self) -> Option<(&NativeEntity, &wgpu::BindGroup)> {
+        let entity = self.entity.as_ref()?;
+        let kept = entity
+            .kept
+            .as_ref()
+            .and_then(|k| k.group(self.post.parity()));
+        Some((entity, kept.unwrap_or(&self.frame.group)))
+    }
+
     /// The pipelines the pack's terrain draws with this frame, and its group 3.
     pub(in crate::gfx) fn terrain(&self) -> Option<(&MaterialPipelines, &wgpu::BindGroup)> {
-        Some(self.material.as_ref()?.drawn(&self.frame.group))
+        Some((self.material.as_ref()?).drawn(&self.frame.group, self.post.parity()))
     }
 
     /// The pack of the checked stages `report` with the option values `constants`, drawing
@@ -368,7 +392,15 @@ impl NativePack {
         let sky = others
             .iter()
             .find(|s| s.kind == StageKind::Sky)
-            .map(|stage| NativeSky::new(device, globals, &frame, stage, constants, format))
+            .map(|stage| {
+                let kept = StageReads::new(
+                    device,
+                    &report.manifest,
+                    report.manifest.sky.as_ref(),
+                    &frame,
+                );
+                NativeSky::new(device, globals, (&frame, kept), stage, constants, format)
+            })
             .transpose()?;
         let mut material = others
             .iter()
@@ -380,6 +412,8 @@ impl NativePack {
                     steps: d.view.steps,
                     layout: &d.draw_layout,
                 });
+                let listed = report.manifest.material.as_ref();
+                let kept = StageReads::new(device, &report.manifest, listed, &frame);
                 NativeMaterial::new(
                     device,
                     terrain,
@@ -390,6 +424,7 @@ impl NativePack {
                     coverage,
                     has_vertex,
                     displaced.as_ref(),
+                    kept,
                 )
             })
             .transpose()?;
@@ -399,6 +434,9 @@ impl NativePack {
             .map(|stage| {
                 let groups = [terrain.entities, terrain.retained_entities];
                 let manifest = &report.manifest;
+                let listed = manifest.entity.as_ref();
+                let kept = StageReads::new(device, manifest, listed, &frame);
+                let stage = (stage, kept);
                 NativeEntity::new(device, format, groups, &frame, stage, constants, manifest)
             })
             .transpose()?;
@@ -419,7 +457,7 @@ impl NativePack {
         let traced = |m: &NativeMaterial| m.scene.is_some();
         let wanted = |s: &horizon_shader_api::check::CheckedStage| s.scene_source.is_some();
         let refused = others.iter().any(wanted)
-            && super::surface_setup::ray_query::on(device)
+            && super::rt::query::on(device)
             && !material.as_ref().is_some_and(traced);
         let computes = post.computes_trace();
         if (!scenes.is_empty() || computes) && !refused {
@@ -562,9 +600,22 @@ impl NativePack {
         );
     }
 
-    /// Whether the pack's `[tonemap]` takes the place of Horizon's tone curve.
-    pub fn tonemaps(&self) -> bool {
-        self.post.tonemaps()
+    /// What the pack does in the renderer's place, fixed while it runs: the renderer keeps it
+    /// from the pack's install on (`replace_native`).
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            shadow: self.shadow.is_some(),
+            reflection: self.frame.reflects,
+            // GPU culling doesn't list the sections `[displacement]`'s grid takes quads from.
+            displacement: self.displacement.is_some(),
+            material: self.material.is_some(),
+            hides_clouds: !self.vanilla_clouds,
+            // `[sky]`'s sun and stars are left out only where its stage draws its own.
+            hides_sun: self.sky.is_some() && !self.vanilla_sun,
+            hides_stars: self.sky.is_some() && !self.vanilla_stars,
+            tone_curve: self.post.tonemaps(),
+            ray_scene: self.traces,
+        }
     }
 
     /// Times the pack's passes, or stops, as the renderer's settings say, before its world
@@ -646,7 +697,7 @@ pub struct WorldTargets<'a> {
 
 #[cfg(test)]
 pub(in crate::gfx) mod tests {
-    use super::{NativePack, TerrainShape, chosen_shadow, reads_opaque};
+    use super::{Capabilities, NativePack, TerrainShape, chosen_shadow, reads_opaque};
     use horizon_shader_api::manifest::{OptionKind, PackOption, Shadow};
 
     /// The world before translucent terrain is copied only for a pack whose material, or the
@@ -730,6 +781,61 @@ file = \"material.wgsl\"
         assert!(built.is_err(), "the pack should be refused");
     }
 
+    /// What the renderer keeps of a pack from its install on: each answer as its manifest and
+    /// the renderer's resources give it.
+    #[test]
+    fn a_pack_tells_the_renderer_what_it_draws_in_its_place() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let (globals, empty) = terrain_layouts(&device);
+        let does = |stages: &str| {
+            let shape = terrain_shape(&globals, &empty);
+            let built = NativePack::new(
+                &device,
+                &queue,
+                &shape,
+                pack(stages),
+                &[],
+                Default::default(),
+            );
+            built.expect("the pack builds").0.capabilities()
+        };
+        let material = "[material]\nfile = \"material.wgsl\"\n";
+        assert_eq!(does(""), Capabilities::default());
+        let hides = Capabilities {
+            hides_clouds: true,
+            hides_sun: true,
+            hides_stars: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(does("clouds = false\nsun = false\nstars = false\n"), hides);
+        let terrain = Capabilities {
+            material: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(does(material), terrain);
+        // No resource pack's height maps here (`TerrainShape::pbr`): nothing to displace.
+        assert_eq!(does(&format!("{material}[displacement]\n")), terrain);
+        let traces = Capabilities {
+            ray_scene: true,
+            ..terrain
+        };
+        assert_eq!(does(&format!("{material}[ray_tracing]\n")), traces);
+        let tonemap = Capabilities {
+            tone_curve: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(does("[tonemap]\nfile = \"tonemap.wgsl\"\n"), tonemap);
+    }
+
     /// A pack with a sky stage and the manifest's `stages` after it.
     fn pack(stages: &str) -> horizon_shader_api::Report {
         use horizon_shader_api::{MANIFEST, Pack, check};
@@ -755,6 +861,12 @@ file = \"material.wgsl\"
         );
         if stages.contains("[material]") {
             files.push(("material.wgsl", &material));
+        }
+        if stages.contains("[tonemap]") {
+            files.push((
+                "tonemap.wgsl",
+                "fn tonemap(input: TonemapInput) -> vec3<f32> { return input.color; }\n",
+            ));
         }
         let files = files
             .into_iter()
