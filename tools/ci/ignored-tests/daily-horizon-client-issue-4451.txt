@@ -453,9 +453,9 @@ horizon-client game::creatures::revenge_home_tests::a_zombie_takes_revenge_only_
 horizon-client game::creatures::spawn_egg_mob_tests::a_mooshroom_egg_child_rolls_the_colour_flip lib daily resources
 horizon-client game::creatures::spawn_egg_mob_tests::an_egg_used_on_a_mob_posts_entity_interact lib daily resources
 horizon-client game::creatures::spectator_view_tests::a_spectator_sees_the_invisible_body lib daily resources
-horizon-client game::creatures::tests::conversion_transfers_tags_and_team lib daily resources
-horizon-client game::creatures::tests::ender_pearl_clears_impulse_before_next_fall lib daily resources
-horizon-client game::creatures::tests::wolf_owner_rejoining_receives_the_kill_statistic lib daily resources
+horizon-client game::creatures::general_creature_tests::conversion_transfers_tags_and_team lib daily resources
+horizon-client game::creatures::general_creature_tests::ender_pearl_clears_impulse_before_next_fall lib daily resources
+horizon-client game::creatures::general_creature_tests::wolf_owner_rejoining_receives_the_kill_statistic lib daily resources
 horizon-client game::crop_grow_tests::a_mod_stops_one_cane_and_hears_the_other_grow lib daily resources
 horizon-client game::crossbow::tests::a_flame_crossbow_shoots_burning_arrows lib daily resources
 horizon-client game::crossbow::tests::bow_and_crossbow_shots_sound_at_the_feet_not_the_eye lib daily resources
