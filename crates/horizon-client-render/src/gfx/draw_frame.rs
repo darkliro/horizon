@@ -2,9 +2,18 @@
 mod shadow;
 #[path = "frame/sky.rs"]
 mod sky;
+#[path = "frame/submit.rs"]
+mod submit_frame;
+use submit_frame::SubmitFrameArgs;
+#[path = "frame/acquire.rs"]
+mod acquire_frame;
+use acquire_frame::AcquiredFrame;
+#[path = "frame/post.rs"]
+mod post;
 #[path = "frame/water_mirror.rs"]
 mod water_mirror;
 use super::*;
+use post::{PostPassArgs, PostPassResult};
 
 impl Renderer {
     /// `checks`: the error scopes of a scaled screenshot's frame, checked before its PNG is written.
@@ -51,137 +60,19 @@ impl Renderer {
             return Ok(false);
         }
         let started = Instant::now();
-        if self.first_frame == FirstFrame::Acquire {
-            // Once: a minimized window acquires nothing for a while.
-            startup_step(format_args!("acquiring the first frame"));
-            self.first_frame = FirstFrame::Submit;
-        }
-        if self.surface_unconfigured
-            && let Some(surface) = &self.surface
-        {
-            // Acquiring from it would panic: configure it again, or skip the
-            // frame. A lost device never configures it.
-            if self.device_lost.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err("the graphics device was lost".into());
-            }
-            self.frame_gen.stop_to_configure();
-            if Self::configure(
-                &self.device,
-                surface,
-                &self.surface_config(),
-                self.hdr.as_ref(),
-                &self.device_lost,
-            )
-            .is_err()
-            {
-                return Ok(false);
-            }
-            self.surface_unconfigured = false;
-        }
-        laps.lap("r_prepare");
-        // Frame generation: its present thread acquires and presents, this frame draws
-        // into frames of its own. Not over menus that blur the frame, a shader pack's own post
-        // passes, HDR output without the HUD's layer (or the float frame HDR was started
-        // with) or the title screen.
-        let fg = self.frame_gen.on
-            && !(self.frame_gen.paused || self.frame_gen.refused)
-            && (self.hdr.as_ref()).map_or(
-                self.output.frame.format == self.config.format.remove_srgb_suffix(),
-                hdr::Hdr::layered,
-            )
-            && !frame.title
-            && frame.menu_blur.is_none()
-            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && self.native.is_none()
-            && (self.surface.is_none()
-                || self.config.usage.contains(wgpu::TextureUsages::COPY_DST));
-        if !fg {
-            self.frame_gen.stop();
-        }
-        // Waits for the submit thread since the last frame's present (this frame's uploads).
-        let queued = self.queue.take_waited();
-        let acquire = Instant::now();
-        let fg_frames = fg
-            .then(|| {
-                self.frame_gen.frames(
-                    &self.device,
-                    &self.queue,
-                    self.surface.as_ref(),
-                    self.offscreen.as_ref(),
-                    &self.window,
-                    &self.surface_config(),
-                )
-            })
-            .flatten();
-        // The present thread failed: this frame acquires as without frame generation.
-        let fg = fg_frames.is_some();
-        let mut fg_made = false;
-        let acquired = if fg {
-            None
-        } else {
-            self.surface.as_ref().map(|s| s.get_current_texture())
+        let Some(AcquiredFrame {
+            fg_frames,
+            fg,
+            surface_frame,
+            reconfigure,
+            target_texture,
+        }) = self.acquire_frame_surface(frame, landed)?
+        else {
+            return Ok(false);
         };
-        self.last_wait = landed + queued + acquire.elapsed();
-        // Inside the acquire's time already.
-        self.queue.take_waited();
-        let (surface_frame, reconfigure) = match acquired {
-            None => (None, false),
-            Some(wgpu::CurrentSurfaceTexture::Success(f)) => (Some(f), false),
-            Some(wgpu::CurrentSurfaceTexture::Suboptimal(f)) => (Some(f), true),
-            Some(wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded) => {
-                return Ok(false);
-            }
-            Some(wgpu::CurrentSurfaceTexture::Outdated) => {
-                self.configure_surface();
-                return Ok(false);
-            }
-            Some(wgpu::CurrentSurfaceTexture::Lost) => {
-                self.recreate_surface()?;
-                return Ok(false);
-            }
-            Some(wgpu::CurrentSurfaceTexture::Validation) => {
-                // Acquire caught a validation error: the swapchain cannot be
-                // used as configured (wgpu reports a configuration raced with
-                // a submission this way). Give it a fresh configuration like
-                // an Outdated one, and once that has not helped, reattach the
-                // window like a Lost one — a fullscreen loading screen then
-                // skips frames instead of failing every one of them.
-                if self.acquire_validation_failures == 0 {
-                    self.configure_surface();
-                } else {
-                    self.recreate_surface()?;
-                }
-                self.acquire_validation_failures =
-                    self.acquire_validation_failures.saturating_add(1);
-                return Ok(false);
-            }
-        };
-        if surface_frame.is_some() {
-            self.acquire_validation_failures = 0;
-            self.frame_gen.paused = false;
-        }
+
         let size = [self.config.width, self.config.height];
-        let target_texture = match (&surface_frame, &mut self.hdr) {
-            (_, Some(hdr)) => hdr.frame(&self.device, size),
-            _ if let Some((real, _)) = &fg_frames => real.clone(),
-            // A screenshot of a swapchain without COPY_SRC (OpenGL), and a float frame
-            // with HDR off, draw into a texture of their own, then onto the swapchain or
-            // the offscreen target.
-            (f, None) => {
-                let image = match f {
-                    Some(f) => f.texture.clone(),
-                    None => self.offscreen.clone().ok_or("no offscreen target")?,
-                };
-                self.readback
-                    .target(
-                        &self.device,
-                        &image,
-                        self.output.frame.format,
-                        self.screenshot.is_some(),
-                    )
-                    .unwrap_or(image)
-            }
-        };
+        laps.lap("r_prepare");
         // One command buffer for the frame, after the section copies staged
         // since the last one: Metal commits every command buffer wgpu-core
         // makes (one per run of copies and two per pass) on its own.
@@ -3203,471 +3094,76 @@ impl Renderer {
                 self.draw_hand(&mut pass, hand_quads, world_quads + additive_quads);
             }
         }
-        if let Some((color, depth)) = &scaled
-            && pack_post
-            && let Some((dimension, Some(mut post))) = self.pack_post.take()
-        {
-            let size = self.world_post.size().unwrap_or([1, 1]);
-            let weather = match &self.hud.atlas_texture {
-                Some(atlas) if pack_draws_weather => self
-                    .pack_weather
-                    .get_or_insert_with(|| pack_weather::PackWeather::new(&self.device))
-                    .prepare(
-                        &self.device,
-                        &mut encoder,
-                        &mut self.uploads,
-                        atlas,
-                        frame.weather,
-                        frame.weather_time,
-                        &self.indices,
-                    ),
-                _ => None,
-            };
-            post.set_weather(weather);
-            let flat = self.flat.as_ref().filter(|_| flat_frame);
-            self.pack_pages.clear();
-            if flat.is_some() && (pack_draws_terrain || pack_draws_shadow) {
-                self.pack_pages.extend(
-                    self.arena
-                        .page_buffers()
-                        .map(|(p, b)| (p, b.clone(), self.arena.sources(p).cloned())),
-                );
-            }
-            let pages = &self.pack_pages;
-            let mut terrain =
-                |rp: &mut wgpu::RenderPass<'_>,
-                 list: pack_post::TerrainList,
-                 page: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
-                 geometry: Option<(u32, &wgpu::BindGroupLayout)>| {
-                    use pack_post::TerrainList as L;
-                    let shadow = matches!(list, L::ShadowSolid | L::ShadowTranslucent);
-                    if !(if shadow {
-                        pack_draws_shadow
-                    } else {
-                        pack_draws_terrain
-                    }) {
-                        return;
-                    }
-                    match flat {
-                        Some(flat) => {
-                            let [shadow, shadow_translucent] = flat.shadow_calls;
-                            let calls = match list {
-                                L::Solid => &flat.calls[..flat.solid_calls],
-                                L::Translucent => flat.translucent_calls(),
-                                L::ShadowSolid => &flat.calls[shadow..shadow_translucent],
-                                L::ShadowTranslucent => flat.shadow_translucent_calls(),
-                            };
-                            match geometry {
-                                Some((instances, layout)) => {
-                                    let indices =
-                                        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                            label: Some("Shader pack geometry indices"),
-                                            layout,
-                                            entries: &[wgpu::BindGroupEntry {
-                                                binding: 0,
-                                                resource: flat.indices.as_entire_binding(),
-                                            }],
-                                        });
-                                    rp.set_bind_group(5, &indices, &[]);
-                                    let vertices =
-                                        flat_vertices(&self.arena, self.translucent_arena.as_ref());
-                                    flat.draw_geometry(rp, calls, vertices, page, instances);
-                                }
-                                None => flat.draw_with(
-                                    rp,
-                                    calls,
-                                    flat_vertices(&self.arena, self.translucent_arena.as_ref()),
-                                    page,
-                                ),
-                            }
-                        }
-                        // A geometry stage reads flat draws' indices; without them it draws nothing.
-                        None if geometry.is_some() => {}
-                        None => {
-                            rp.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-                            rp.set_vertex_buffer(1, self.instances.slice(..));
-                            let (first, count) = match list {
-                                L::Solid => (0, solid_draws),
-                                L::Translucent => (solid_draws, translucent_draws),
-                                L::ShadowSolid => (shadow_first, shadow_solid),
-                                L::ShadowTranslucent => {
-                                    (shadow_first + shadow_solid, shadow_translucent)
-                                }
-                            };
-                            self.draw_sections(rp, &self.indirect, 0, first, count);
-                        }
-                    }
-                };
-            // Both strokes of a high contrast outline, the black one first.
-            post.set_lines(pack_draws_outline.then(|| pack_post::Lines {
-                edges: self.outline.clone(),
-                count: outline_edges as u32 * if frame.outline_high_contrast { 2 } else { 1 },
-            }));
-            post.set_clouds(pack_draws_clouds.then(|| pack_post::Clouds {
-                vertices: self.cloud_buffer.clone(),
-                group: self.cloud_group.clone(),
-                indices: self.indices.clone(),
-                quads: cloud_quads,
-            }));
-            post.run(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                color,
-                depth,
-                &view_target,
-                frame,
-                &frame.pack,
-                size,
-                [self.config.width, self.config.height],
-                pages,
-                &mut terrain,
-            );
-            // Keep the capacity, not the buffers: a page the arena frees must not stay alive
-            // here until the next shader-pack frame (or forever once the pack is off).
-            self.pack_pages.clear();
-            self.pack_post = Some((dimension, Some(post)));
-        } else if let Some((color, depth)) = &scaled
-            && native_post
-            && let Some(native) = &mut self.native
-        {
-            native.run_post(native_pack::WorldPost {
-                device: &self.device,
-                encoder: &mut encoder,
-                world: (color, depth),
-                screen: &view_target,
-                size: self.world_post.size().unwrap_or([1, 1]),
-                scene: self.ray_scene.as_ref().map(|s| (s, frame.camera)),
-            });
-        } else if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
-            let camera = frame_gen::Camera {
-                jittered,
-                view_proj,
-                depth: depth.clone(),
-                render_size: self.world_post.size().unwrap_or(size),
-                jitter: self.world_post.jitter_pixels(),
-                reproject: self.frame_gen.camera_motion(view_proj, frame.camera),
-                near: NEAR_PLANE,
-                far: frame.depth_far,
-                fov_y: frame.fov_degrees.to_radians(),
-            };
-            let overlay = Overlay {
-                hand_quads: hand_quads * u32::from(!pack_draws_hand),
-                first_hand_vertex: made_hand_vertex,
-                crosshair,
-                first_crosshair: debug_depth + debug_top,
-                world_depth: false,
-                real: false,
-                hand_drawn: !pack_draws_hand,
-                hand_view_proj,
-            };
-            let onto = (&view_target, &target_texture, generated);
-            fg_made = self.draw_generated(&mut encoder, frame, &camera, &overlay, onto);
-        } else if scaled.is_some() {
-            self.world_post.finish(
-                &self.queue,
-                &mut encoder,
-                &view_target,
-                self.own_timing.as_mut(),
-            );
-        }
-        if !frame.title {
-            self.draw_world_views(&mut encoder, frame, globals, flat_frame, entity_quads);
-            let (depth, depth_size) = match &scaled {
-                Some((_, depth)) => (depth, self.world_post.size().unwrap_or(size)),
-                None => (&self.depth, size),
-            };
-            native_render::world_drawn(&mut native_render::WorldDrawn {
-                device: &self.device,
-                queue: &self.queue,
-                encoder: &mut encoder,
-                color: &target_texture,
-                color_view: &view_target,
-                color_format: self.output.frame.overlay_format,
-                size,
-                depth,
-                depth_size,
-                view_proj,
-                jittered,
-                camera: frame.camera,
-                entities: frame.entities,
-                spans: frame.entity_spans,
-                motion: frame.entity_motion,
-                atlas: self.hud.atlas_texture.as_ref(),
-                quad_indices: &self.indices,
-                block_sprites: native_render::BlockSpriteArrays {
-                    views: &self.sprite_views,
-                    split: self.sprite_split,
-                    size: self.sprite_textures[0].width(),
-                    nearest: &self.sprite_nearest,
-                    filtered: &self.sprite_sampler,
-                },
-            });
-        }
-        // A 0.2 pack in SDR: its picture finishes on 8 bits before the hand, the camera overlays
-        // and the HUD draw over it (`overlay_format`).
-        let finished = (self.output.frame.overlay_format != self.output.frame.format)
-            .then(|| {
-                let image = surface_frame.as_ref().map(|f| &f.texture);
-                image.or(self.offscreen.as_ref())
-            })
-            .flatten()
-            .and_then(|image| {
-                let screenshot = self.screenshot.is_some();
-                self.readback
-                    .finish(&self.device, &mut encoder, image, screenshot)
-            });
-        let (target_texture, view_target, overlay_format) = match finished {
-            Some(texture) => {
-                let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                    format: Some(self.output.frame.overlay_format),
-                    ..Default::default()
-                });
-                (texture, view, self.output.frame.overlay_format)
-            }
-            None => (target_texture, view_target, self.output.frame.format),
-        };
-        let overlay = Overlay {
-            hand_quads: hand_quads * u32::from(!pack_draws_hand && !hand_in_world),
-            first_hand_vertex: match fg_made && frame_gen::generated_only() && self.hdr.is_some() {
-                true => made_hand_vertex,
-                false => ((world_quads + additive_quads) * 4) as i32,
+        let (
+            encoder,
+            PostPassResult {
+                readback,
+                target_texture,
+                fg_made,
             },
-            crosshair,
-            first_crosshair: debug_depth + debug_top,
-            world_depth: scaled.is_none(),
-            real: true,
-            hand_drawn: !pack_draws_hand,
-            hand_view_proj,
-        };
-        let readback =
-            self.draw_overlay(&mut encoder, frame, &view_target, &target_texture, &overlay);
-        if culling && let Some(cull) = &mut self.cull {
-            cull.end(&self.device, &mut encoder);
-        }
-        // GPU culling's counts once its world passes are done (phase 2's too).
-        if gpu_frame && let Some(gpu) = &mut self.gpu_culling {
-            gpu.copy_stats(&mut encoder, serial, cpu);
-        }
-        if let Some(timer) = &mut self.gpu_timer {
-            timer.end(&self.device, &mut encoder, (&view_target, overlay_format));
-        }
+        ) = self.run_post_and_overlay(
+            encoder,
+            PostPassArgs {
+                frame,
+                scaled,
+                view_target,
+                target_texture,
+                surface_frame: surface_frame.as_ref(),
+                fg_frames: fg_frames.as_ref(),
+                pack_post,
+                native_post,
+                pack_draws_weather,
+                pack_draws_terrain,
+                pack_draws_shadow,
+                pack_draws_outline,
+                pack_draws_clouds,
+                pack_draws_hand,
+                flat_frame,
+                outline_edges,
+                cloud_quads,
+                solid_draws,
+                translucent_draws,
+                shadow_first,
+                shadow_solid,
+                shadow_translucent,
+                size,
+                jittered,
+                view_proj,
+                hand_view_proj,
+                hand_quads,
+                made_hand_vertex,
+                crosshair,
+                debug_depth,
+                debug_top,
+                globals,
+                entity_quads,
+                hand_in_world,
+                world_quads,
+                additive_quads,
+                culling,
+                gpu_frame,
+                serial,
+                cpu,
+            },
+        );
         laps.lap("r_passes");
-        // The clipped picture for offscreen SDR presentation. Layered screenshots reconstruct
-        // their SDR picture in take_readback without changing this or the HDR display targets.
-        let sdr_texture = self
-            .hdr
-            .as_ref()
-            .and_then(|h| h.hud())
-            .cloned()
-            .unwrap_or_else(|| target_texture.clone());
-        // Under `HORIZON_FRAMEGEN_DEBUG=generated` a screenshot is the made frame.
-        let shown_texture = match &fg_frames {
-            Some((_, generated)) if fg_made && frame_gen::generated_only() => generated,
-            _ => &sdr_texture,
-        };
-        let readback = readback.or_else(|| {
-            self.screenshot
-                .take()
-                .and_then(|request| self.take_readback(request, &mut encoder, shown_texture))
-        });
-        self.uploads.finish(&encoder);
-        if has_section_copies {
-            self.section_copy_bytes = 0;
-            self.section_uploads.finish(&encoder);
-        }
-        if let Some(image) = surface_frame
-            .as_ref()
-            .map(|f| &f.texture)
-            .or(self.offscreen.as_ref())
-        {
-            self.readback.present(&self.device, &mut encoder, image);
-        }
-        // With frame generation on a window, its real frame.
-        let shown = surface_frame.as_ref().map(|f| &f.texture);
-        let shown = shown.or(fg_frames
-            .as_ref()
-            .filter(|_| self.surface.is_some())
-            .map(|f| &f.0));
-        match (&self.hdr, shown) {
-            (Some(hdr), Some(texture)) => {
-                hdr.present(&self.queue, &mut encoder, texture, self.own_timing.as_mut())
-            }
-            // Offscreen nothing shows HDR: the target gets the frame as SDR shows it, for
-            // splitscreen's compositor.
-            (Some(_), None) => {
-                if let Some(image) = &self.offscreen {
-                    self.readback
-                        .draw_onto(&self.device, &mut encoder, &sdr_texture, image);
-                }
-            }
-            (None, _) => {}
-        }
-        // With HDR on, a full-frame screenshot gets an HDR10 copy beside it.
-        let hdr_readback = readback
-            .as_ref()
-            .filter(|(request, _)| request.size.is_none())
-            .zip(self.hdr.as_ref())
-            .and_then(|(_, hdr)| {
-                let texture = hdr.capture(&self.device, &self.queue, &mut encoder)?;
-                let size = [self.config.width, self.config.height];
-                Some(copy_frame(&self.device, &mut encoder, &texture, size))
-            });
-        let first_frame = self.first_frame == FirstFrame::Submit;
-        // Finished, submitted and presented on the submit thread when nothing after the
-        // submission needs this one: screenshots' readbacks, the error scopes (one per
-        // thread), the first frame's startup log, VSync's frame callback, a reconfigure.
-        // Frame generation presents its own frames (`frame_gen.present` below).
-        // A `screenshot-sequence` frame is submitted here, so it can wait for it to
-        // finish.
-        let (encoder, surface_frame, after) = if readback.is_none()
-            && frame.pack.frame_timing.is_none()
-            && fg_frames.is_none()
-            && hdr_readback.is_none()
-            && checks.is_none()
-            && !first_frame
-            && !reconfigure
-            && self.hdr_marker.is_none()
-            && (surface_frame.is_none() || self.config.present_mode != wgpu::PresentMode::Fifo)
-        {
-            let offscreen = surface_frame.is_none();
-            // Occlusion culling's results, GPU culling's statistics and a shader pack's centre
-            // depth are read back as soon as the frame is submitted, as here.
-            let culling = self.after_submit();
-            let center = match &mut self.pack_post {
-                Some((_, Some(post))) => post.submitted(),
-                _ => None,
-            };
-            let after = (culling.is_some() || center.is_some()).then(|| {
-                Box::new(move || {
-                    if let Some(read) = culling {
-                        read();
-                    }
-                    if let Some(read) = center {
-                        read();
-                    }
-                }) as submit::AfterSubmit
-            });
-            let job = submit::Job {
-                encoder,
-                surface: surface_frame,
-                after,
-            };
-            match self.queue.submit_later(job) {
-                Ok(()) => {
-                    self.deferred = Some(offscreen);
-                    // The frame's waits for the previous one on the submit thread.
-                    self.last_wait += self.queue.take_waited();
-                    self.last_encode = started.elapsed().saturating_sub(self.last_wait);
-                    self.visible = visible;
-                    self.visible_lods = visible_lods;
-                    self.shadow_visible = shadow_visible;
-                    return Ok(true);
-                }
-                Err(back) => (back.encoder, back.surface, back.after),
-            }
-        } else {
-            (encoder, surface_frame, None)
-        };
-        let commands = crate::spans::time("encode", || encoder.finish());
-        if first_frame {
-            startup_step(format_args!("submitting the first frame"));
-            self.first_frame = FirstFrame::Drawn;
-        }
-        let submission = crate::spans::time("submit", || self.queue.submit([commands]));
-        if let Some(read) = after.or_else(|| self.after_submit()) {
-            read();
-        }
-        if let Some(timer) = &mut self.gpu_timer {
-            timer.submitted(&self.queue);
-            timer.collect(&self.device, &mut self.gpu_times);
-        }
-        self.pack_timing_submitted();
-        if let Some(timer) = &mut self.own_timing {
-            timer.submitted(&self.queue);
-        }
-        if let Some((_, Some(post))) = &mut self.pack_post
-            && let Some(read) = post.submitted()
-        {
-            read();
-        }
-        let failed = checks.and_then(GpuChecks::pop);
-        if let Some((request, buffer)) = readback {
-            // Out of memory on the way: the PNG would be black; taken again at half the size.
-            if let Some(e) = failed {
-                log::warn!(
-                    "Horizon renderer: a {}x{} screenshot failed ({e}); trying half the size",
-                    self.config.width,
-                    self.config.height
-                );
-                self.screenshot_halvings += 1;
-                self.screenshot = Some(request);
-            } else {
-                self.screenshot_halvings = 0;
-                let reader = screenshot_readback::Reader {
-                    device: self.device.clone(),
-                    config: self.config.clone(),
-                };
-                if request.background {
-                    if let Err(error) =
-                        self.screenshot_readbacks
-                            .start(reader, request, buffer, hdr_readback)
-                    {
-                        self.screenshot_result = Some(Err(error.to_string()));
-                    }
-                } else {
-                    self.screenshot_result = Some(
-                        reader
-                            .read_screenshot(&request, &buffer, hdr_readback.as_ref())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
-            }
-        }
-        if self.screenshot_result.is_none() {
-            self.screenshot_result = self.screenshot_readbacks.poll();
-        }
-        // The frame's own waits for the submit thread (its queue writes and passes).
-        self.last_wait += self.queue.take_waited();
-        let present = Instant::now();
-        if let Some(surface_frame) = surface_frame {
-            // On Wayland this ties RedrawRequested to the compositor's frame
-            // callbacks, one per refresh. Only VSync (Fifo) waits for the
-            // display: with it off, vanilla's window draws uncapped.
-            if self.config.present_mode == wgpu::PresentMode::Fifo {
-                self.window.pre_present_notify();
-            }
-            if first_frame {
-                startup_step(format_args!("presenting the first frame"));
-            }
-            self.queue.present(surface_frame);
-            if self.hdr.is_some()
-                && let Some(marker) = self.hdr_marker.take()
-            {
-                let _ = std::fs::remove_file(marker);
-                log::info!("Horizon renderer: HDR output presented its first frame");
-            }
-            if reconfigure {
-                self.configure_surface();
-            }
-        } else if let Some((real, generated)) = fg_frames {
-            self.present_generated(real, generated, fg_made);
-        }
-        if self.surface.is_none() {
-            // No swapchain paces offscreen frames: keep two on the GPU at most.
-            self.in_flight.push_back(submission);
-            if !self.paced_elsewhere {
-                self.wait_in_flight();
-            }
-        }
-        self.last_wait += present.elapsed();
-        // Inside the present's time already.
-        self.queue.take_waited();
-        self.last_encode = started.elapsed().saturating_sub(self.last_wait);
-        let _ = self.started;
-        self.visible = visible;
-        self.visible_lods = visible_lods;
-        self.shadow_visible = shadow_visible;
-        Ok(true)
+        self.submit_and_present_frame(
+            encoder,
+            SubmitFrameArgs {
+                frame,
+                checks,
+                surface_frame,
+                reconfigure,
+                readback,
+                target_texture: &target_texture,
+                fg_frames,
+                fg_made,
+                has_section_copies,
+                started,
+                visible,
+                visible_lods,
+                shadow_visible,
+            },
+        )
     }
 }
