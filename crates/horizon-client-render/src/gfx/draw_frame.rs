@@ -1,3 +1,9 @@
+#[path = "frame/shadow.rs"]
+mod shadow;
+#[path = "frame/sky.rs"]
+mod sky;
+#[path = "frame/water_mirror.rs"]
+mod water_mirror;
 use super::*;
 
 impl Renderer {
@@ -1988,23 +1994,6 @@ impl Renderer {
             [self.config.width, self.config.height],
             pack_reads_world || fg,
         );
-        let (world_view, world_depth) = match &scaled {
-            Some((color, depth)) => (color, depth),
-            None => (&view_target, &self.depth),
-        };
-        if culling && let Some(cull) = &mut self.cull {
-            cull.bind_depth(&self.device, world_depth);
-        }
-        // The hand draws at the end of the world pass, after a depth reset, when nothing runs
-        // between them (a scaled world's post pass, HDR's world copy, a native mod's
-        // `world_drawn`): one render pass fewer, ~10 µs of wgpu's encoding a frame.
-        let hand_in_world = (frame.hand.len() / 4) > 0
-            && !pack_draws_hand
-            && scaled.is_none()
-            && self.hdr.is_none()
-            // Frame generation draws the hand over the real and the made frame after the world.
-            && fg_frames.is_none()
-            && !native_render::world_drawn_hooked();
         if oit_on {
             let size = self
                 .world_post
@@ -2044,8 +2033,6 @@ impl Renderer {
                     [water_mask_quads > 0, cloud_quads > 0],
                 );
         }
-        let oit = self.oit.as_ref().filter(|_| oit_on);
-        let cull = self.cull.as_ref().filter(|_| culling && solid_draws > 0);
         let pack_sky_clear = pack_draws_sky
             .then(|| self.pack_post.as_ref().and_then(|p| p.1.as_ref()))
             .flatten()
@@ -2092,40 +2079,50 @@ impl Renderer {
                 scene: self.ray_scene.as_ref(),
             });
         }
-        // One of Horizon's own packs: its shadow passes, from the shadow camera's lists.
-        if !frame.title
-            && let Some(native) = &mut self.native
-        {
-            let lists = shadow_view.is_some().then(|| native_shadow::ShadowLists {
-                group: &self.group,
-                sections: SectionLists {
-                    draws: &self.draws,
-                    pages: &self.draw_pages,
-                    arena: &self.arena,
-                    translucent_arena: self.translucent_arena.as_ref(),
-                    sorted_indices: &self.sorted_indices,
-                    indices: &self.indices,
-                    flat: self.flat.as_ref(),
-                    multi_draw: self.multi_draw,
-                },
-                flat_frame,
-                instances: &self.instances,
-                indirect: &self.indirect,
-                draws: [shadow_first, shadow_solid, shadow_translucent],
-                entity_group: &self.entity_group,
-                entity_vertices: &self.entity_buffer,
-                entity_quads,
-                shadow_only_quads,
-                outline_base,
-            });
-            native.draw_shadow(native_shadow::ShadowDraws {
-                encoder: &mut encoder,
-                timing: self.own_timing.as_mut(),
-                lists,
-            });
-            let scene = self.ray_scene.as_ref().and_then(|s| s.traced(frame.camera));
-            native.before_world(&self.device, &mut encoder, scene.as_ref());
+        self.draw_shadow_passes(
+            &mut encoder,
+            frame,
+            shadow_view.as_ref(),
+            flat_frame,
+            shadow_first,
+            shadow_solid,
+            shadow_translucent,
+            entity_quads,
+            shadow_only_quads,
+            outline_base,
+        );
+        laps.lap("r_pack_inputs");
+        let reflection = self.draw_water_mirror(
+            &mut encoder,
+            frame,
+            globals,
+            view_proj,
+            scaled.as_ref(),
+            mirror_plane,
+            clear,
+            sky_visible,
+            flat_frame,
+            solid_draws,
+        );
+        let (world_view, world_depth) = match &scaled {
+            Some((color, depth)) => (color, depth),
+            None => (&view_target, &self.depth),
+        };
+        if culling && let Some(cull) = &mut self.cull {
+            cull.bind_depth(&self.device, world_depth);
         }
+        let oit = self.oit.as_ref().filter(|_| oit_on);
+        let cull = self.cull.as_ref().filter(|_| culling && solid_draws > 0);
+        // The hand draws at the end of the world pass, after a depth reset, when nothing runs
+        // between them (a scaled world's post pass, HDR's world copy, a native mod's
+        // `world_drawn`): one render pass fewer, ~10 µs of wgpu's encoding a frame.
+        let hand_in_world = (frame.hand.len() / 4) > 0
+            && !pack_draws_hand
+            && scaled.is_none()
+            && self.hdr.is_none()
+            // Frame generation draws the hand over the real and the made frame after the world.
+            && fg_frames.is_none()
+            && !native_render::world_drawn_hooked();
         if native_sky_pass && let Some(native) = &mut self.native {
             native.draw_sky_pass(native_sky::SkyPass {
                 device: &self.device,
@@ -2135,119 +2132,6 @@ impl Renderer {
                 clear,
                 globals: &self.group,
             });
-        }
-        laps.lap("r_pack_inputs");
-        // The water mirror, for one of Horizon's own packs that reads it: the world as a
-        // camera mirrored about the water plane sees it, into a half-resolution target the
-        // material stage samples as `reflection`.
-        let mut reflection = None;
-        if let Some(plane) = mirror_plane {
-            let world = self
-                .world_post
-                .size()
-                .filter(|_| scaled.is_some())
-                .unwrap_or([self.config.width, self.config.height]);
-            let size = native_post::reflection_size(world);
-            if self.mirror.as_ref().is_none_or(|m| m.size != size) {
-                let target = |label: &'static str, format, usage| {
-                    self.device
-                        .create_texture(&wgpu::TextureDescriptor {
-                            label: Some(label),
-                            size: wgpu::Extent3d {
-                                width: size[0],
-                                height: size[1],
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format,
-                            usage,
-                            view_formats: &[],
-                        })
-                        .create_view(&Default::default())
-                };
-                self.mirror = Some(MirrorTarget {
-                    size,
-                    color: target(
-                        "Water mirror",
-                        self.output.frame.format,
-                        wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
-                    ),
-                    depth: target(
-                        "Water mirror depth",
-                        wgpu::TextureFormat::Depth32Float,
-                        wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    ),
-                });
-            }
-            if let Some(mirror) = &self.mirror {
-                // Mirrored about y = `plane` (camera-relative).
-                let plane = plane - frame.camera.y as f32;
-                let inverse_view = view::mirror_inverse_view(globals.inverse_view, plane);
-                // fog_ends.w: the plane, below which fs_solid_mirror cuts the world away
-                // (only entity.wgsl reads the glint strength there, and no entity draws here).
-                let mut fog_ends = globals.fog_ends;
-                fog_ends[3] = plane;
-                let mirror_globals = Globals {
-                    view_proj: view::mirror_view_projection(view_proj, plane).to_cols_array_2d(),
-                    inverse_view,
-                    fog_ends,
-                    hdr_light: [0.0, 0.0, globals.hdr_light[2], 0.0],
-                    ..globals
-                };
-                self.uploads.buffer(
-                    &mut encoder,
-                    &self.mirror_globals,
-                    0,
-                    bytemuck::bytes_of(&mirror_globals),
-                );
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Water mirror"),
-                    timestamp_writes: self
-                        .own_timing
-                        .as_mut()
-                        .and_then(|t| t.writes("Water mirror")),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &mirror.color,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &mirror.depth,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(0.0),
-                            store: wgpu::StoreOp::Discard,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-                pass.set_bind_group(0, &self.mirror_group, &[]);
-                if sky_visible && frame.skybox {
-                    pass.set_pipeline(&self.sky);
-                    pass.draw(0..3, 0..1);
-                }
-                // The solid terrain: occlusion culling is off with a mirror, so every draw
-                // is phase 1's.
-                if flat_frame && let Some(flat) = &self.flat {
-                    pass.set_pipeline(&flat.solid_mirror);
-                    let vertices = flat_vertices(&self.arena, self.translucent_arena.as_ref());
-                    flat.draw(&mut pass, &flat.calls[..flat.solid_calls], vertices);
-                } else {
-                    pass.set_pipeline(&self.solid_mirror);
-                    pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.set_vertex_buffer(1, self.instances.slice(..));
-                    self.draw_solid_sections(&mut pass, &self.indirect, 0, 0, solid_draws);
-                }
-                drop(pass);
-                reflection = Some(mirror.color.clone());
-            }
         }
         // One of Horizon's own packs: the mirror its material reads, and its copies of the world
         // before translucent terrain and its surface target, the size of this frame's targets.
@@ -2284,7 +2168,7 @@ impl Renderer {
         let keep_depth = keep_depth || material.is_some();
         // GPU culling's occlusion test splits the world pass as cull.rs's does.
         let gpu_occluding = gpu_frame && self.gpu_culling.as_ref().is_some_and(|g| g.occluding());
-        let pack_frame = |pass: &mut wgpu::RenderPass<'_>| {
+        let mut pack_frame = |pass: &mut wgpu::RenderPass<'_>| {
             if let Some(m) = material {
                 m.bind(pass);
             }
@@ -2355,99 +2239,18 @@ impl Renderer {
             );
             pass.set_bind_group(0, &self.group, &[]);
             pack_frame(&mut pass);
-            if frame.title || (sky_visible && (frame.skybox || frame.end_sky)) {
-                pass.stage(self.own_timing.as_mut(), "sky");
-                let native_sky = !frame.title
-                    && frame.skybox
-                    && !pack_draws_sky
-                    && !native_sky_pass
-                    && self.native.as_ref().is_some_and(|n| n.draw_sky(&mut pass));
-                if native_sky {
-                    // The sky binds the frame's own group; a material stage that traces draws
-                    // with the scene's.
-                    pack_frame(&mut pass);
-                }
-                if !frame.title
-                    && frame.skybox
-                    && !pack_draws_sky
-                    && !native_sky_pass
-                    && !native_sky
-                {
-                    match self.core_sky.as_ref().filter(|c| c.draws_disc()) {
-                        Some(core) => {
-                            core.draw_disc(&mut pass);
-                            pass.set_bind_group(0, &self.group, &[]);
-                        }
-                        None => {
-                            pass.set_pipeline(&self.sky_base);
-                            pass.draw(0..3, 0..1);
-                        }
-                    }
-                    if frame.sky.sunrise_color[3] > 0.001 {
-                        pass.set_pipeline(&self.sunrise_pipeline);
-                        pass.set_vertex_buffer(0, self.sunrise_buffer.slice(..));
-                        pass.draw(0..sunrise_fan::VERTICES as u32, 0..1);
-                    }
-                    // OptiFine custom sky layers, over the disc and sunrise and under the
-                    // sun, moon and stars.
-                    if self.custom_sky.is_drawing() {
-                        self.custom_sky.draw(&mut pass);
-                        pass.set_bind_group(0, &self.group, &[]);
-                    }
-                }
-                if frame.title {
-                    self.panorama.draw(&mut pass);
-                    pass.set_bind_group(0, &self.group, &[]);
-                } else if celestial_vertices > 0 || frame.end_sky {
-                    pass.set_pipeline(&self.celestial.added);
-                    pass.set_bind_group(0, &self.entity_group, &[]);
-                    pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    if frame.end_sky {
-                        self.end_sky.draw(&mut pass);
-                        // The End's custom sky layers go over its sky box.
-                        if self.custom_sky.is_drawing() && !pack_draws_sky && self.native.is_none()
-                        {
-                            self.custom_sky.draw(&mut pass);
-                            pass.set_pipeline(&self.celestial.added);
-                            pass.set_bind_group(0, &self.entity_group, &[]);
-                        }
-                    }
-                    if celestial_vertices > 0 && !pack_draws_celestial {
-                        // The Overworld's bodies start with the sun's quad
-                        // (`Game::celestial_geometry`): a pack sky drawing its own skips it.
-                        let own_sun = !frame.end_sky
-                            && self
-                                .native
-                                .as_ref()
-                                .is_some_and(native_pack::NativePack::hides_sun);
-                        let first = if own_sun { 6 } else { 0 };
-                        // A resource pack's core/sky isn't vanilla's sky times the sky's
-                        // lift, which the sun's disc pass assumes: today's add there.
-                        let lifted = hdr_gain
-                            && self.hdr.as_ref().is_some_and(|h| h.lighting)
-                            && !self.core_sky.as_ref().is_some_and(|c| c.draws_disc());
-                        let bodies = first..(celestial_vertices as u32 / 4) * 6;
-                        pass.set_vertex_buffer(0, self.celestial_buffer.slice(..));
-                        self.celestial.draw_bodies(&mut pass, lifted, bodies);
-                    }
-                    pass.set_bind_group(0, &self.group, &[]);
-                }
-                let own_stars = self
-                    .native
-                    .as_ref()
-                    .is_some_and(native_pack::NativePack::hides_stars);
-                if !frame.title && frame.stars.is_some() && !pack_draws_sky && !own_stars {
-                    match self.core_sky.as_ref().filter(|c| c.draws_stars()) {
-                        Some(core) => core.draw_stars(&mut pass),
-                        None => self.stars.draw(&mut pass),
-                    }
-                    pass.set_bind_group(0, &self.group, &[]);
-                }
-                if !frame.title && frame.dark_disc && !pack_draws_sky {
-                    pass.set_pipeline(&self.dark_disc);
-                    pass.draw(0..3, 0..1);
-                }
-            }
+            pass.stage(self.own_timing.as_mut(), "sky");
+            self.draw_sky_pass_content(
+                &mut pass,
+                frame,
+                sky_visible,
+                pack_draws_sky,
+                native_sky_pass,
+                celestial_vertices,
+                pack_draws_celestial,
+                hdr_gain,
+                &mut pack_frame,
+            );
             // The next stage of the mods' primitives to draw (`RenderLevelStage`): a stage this
             // route does not draw its part of the world at goes with the next one it reaches.
             let mut primitive_stage = 0;
