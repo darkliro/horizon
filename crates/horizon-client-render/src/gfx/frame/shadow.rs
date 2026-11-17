@@ -4,7 +4,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(in super::super) fn draw_shadow_passes(
         &mut self,
-        mut encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         frame: &Frame,
         shadow_view: Option<&external::ShadowView>,
         flat_frame: bool,
@@ -42,12 +42,12 @@ impl Renderer {
                 outline_base,
             });
             native.draw_shadow(native_shadow::ShadowDraws {
-                encoder: &mut encoder,
+                encoder,
                 timing: self.own_timing.as_mut(),
                 lists,
             });
             let scene = self.ray_scene.as_ref().and_then(|s| s.traced(frame.camera));
-            native.before_world(&self.device, &mut encoder, scene.as_ref());
+            native.before_world(&self.device, encoder, scene.as_ref());
         }
     }
 }

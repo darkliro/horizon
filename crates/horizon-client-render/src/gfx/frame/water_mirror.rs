@@ -4,7 +4,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(in super::super) fn draw_water_mirror(
         &mut self,
-        mut encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         frame: &Frame,
         globals: Globals,
         view_proj: glam::Mat4,
@@ -76,7 +76,7 @@ impl Renderer {
                     ..globals
                 };
                 self.uploads.buffer(
-                    &mut encoder,
+                    encoder,
                     &self.mirror_globals,
                     0,
                     bytemuck::bytes_of(&mirror_globals),

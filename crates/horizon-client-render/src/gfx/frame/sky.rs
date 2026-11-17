@@ -25,7 +25,7 @@ impl Renderer {
             if native_sky {
                 // The sky binds the frame's own group; a material stage that traces draws
                 // with the scene's.
-                pack_frame(&mut **pass);
+                pack_frame(pass);
             }
             if !frame.title && frame.skybox && !pack_draws_sky && !native_sky_pass && !native_sky {
                 match self.core_sky.as_ref().filter(|c| c.draws_disc()) {

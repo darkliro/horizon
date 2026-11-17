@@ -25,14 +25,30 @@ def method(source, name):
 
 
 def program(root):
-    gfx = (root / "crates/horizon-client-render/src/gfx.rs").read_text()
+    gfx_path = root / "crates/horizon-client-render/src/gfx.rs"
+    gfx = gfx_path.read_text()
+    # The renderer's methods live in gfx.rs or, as the module is decomposed, in its
+    # submodules; search both so the extraction does not depend on the split.
+    modules = [gfx] + [
+        path.read_text() for path in sorted((gfx_path.parent / "gfx").rglob("*.rs"))
+    ]
+
+    def renderer_method(name):
+        for text in modules:
+            if f"pub fn {name}(" in text:
+                return method(text, name)
+        raise SystemExit(f"no pub fn {name} in gfx.rs or its submodules")
     post = (root / "crates/horizon-client-render/src/gfx/pack_post.rs").read_text()
     game = (root / "crates/horizon-client/src/game.rs").read_text()
     geometry = game.index("fn entity_geometry(")
     start = game.index("let pack_shadows =", geometry)
     end = game.index("if let Some(sprite) = shadow_sprite", start)
     guard = game[start:end]
-    getter = method(gfx, "pack_entity_shadows") if "pub fn pack_entity_shadows(" in gfx else ""
+    getter = (
+        renderer_method("pack_entity_shadows")
+        if any("pub fn pack_entity_shadows(" in text for text in modules)
+        else ""
+    )
     support = r'''
 #![allow(dead_code)]
 mod pack_entities {
@@ -97,7 +113,7 @@ fn scene(kind: &str, dim: Dim, enabled: bool, sprite: bool) -> Game {
 }
 '''
     source = (support.replace("__CASTERS__", method(post, "shadow_casters"))
-              .replace("__NATIVE__", method(gfx, "native_shadow"))
+              .replace("__NATIVE__", renderer_method("native_shadow"))
               .replace("__GETTER__", getter).replace("__GUARD__", guard))
     # Independent expected outcomes: a full standard entity caster owns the
     # mob shadow in each dimension. Native shadows own it only in the Overworld.
