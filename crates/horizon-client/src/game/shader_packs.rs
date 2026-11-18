@@ -1252,10 +1252,10 @@ mod native_pack_tests {
         remember(&path, fingerprint(&path), true);
         let shape = picked_pack_shape(&settings);
         assert_eq!(shape.linear, Some(Blend::Linear));
-        assert!(shape.frame().linear_blend);
+        assert!(shape.frame().linear_blend());
         std::fs::write(&manifest, text).unwrap();
         remember(&path, fingerprint(&path), true);
-        assert!(!picked_pack_shape(&settings).frame().linear_blend);
+        assert!(!picked_pack_shape(&settings).frame().linear_blend());
         settings.mods.disabled.insert("frame_owner".into());
         let shape = picked_pack_shape(&settings);
         assert_eq!(shape.linear, None);
@@ -1313,7 +1313,7 @@ mod native_pack_tests {
         });
         let mut asks = |path: &std::path::Path| {
             settings.horizon.shader_pack = path.to_string_lossy().into_owned();
-            picked_pack_shape(&settings).frame().ray_tracing
+            picked_pack_shape(&settings).frame().ray_tracing()
         };
         assert!(asks(&traced));
         assert!(asks(&package));
@@ -1349,7 +1349,7 @@ mod native_pack_tests {
             settings.horizon.hdr = hdr;
             remember_look(&path, fingerprint(&path), true, false, false);
             let running = picked_pack_shape(&settings).frame();
-            assert!(running.linear_pack);
+            assert!(running.linear_pack());
             // The stage fails while that version runs.
             remember_look(&path, fingerprint(&path), false, false, true);
             assert_eq!(picked_pack_shape(&settings).frame(), running, "{hdr:?}");

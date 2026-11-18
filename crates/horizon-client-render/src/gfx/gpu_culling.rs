@@ -3242,9 +3242,8 @@ mod tests {
                         t.begin(device, queue);
                     }
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    let input =
-                        FrameInputs::new(DVec3::new(0.5, 70.0, 0.5), -64, 24, 5, &frustum)
-                            .with_occlude(true);
+                    let input = FrameInputs::new(DVec3::new(0.5, 70.0, 0.5), -64, 24, 5, &frustum)
+                        .with_occlude(true);
                     let prepared = gpu.prepare(
                         device,
                         queue,
