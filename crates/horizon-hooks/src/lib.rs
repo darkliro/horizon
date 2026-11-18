@@ -250,6 +250,7 @@ pub mod engine {
     pub fn seal() {
         all();
         crate::actions::all();
+        crate::screens::engine::all();
         crate::settings::all();
         crate::pages::engine::all();
         crate::hud::engine::all();
