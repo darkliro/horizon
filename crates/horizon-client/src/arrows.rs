@@ -13,10 +13,11 @@ use crate::{
     projectiles::{Hit, Projectile, ProjectileKind},
     world::World,
 };
+use horizon_core::nbt::Tag;
 use horizon_core::{
     geometry::{Aabb, Direction, Vec3, sweep_intersected_blocks},
     position::BlockPos,
-    random::{LegacyRandom, RandomSource},
+    random::RandomSource,
 };
 use horizon_world::{
     block_collision::BlockCollisionRegistry,
@@ -25,9 +26,8 @@ use horizon_world::{
         FluidSections, FluidTagId,
     },
     entity_fluid_tick::{self, EntityFluidTickWorld},
-    fluid::{FluidHeightWorld, FluidKind, FluidState, FluidTemplate},
-    fluid_flow::{FluidFlowWorld, flow_at},
-    nbt::Tag,
+    fluid::{FluidHeightWorld, FluidKind, FluidState},
+    fluid_flow::FluidFlowWorld,
     registry::BlockStateId,
     water_splash::{self, SplashParticle, WaterSplashWorld},
 };
@@ -72,7 +72,7 @@ pub fn drawn_ammo(ammo: &crate::items::ItemStack, intangible: bool) -> crate::it
     if intangible {
         drawn.data_mut().set_other(
             INTANGIBLE,
-            Some(horizon_world::nbt::Tag::Compound(Default::default())),
+            Some(horizon_core::nbt::Tag::Compound(Default::default())),
         );
     }
     drawn
@@ -202,13 +202,11 @@ pub struct ArrowState {
     pub has_been_shot: bool,
     /// `Projectile.canBreak`: the decoded top-level projectile predicate,
     /// independent of its pickup item and firing weapon.
-    pub can_break: Option<horizon_world::nbt::Tag>,
+    pub can_break: Option<horizon_core::nbt::Tag>,
     /// `ThrownTrident.dealtDamage`: it has hit an entity (or sat in a block
     /// for over 4 ticks) and hits no more.
     pub dealt_damage: bool,
     pub removed: bool,
-    /// The arrow's own random (`Entity.random`).
-    pub random: LegacyRandom,
     pub events: Vec<ArrowEvent>,
     /// The speed (`deltaMovement.length()`) it hit a block at, before it stuck.
     pub hit_speed: f64,
@@ -236,6 +234,11 @@ impl PartialEq for ArrowState {
             && self.last_state == other.last_state
             && self.fire_ticks == other.fire_ticks
             && self.synced_fire == other.synced_fire
+    }
+}
+impl Default for ArrowState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 const ARROW_HIT: &str = "minecraft:entity.arrow.hit";
@@ -268,7 +271,7 @@ impl ArrowState {
         self.crossbow_hit_sound =
             matches!(saved, Some(Tag::String(s)) if s.to_string_lossy() == CROSSBOW_HIT);
     }
-    pub fn new(random: LegacyRandom) -> Self {
+    pub fn new() -> Self {
         Self {
             in_ground: false,
             canceled_impact_inside: false,
@@ -297,7 +300,6 @@ impl ArrowState {
             can_break: None,
             dealt_damage: false,
             removed: false,
-            random,
             events: Vec::new(),
             hit_speed: 0.0,
             spawn_pos: None,
@@ -310,6 +312,20 @@ impl ArrowState {
     pub fn potion_color(&self) -> Option<u32> {
         (!crate::brewing::contents_empty(&self.pickup_item))
             .then(|| crate::brewing::contents_color(&self.pickup_item))
+    }
+    /// Its entity type is `SpectralArrow`: the type it loaded with, or the
+    /// item it was fired as (a bow's spectral ammo).
+    pub fn is_spectral_type(&self) -> bool {
+        self.spectral || &*self.pickup_item.item == "minecraft:spectral_arrow"
+    }
+    /// `SpectralArrow.readAdditionalSaveData`: the glow `Duration` of the
+    /// compound being loaded, 200 when it has none. `getIntOr` is
+    /// `NumericTag.intValue`, so a float or double one floors.
+    pub fn read_spectral_duration(&mut self, tag: &Tag) {
+        self.spectral_duration = tag
+            .get("Duration")
+            .and_then(crate::nbt_path::int_value)
+            .unwrap_or(200);
     }
     /// The `AbstractArrow` constructor's `pickupItemStack`: the drawn ammo
     /// (one item). Ammo drawn without being used up (`INTANGIBLE_PROJECTILE`)
@@ -367,11 +383,15 @@ pub struct ArrowScene<'a, 'r> {
     pub facts: &'a BlockFacts,
     pub collision: &'a BlockCollisionRegistry<'r>,
     pub fluids: &'a FluidResources,
+    /// The loop context of the side that ticks the arrow, for the movement hooks.
+    pub loop_context: &'a horizon_world::native_load_context::LoopContext,
     /// `Level.isRainingAt`.
     pub raining: &'a dyn Fn(BlockPos) -> bool,
     /// The `mob_griefing` and `tnt_explodes` game rules.
     pub mob_griefing: bool,
     pub tnt_explodes: bool,
+    /// The mod hooks a mob-owned arrow asks (`MobWorld::mob_hooks`).
+    pub mob_hooks: Option<&'a dyn crate::mobs::MobHooks>,
     pub owners: &'a dyn OwnerLookup,
 }
 /// `EntityReference.getEntity` for an owner the arrow only knows by UUID.
@@ -390,6 +410,18 @@ impl ArrowScene<'_, '_> {
     }
     fn is_air(&self, state: BlockStateId) -> bool {
         self.facts.is_air(state)
+    }
+    /// The check that opens `AbstractArrow.tick`: `at` lies inside one of the
+    /// collision boxes of the block it is in.
+    pub fn inside_collision(&self, at: Vec3) -> bool {
+        let p = BlockPos::containing(at);
+        let state = self.block(p);
+        let origin = Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z));
+        !self.is_air(state)
+            && self
+                .collision_boxes(state, p)
+                .iter()
+                .any(|b| b.move_by(origin).contains(at))
     }
     /// `BlockState.getCollisionShape(level, pos)` (an empty collision context).
     fn collision_boxes(&self, state: BlockStateId, p: BlockPos) -> Vec<Aabb> {
@@ -662,9 +694,14 @@ pub enum EntityHit {
 /// is multiplied by `-0.2 * 0.5` (`-0.1`), and the yaw turns `170 + nextFloat * 20`
 /// degrees. No hit sound. One left almost still (`lengthSqr < 1e-7`) drops its
 /// pickup when that is ALLOWED, then is discarded.
-pub fn deflect_reverse(velocity: &mut Vec3, yaw: &mut f32, st: &mut ArrowState) {
+pub fn deflect_reverse(
+    velocity: &mut Vec3,
+    yaw: &mut f32,
+    st: &mut ArrowState,
+    random: &mut impl RandomSource,
+) {
     let power = 0.2;
-    let rotation = 170.0 + st.random.next_float() * 20.0;
+    let rotation = 170.0 + random.next_float() * 20.0;
     let v = *velocity;
     let k = -power * 0.5;
     *velocity = Vec3::new(v.x * k, v.y * k, v.z * k);
@@ -693,7 +730,7 @@ pub fn finish_entity_hit(p: &mut Projectile, scene: &ArrowScene, outcome: Entity
         EntityHit::Hurt => {
             ticker.hit_sound();
             // A piercing arrow flies on (`getPierceLevel() <= 0` discards).
-            if ticker.st.pierce == 0 {
+            if (ticker.st.pierce as i8) <= 0 {
                 ticker.st.removed = true;
             }
         }
@@ -702,7 +739,7 @@ pub fn finish_entity_hit(p: &mut Projectile, scene: &ArrowScene, outcome: Entity
         EntityHit::Deflected => {
             // The deflection comes before `onHitEntity` adds the entity to
             // `piercingIgnoreEntityIds`.
-            if ticker.st.pierce > 0 {
+            if (ticker.st.pierce as i8) > 0 {
                 ticker.st.pierced.pop();
             }
         }
@@ -745,19 +782,13 @@ impl Ticker<'_, '_, '_, '_> {
         let block_pos = self.block_position();
         let state = self.scene.block(block_pos);
         if !self.scene.is_air(state) && physics {
-            let origin = Vec3::new(
-                f64::from(block_pos.x),
-                f64::from(block_pos.y),
-                f64::from(block_pos.z),
-            );
-            let at = self.position();
-            let inside = self
-                .scene
-                .collision_boxes(state, block_pos)
-                .iter()
-                .any(|b| b.move_by(origin).contains(at));
+            let inside = self.scene.inside_collision(self.position());
             if inside && !self.st.canceled_impact_inside {
                 self.p.velocity = Vec3::ZERO;
+                // `setInGround(true)`: `onSyncedDataUpdated` starts the shake.
+                if !self.st.in_ground && !self.st.first_tick && self.st.shake <= 0 {
+                    self.st.shake = 7;
+                }
                 self.st.in_ground = true;
             }
             self.st.canceled_impact_inside &= inside;
@@ -915,7 +946,7 @@ impl Ticker<'_, '_, '_, '_> {
         }
         let owner = targets
             .iter()
-            .find(|(who, _)| Some(*who) == self.p.owner)
+            .find(|(who, _)| Some(*who) == self.p.collision_owner())
             .map(|(_, b)| *b);
         let swept = bounds(self.p.position)
             .expand_towards(self.p.velocity)
@@ -933,8 +964,11 @@ impl Ticker<'_, '_, '_, '_> {
     /// `AbstractArrow.startFalling`.
     fn start_falling(&mut self) {
         self.st.in_ground = false;
-        self.p.velocity =
-            crate::projectiles::start_falling_velocity(self.p.velocity, &mut self.st.random);
+        let v = self.p.velocity;
+        let x = f64::from(self.p.entity_random().next_float() * 0.2);
+        let y = f64::from(self.p.entity_random().next_float() * 0.2);
+        let z = f64::from(self.p.entity_random().next_float() * 0.2);
+        self.p.velocity = Vec3::new(v.x * x, v.y * y, v.z * z);
         self.st.life = 0;
     }
     /// `AbstractArrow.stepMoveAndHit`: the nearest entity on the way, else the
@@ -962,7 +996,7 @@ impl Ticker<'_, '_, '_, '_> {
         // ThrownTrident.findHitEntity: none once it has dealt damage.
         let targets = if self.st.dealt_damage { &[] } else { targets };
         for (who, b) in targets {
-            if Some(*who) == self.p.owner && !self.p.left_owner || !b.intersects(area) {
+            if Some(*who) == self.p.collision_owner() && !self.p.left_owner || !b.intersects(area) {
                 continue;
             }
             // canHitEntity: not an entity a piercing arrow has gone through.
@@ -989,7 +1023,7 @@ impl Ticker<'_, '_, '_, '_> {
             }
             // AbstractArrow.onHitEntity: past pierce level + 1 entities the
             // arrow is discarded before it hurts the next one.
-            if self.st.pierce > 0 {
+            if (self.st.pierce as i8) > 0 {
                 if self.st.pierced.len() > usize::from(self.st.pierce) {
                     self.st.removed = true;
                     return Hit::None;
@@ -1040,7 +1074,7 @@ impl Ticker<'_, '_, '_, '_> {
     }
     /// `playSound(soundEvent, 1, 1.2 / (random * 0.2 + 0.9))`.
     fn hit_sound(&mut self) {
-        let pitch = 1.2 / (self.st.random.next_float() * 0.2 + 0.9);
+        let pitch = 1.2 / (self.p.entity_random().next_float() * 0.2 + 0.9);
         // CrossbowItem.createProjectile: its arrows hit with the crossbow's sound.
         let crossbow = self.st.crossbow_hit_sound;
         let sound = if self.trident() {
@@ -1067,7 +1101,7 @@ impl Ticker<'_, '_, '_, '_> {
             pitch: 1.0,
         });
         // ProjectileDeflection.REVERSE.
-        let rotation = 170.0 + self.st.random.next_float() * 20.0;
+        let rotation = 170.0 + self.p.entity_random().next_float() * 20.0;
         let v = self.p.velocity;
         self.p.velocity = Vec3::new(v.x * (-0.02 * 0.5), v.y * (-0.2 * 0.5), v.z * (-0.02 * 0.5));
         self.p.yaw += rotation;
@@ -1076,7 +1110,12 @@ impl Ticker<'_, '_, '_, '_> {
     /// a half turn give or take ten degrees at a tenth of the speed; one
     /// left almost still drops its pickup (ALLOWED) and is discarded.
     fn turn_back(&mut self) {
-        deflect_reverse(&mut self.p.velocity, &mut self.p.yaw, self.st);
+        deflect_reverse(
+            &mut self.p.velocity,
+            &mut self.p.yaw,
+            self.st,
+            &mut self.p.random.0,
+        );
     }
     /// `AbstractArrow.onHitBlock`: back off the face by 0.05 along each axis
     /// it moved on, stop, and stick.
@@ -1112,17 +1151,23 @@ impl Ticker<'_, '_, '_, '_> {
         self.st.pierce = 0;
         self.st.pierced.clear();
     }
-    /// `Projectile.mayInteract`: an arrow owned by anything but a player needs `mob_griefing`.
+    /// `Projectile.mayInteract`: a mob's arrows need `mob_griefing`, or a
+    /// mod's yes for the owner (NeoForge's `canEntityGrief(level, owner)`).
     fn may_interact(&self) -> bool {
-        let by_entity = match self.p.owner {
-            Some(Who::Mob(_)) => true,
-            Some(Who::Player) => false,
-            None => self
-                .p
-                .owner_uuid
-                .is_some_and(|u| self.scene.owners.non_player_entity(u)),
-        };
-        !by_entity || self.scene.mob_griefing
+        match self.p.owner {
+            Some(Who::Mob(owner)) => match self.scene.mob_hooks {
+                Some(hooks) => hooks.can_grief(owner, self.scene.mob_griefing),
+                None => self.scene.mob_griefing,
+            },
+            None => {
+                !self
+                    .p
+                    .owner_uuid
+                    .is_some_and(|u| self.scene.owners.non_player_entity(u))
+                    || self.scene.mob_griefing
+            }
+            Some(Who::Player) => true,
+        }
     }
     /// `onProjectileHit` of the blocks a burning projectile lights.
     fn block_reaction(&self, state: BlockStateId) -> Option<BlockReaction> {
@@ -1150,8 +1195,11 @@ impl Ticker<'_, '_, '_, '_> {
             _ => None,
         }
     }
-    /// `Entity.applyEffectsFromBlocks`: the shared sweep keeps the arrow's
-    /// contact hooks and bubble-column pushes before applying the fire effects.
+    /// `Entity.applyEffectsFromBlocks`: the sweep keeps the arrow's
+    /// bubble-column pushes and applies the fire effects; the part's contact
+    /// fires at the batch that ticks it (Game::sweep_projectile_inside), on
+    /// the shared walk, as items' and the other projectiles' do — this own
+    /// walk no longer records it for the drain.
     fn apply_effects_from_blocks(&mut self, from: Vec3, to: Vec3) {
         if self.st.removed || self.st.no_physics {
             return;
@@ -1160,15 +1208,6 @@ impl Ticker<'_, '_, '_, '_> {
         let (fire_ticks, extinguished) =
             scene.apply_block_effects(from, to, self.st.fire_ticks, |state, p, precise| {
                 let name = &*scene.facts.get(state).name;
-                crate::block_contact::emit(crate::block_contact::Event::Inside(
-                    crate::block_contact::Contact {
-                        entity: self.p.id as i32,
-                        kind: self.p.kind.id(),
-                        block: name,
-                        state,
-                        position: p,
-                    },
-                ));
                 if name == "minecraft:bubble_column" && precise {
                     self.bubble_column(state, p);
                 }
@@ -1176,7 +1215,8 @@ impl Ticker<'_, '_, '_, '_> {
         self.st.fire_ticks = fire_ticks;
         if extinguished {
             // Entity.playEntityOnFireExtinguishedSound: keep the entity RNG order.
-            let pitch = 1.6 + (self.st.random.next_float() - self.st.random.next_float()) * 0.4;
+            let pitch = 1.6
+                + (self.p.entity_random().next_float() - self.p.entity_random().next_float()) * 0.4;
             self.st.events.push(ArrowEvent::Sound {
                 sound: ArrowSound::Extinguish,
                 volume: 0.7,
@@ -1350,15 +1390,16 @@ impl ArrowScene<'_, '_> {
             }
             if inside_fluid {
                 effects.advance(step);
-                match fluid.kind().template() {
+                match fluid.kind() {
                     // WaterFluid.entityInside.
-                    FluidTemplate::Water => effects.apply(Effect::Extinguish),
+                    FluidKind::Water | FluidKind::FlowingWater => effects.apply(Effect::Extinguish),
                     // LavaFluid.entityInside (lavaHurt does nothing to arrows).
-                    FluidTemplate::Lava => {
+                    FluidKind::Lava | FluidKind::FlowingLava => {
                         effects.apply(Effect::ClearFreeze);
                         effects.apply(Effect::LavaIgnite);
                     }
-                    FluidTemplate::Empty => {}
+                    // A mod's fluid does nothing to an entity inside it.
+                    FluidKind::Empty | FluidKind::Mod(_) | FluidKind::ModFlowing(_) => {}
                 }
             }
         }
@@ -1522,7 +1563,7 @@ impl FluidInteractionWorld for Ticker<'_, '_, '_, '_> {
         f.camera_height_at(self, [p.x, p.y, p.z])
     }
     fn flow(&mut self, f: FluidState, p: BlockPos) -> Result<Vec3, Error> {
-        flow_at(self, f, p)
+        crate::motion::pushing_flow(self.scene.loop_context, self, f, p)
     }
 }
 impl EntityFluidTickWorld for Ticker<'_, '_, '_, '_> {
@@ -1604,10 +1645,10 @@ impl WaterSplashWorld for Ticker<'_, '_, '_, '_> {
         Ok(())
     }
     fn random_float(&mut self) -> Result<f32, Error> {
-        Ok(self.st.random.next_float())
+        Ok(self.p.entity_random().next_float())
     }
     fn random_double(&mut self) -> Result<f64, Error> {
-        Ok(self.st.random.next_double())
+        Ok(self.p.entity_random().next_double())
     }
     fn play_sound(&mut self, _: (), volume: f32, pitch: f32) -> Result<(), Error> {
         self.st.events.push(ArrowEvent::Sound {

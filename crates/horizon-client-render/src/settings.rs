@@ -217,6 +217,9 @@ pub struct Settings {
     pub shader_packs: Vec<crate::shader_pack_list::Entry>,
     /// The picked pack's options while its Shader Options page is open.
     pub shader_options: Option<crate::shader_options::ShaderOptions>,
+    /// The name of the Horizon shader pack the renderer has loaded, from its manifest (set by
+    /// the game, not saved): `shader_packs` holds no titles until its page was opened.
+    pub running_pack: Option<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -302,6 +305,7 @@ impl Default for Settings {
             mods: Default::default(),
             shader_packs: Vec::new(),
             shader_options: None,
+            running_pack: None,
         }
     }
 }
@@ -347,6 +351,8 @@ impl Settings {
     pub fn load_stores(path: &Path) {
         let dir = path.parent();
         horizon_hooks::settings::engine::load(&mut |file| fs::read_to_string(dir?.join(file)).ok());
+        // The controller's lines end their load: the settings made from P1's already hold them.
+        crate::gamepad::store::loaded();
     }
     pub fn load(path: &Path) -> Self {
         let mut horizon = path
@@ -364,10 +370,6 @@ impl Settings {
                 horizon.save(dir);
             }
         }
-        let controller = path
-            .parent()
-            .map(crate::gamepad::PadSettings::load)
-            .unwrap_or_default();
         let extras_text = path
             .parent()
             .and_then(|dir| fs::read_to_string(dir.join(crate::extras::FILE)).ok())
@@ -380,6 +382,8 @@ impl Settings {
             Some(dir) => fs::read_to_string(dir.join(file)).ok(),
             None => None,
         });
+        // `horizon-controller.txt`, through its store, as the seat whose turn it is.
+        let controller = crate::gamepad::store::loaded();
         // The enabled mods are the game folder's, shared by its players (`--player-dir`).
         let mods = path
             .parent()
@@ -408,6 +412,8 @@ impl Settings {
         // Horizon's own key bindings live in horizon-extras.txt, not in options.txt.
         let emote = settings.extras.emote_key.clone();
         settings.keys.set("key.emote", &emote);
+        // The loaded set is the active one: `keybind` text components show its keys.
+        settings.keys.sync_action_bindings();
         // `Options.load`: `sharePresence` decides what the friends service posts.
         crate::social::set_share_presence(crate::social::SharePresence::of(
             settings.file.int("sharePresence").clamp(0, 2) as u8,
@@ -524,6 +530,7 @@ impl Settings {
             mods: Default::default(),
             shader_packs: Vec::new(),
             shader_options: None,
+            running_pack: None,
             auto_jump: f.bool("autoJump"),
             language: f.string("lang"),
             force_unicode: f.bool("forceUnicodeFont"),
@@ -705,7 +712,8 @@ impl Settings {
         }
         if let Some(dir) = path.parent() {
             self.horizon.save(dir);
-            self.controller.save(dir);
+            // Written by its store below, with the other stores' own files.
+            crate::gamepad::store::keep(&self.controller);
             let mut extras = self.extras.clone();
             extras.emote_key = self.keys.get("key.emote").to_owned();
             extras.save(dir);
@@ -778,6 +786,8 @@ pub enum Opt {
     InvertY,
     AllowCursorChanges,
     Volume(usize),
+    /// Setting `.1` of the native mod in row `.0` of Options > Mods, a range on a slider.
+    ModSetting(u16, u16),
     SoundDevice,
     GuiScale,
     ViewBobbing,
@@ -903,6 +913,16 @@ pub enum Opt {
     MaxAnisotropy,
 }
 
+impl Settings {
+    /// GUI scaling inputs for this settings owner.
+    pub fn gui_scale_inputs(&self) -> crate::hud::GuiScale {
+        crate::hud::GuiScale {
+            requested: self.gui_scale,
+            unicode: self.force_unicode,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,7 +956,11 @@ mod tests {
             assert_eq!(sound_source(event), source, "{event}");
         }
         // Explicit sources still take precedence, including H331's arrow route.
-        let mut audio = crate::audio::Audio::silent(Path::new("/nonexistent/h068-audio"));
+        let mut audio = crate::audio::Audio::silent(
+            &horizon_assets::resource_source::ResourceSource::directory(
+                Path::new("/nonexistent/h068-audio").to_path_buf(),
+            ),
+        );
         audio.capture = Some(Vec::new());
         audio.play_on(6, "minecraft:entity.arrow.hit", Some([1.0; 3]), 1.0, 1.0);
         audio.play_on(4, "minecraft:entity.warden.hurt", Some([1.0; 3]), 1.0, 1.0);

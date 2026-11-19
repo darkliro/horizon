@@ -33,8 +33,9 @@ pub enum Class {
     Urgent,
     /// The chunks around the player: generation, light, meshing.
     Near,
-    /// Far terrain: runs on what the near work leaves, and never on every
-    /// worker at once, so near work that arrives finds a worker free.
+    /// Far terrain and the meshing of levels the player only views: runs on
+    /// what the near work leaves, and never on every worker at once, so near
+    /// work that arrives finds a worker free.
     Far,
 }
 
@@ -204,6 +205,22 @@ impl Pool {
 
     /// [`Pool::new`] whose workers free their buffers after `idle_release`.
     pub fn with_idle_release(threads: usize, name: &str, idle_release: Duration) -> Self {
+        Self::with_spawner(threads, idle_release, |worker, i| {
+            horizon_guest_stack::builder()
+                .name(format!("{name}-{i}"))
+                .spawn(move || {
+                    crate::behind_server();
+                    work(&worker, i);
+                })
+                .map(|_| ())
+        })
+    }
+
+    fn with_spawner(
+        threads: usize,
+        idle_release: Duration,
+        mut spawn: impl FnMut(Arc<Inner>, usize) -> std::io::Result<()>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             sources: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(0),
@@ -218,23 +235,21 @@ impl Pool {
             idle_release,
         });
         let mut started = 0;
+        let mut last_error = None;
         for i in 0..threads.max(1) {
-            let worker = inner.clone();
-            let spawned = std::thread::Builder::new()
-                .name(format!("{name}-{i}"))
-                .spawn(move || {
-                    // Ticks and frames come first.
-                    crate::behind_server();
-                    work(&worker, i);
-                });
-            if spawned.is_ok() {
-                started += 1;
+            match spawn(inner.clone(), i) {
+                Ok(()) => started += 1,
+                Err(error) => last_error = Some(error),
             }
         }
-        inner.threads.store(started.max(1), Ordering::Relaxed);
+        assert!(
+            started > 0,
+            "GuestWorkerUnavailable: no job worker could start: {last_error:?}"
+        );
+        inner.threads.store(started, Ordering::Relaxed);
         Self {
             inner,
-            threads: started.max(1),
+            threads: started,
         }
     }
 
@@ -424,6 +439,7 @@ fn work(inner: &Inner, worker: usize) {
     // wait: with jobs queued every few seconds on some worker, a pool of idle
     // workers would otherwise never free anything.
     let mut idle_since = Instant::now();
+    let mut release_seen = crate::release_seen();
     loop {
         let epoch = inner.epoch.load(Ordering::SeqCst);
         if let Some((entry, far)) = choose(inner) {
@@ -450,18 +466,30 @@ fn work(inner: &Inner, worker: usize) {
             }
             idle_since = Instant::now();
             release_quiet_sources(inner);
+            // Asked to give memory back while jobs keep this worker busy (no
+            // gap for the timed checks below): do it between two jobs.
+            if crate::release_asked(&mut release_seen) {
+                crate::release_free_memory();
+            }
             continue;
         }
         let sleep = lock(&inner.sleep);
         inner.sleepers.fetch_add(1, Ordering::SeqCst);
         let still = |_: &mut ()| inner.epoch.load(Ordering::SeqCst) == epoch;
         let timed_out = if released {
-            drop(
-                inner
-                    .wake
-                    .wait_while(sleep, still)
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
+            // Already released: wake only for a job, or to give back what
+            // other threads freed into this worker's heap since
+            // (`release_everywhere`).
+            let (sleep, wait) = inner
+                .wake
+                .wait_timeout_while(sleep, crate::RELEASE_POLL, still)
+                .unwrap_or_else(|e| e.into_inner());
+            drop(sleep);
+            if wait.timed_out() && crate::release_asked(&mut release_seen) {
+                inner.sleepers.fetch_sub(1, Ordering::SeqCst);
+                crate::release_free_memory();
+                continue;
+            }
             false
         } else {
             let left = inner.idle_release.saturating_sub(idle_since.elapsed());
@@ -499,12 +527,21 @@ fn work(inner: &Inner, worker: usize) {
         // The allocator keeps freed pages until memory runs short: hand back
         // what this worker just freed (its own heap), and the shared arenas'
         // once every worker has.
+        crate::release_asked(&mut release_seen);
         crate::release_free_memory();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[should_panic(expected = "GuestWorkerUnavailable")]
+    fn all_worker_spawn_failures_refuse_the_pool() {
+        super::Pool::with_spawner(2, super::IDLE_RELEASE, |_, _| {
+            Err(std::io::Error::other("injected stack reservation refusal"))
+        });
+    }
+
     use super::*;
     use std::collections::VecDeque;
     use std::sync::mpsc;
@@ -696,6 +733,49 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(counter.idle.load(Ordering::Relaxed));
+    }
+
+    /// A server asking for its memory back while a job arrives every 50 ms,
+    /// shorter than any idle wait: the workers still give it back, between
+    /// two jobs.
+    #[test]
+    fn a_busy_worker_still_gives_memory_back_when_asked() {
+        let pool = Pool::with_idle_release(2, "test-busy-release", Duration::from_secs(60));
+        let counter = Arc::new(Counter {
+            left: Mutex::new(0),
+            done: AtomicUsize::new(0),
+            per_worker: PerWorker::new(pool.threads()),
+            idle: AtomicBool::new(false),
+            all_idle: AtomicBool::new(false),
+        });
+        let reg = pool.register(counter.clone());
+        let by_worker = || {
+            crate::RELEASED_BY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|name| name.starts_with("test-busy-release-"))
+        };
+        // A worker that has run a job has started counting releases; one
+        // started after the request would rightly not see it.
+        *lock(&counter.left) += 1;
+        reg.notify();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while counter.done.load(Ordering::Relaxed) == 0 {
+            assert!(Instant::now() < deadline, "no worker ran the first job");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::release_everywhere();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !by_worker() {
+            assert!(
+                Instant::now() < deadline,
+                "kept busy, no worker gave its memory back"
+            );
+            *lock(&counter.left) += 1;
+            reg.notify();
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// One source idle while another keeps the workers busy (a client meshing
