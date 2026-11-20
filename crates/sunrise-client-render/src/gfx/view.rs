@@ -3,6 +3,9 @@
 //! camera-relative world (section origins, entity offsets) is built once and
 //! only each view's rotation and lens differ.
 
+use super::{Frame, Frustum, JoinedFrusta, Renderer, frustum, taa_frustum};
+#[cfg(feature = "test-support")]
+use glam::Vec4;
 use glam::{DVec3, Mat4, Vec3};
 
 /// The most views one frame draws.
@@ -71,6 +74,56 @@ impl ViewSet {
     /// The view whose frustum covers every other view's.
     pub fn cull(&self) -> &View {
         &self.cull
+    }
+}
+
+impl Renderer {
+    /// The views `render` draws `frame` from.
+    pub fn views(&self, frame: &Frame) -> ViewSet {
+        ViewSet::single(self.screen_view(
+            frame.fov_degrees,
+            frame.yaw,
+            frame.pitch,
+            frame.depth_far,
+        ))
+    }
+    /// The frusta `render` will cull with from `camera`, for culling geometry built before the
+    /// frame (entities, block entities) the same way: the camera's and this frame's world
+    /// views', which it asks the mods for (once a frame, `view_sections`).
+    pub fn camera_frustum(
+        &mut self,
+        camera: DVec3,
+        fov_degrees: f32,
+        yaw: f32,
+        pitch: f32,
+        bob: Mat4,
+        depth_far: f32,
+    ) -> JoinedFrusta {
+        let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
+        let planes = frustum(views.cull().view_proj(bob));
+        self.ask_world_views(camera, depth_far, Frustum::from_planes(planes))
+    }
+    /// A conservative view for geometry built before TAA chooses this frame's
+    /// jitter. Cover a whole rendered pixel on each side, at the configured
+    /// resolution scale/upscale, rather than borrowing the previous frame's size.
+    /// With `camera_frustum`'s world views.
+    pub fn camera_frustum_with_jitter(
+        &self,
+        fov_degrees: f32,
+        yaw: f32,
+        pitch: f32,
+        bob: Mat4,
+        depth_far: f32,
+    ) -> JoinedFrusta {
+        let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
+        let size = self
+            .world_post
+            .taa_render_size([self.config.width, self.config.height]);
+        self.asked_world_views(taa_frustum(views.cull().view_proj(bob), size))
+    }
+    fn screen_view(&self, fov_degrees: f32, yaw: f32, pitch: f32, far: f32) -> View {
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        View::screen(yaw, pitch, fov_degrees, aspect, far)
     }
 }
 
@@ -168,4 +221,9 @@ mod tests {
         assert_eq!(*set.primary(), view);
         assert_eq!(*set.cull(), view);
     }
+}
+
+#[cfg(feature = "test-support")]
+pub fn test_frustum(planes: [Vec4; 6]) -> JoinedFrusta {
+    JoinedFrusta::new(super::Frustum::from_planes(planes), [])
 }

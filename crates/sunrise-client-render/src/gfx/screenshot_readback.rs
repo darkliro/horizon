@@ -1,6 +1,7 @@
 //! Screenshot GPU waits happen on a worker; the owning thread receives mutable pixels.
 use super::screenshot::{HdrScreenshot, PendingScreenshot};
-use super::{Result, ScreenshotRequest, hdr10_to_rgb16, padded_row, square_downscale};
+use super::screenshot::{hdr10_to_rgb16, padded_row};
+use super::{Result, ScreenshotRequest, square_downscale};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(super) struct Reader {

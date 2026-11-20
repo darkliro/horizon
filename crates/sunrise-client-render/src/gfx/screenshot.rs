@@ -1,5 +1,5 @@
 //! Read-back screenshots waiting for the game's client hook, then PNG encoding.
-use super::{Result, hdr_icc, hdr_screenshot_path};
+use super::{Frame, GpuChecks, Renderer, Result, hdr_icc};
 use std::path::{Path, PathBuf};
 
 /// CPU-side frame returned to the game before any screenshot file is written.
@@ -23,6 +23,95 @@ pub struct SavedScreenshot {
 }
 
 type SaveOutcome = (PathBuf, std::result::Result<[u32; 2], String>);
+
+impl Renderer {
+    /// The frame size of the pending `scaled` screenshot when it is larger than the
+    /// window: the window's times the Resolution Scale (when above 100%) and
+    /// `screenshot_quality`, cut down to what one texture and one readback buffer hold,
+    /// and halved for each time it ran out of video memory.
+    pub(super) fn screenshot_size(&self) -> Option<[u32; 2]> {
+        let request = self.screenshot.as_ref()?;
+        if !request.scaled || request.size.is_some() || self.suspended {
+            return None;
+        }
+        let window = [self.config.width, self.config.height];
+        let limits = self.device.limits();
+        let factor = scaled_screenshot_factor(
+            window,
+            self.world_post.scale,
+            self.screenshot_quality,
+            limits.max_texture_dimension_2d,
+            limits.max_buffer_size,
+        ) / 2f32.powi(self.screenshot_halvings as i32);
+        (factor > 1.0).then(|| window.map(|side| (side as f32 * factor) as u32))
+    }
+    /// Draws one frame at `size` into a texture of its own, for the pending screenshot:
+    /// every pass sizes itself by `config`, which says `size` for this frame, the HUD
+    /// keeps its layout at a larger scale, and the world is drawn at `size` (a Resolution
+    /// Scale below 100% stays as low). The window keeps its last frame.
+    pub(super) fn draw_scaled_frame(&mut self, frame: &Frame, size: [u32; 2]) -> Result<bool> {
+        let window = [self.config.width, self.config.height];
+        let mut config = self.config.clone();
+        [config.width, config.height] = size;
+        config.usage |= wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        // A frame the overlays draw on past 8 bits (16-bit, or the layered float frame), read
+        // back through an 8-bit copy (`take_readback`). A 0.2 pack's float frame in SDR keeps
+        // the swapchain's format here, which its picture finishes on (`Readback::finish`).
+        if self.output.frame.overlay_format != config.format.remove_srgb_suffix() {
+            config.format = self.output.frame.format;
+            config.view_formats = vec![self.output.frame.format];
+            config.usage |= wgpu::TextureUsages::TEXTURE_BINDING;
+        }
+        // The layered float frame keeps HDR: its world's light and HUD layer make the picture
+        // (`Hdr::sdr_screenshot`), in HDR's own targets at `size`; it presents nothing, as the
+        // swapchain is set aside. Other frames draw without HDR, into a target of their own.
+        let output = self.output.scaled_screenshot();
+        let layered = output.hdr_on();
+        // Out of video memory (an invalid texture's view is a validation error):
+        // tried again at half the size next frame; the window keeps its last one.
+        let checks = GpuChecks::push(&self.device);
+        let target = (!layered).then(|| Self::offscreen_target(&self.device, &config));
+        let depth = Self::depth(&self.device, &config);
+        if let Some(e) = checks.pop() {
+            log::warn!(
+                "Sunrise renderer: no memory for a {}x{} screenshot ({e}); trying half the size",
+                size[0],
+                size[1]
+            );
+            self.screenshot_halvings += 1;
+            return Ok(false);
+        }
+        let scale = self.world_post.scale;
+        self.world_post.scale = scale / scale.max(1.0);
+        self.hud.zoom = size[0] as f32 / window[0] as f32;
+        [self.config.width, self.config.height] = size;
+        // Frame generation's present thread shows the window's frames, not this one: it stops,
+        // and the window's next frame starts it again.
+        self.frame_gen.stop();
+        let surface = self.surface.take();
+        let hdr = self.hdr.take_if(|_| !layered);
+        let offscreen = std::mem::replace(&mut self.offscreen, target);
+        let window_depth = std::mem::replace(&mut self.depth, depth);
+        // The frame's own targets at `size` can run out of memory too.
+        let drawn = self.draw_frame(frame, Some(GpuChecks::push(&self.device)), output);
+        self.depth = window_depth;
+        self.offscreen = offscreen;
+        match hdr {
+            Some(hdr) => self.hdr = Some(hdr),
+            // Not kept for the window, which makes its own at its size next frame.
+            None => {
+                if let Some(hdr) = &mut self.hdr {
+                    hdr.release_targets();
+                }
+            }
+        }
+        self.surface = surface;
+        [self.config.width, self.config.height] = window;
+        self.hud.zoom = 1.0;
+        self.world_post.scale = scale;
+        drawn
+    }
+}
 
 /// A screenshot being encoded after the owning-thread hook has returned.
 pub struct ScreenshotSave {
@@ -417,4 +506,44 @@ mod tests {
         assert!(!root.path().join("image.png").exists());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
+}
+/// How many times the window's size a scaled screenshot is: the Resolution Scale
+/// `world_scale` when above 1, times `quality`, as far as a side fits in
+/// `max_side` pixels and the readback in `max_buffer` bytes.
+pub(super) fn scaled_screenshot_factor(
+    [width, height]: [u32; 2],
+    world_scale: f32,
+    quality: u32,
+    max_side: u32,
+    max_buffer: u64,
+) -> f32 {
+    let wanted = world_scale.max(1.0) * quality.max(1) as f32;
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let side = f64::from(max_side) / w.max(h);
+    // padded_row(w * f) * h * f <= (4 * w * f + 256) * h * f <= max_buffer.
+    let (a, b) = (4.0 * w * h, 256.0 * h);
+    let buffer = ((b * b + 4.0 * a * max_buffer as f64).sqrt() - b) / (2.0 * a);
+    wanted.min(side.min(buffer) as f32)
+}
+/// Bytes per row of a `width`-pixel frame read back at 4 bytes a pixel.
+pub(super) fn padded_row(width: u32) -> u32 {
+    (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+}
+/// `screenshots/2026-10-28_12.00.00.png` -> `screenshots/2026-10-28_12.00.00-hdr.png`.
+pub(super) fn hdr_screenshot_path(path: &std::path::Path) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{stem}-hdr.png"))
+}
+/// `Rgb10a2Unorm` pixels as 16-bit RGB, big-endian as PNG stores it: each 10-bit value
+/// with its top bits repeated below, so 0 stays 0 and 1023 becomes 65535.
+pub(super) fn hdr10_to_rgb16(pixels: &[[u8; 4]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len() * 6);
+    for &px in pixels {
+        let v = u32::from_le_bytes(px);
+        for shift in [0, 10, 20] {
+            let c = (v >> shift & 0x3ff) as u16;
+            out.extend_from_slice(&(c << 6 | c >> 4).to_be_bytes());
+        }
+    }
+    out
 }

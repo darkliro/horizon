@@ -3794,53 +3794,6 @@ impl Renderer {
         self.mipmaps = levels;
         self.rebuild_terrain_group();
     }
-    /// The views `render` draws `frame` from.
-    pub fn views(&self, frame: &Frame) -> ViewSet {
-        ViewSet::single(self.screen_view(
-            frame.fov_degrees,
-            frame.yaw,
-            frame.pitch,
-            frame.depth_far,
-        ))
-    }
-    /// The frusta `render` will cull with from `camera`, for culling geometry built before the
-    /// frame (entities, block entities) the same way: the camera's and this frame's world
-    /// views', which it asks the mods for (once a frame, `view_sections`).
-    pub fn camera_frustum(
-        &mut self,
-        camera: DVec3,
-        fov_degrees: f32,
-        yaw: f32,
-        pitch: f32,
-        bob: Mat4,
-        depth_far: f32,
-    ) -> JoinedFrusta {
-        let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
-        let planes = frustum(views.cull().view_proj(bob));
-        self.ask_world_views(camera, depth_far, Frustum::from_planes(planes))
-    }
-    /// A conservative view for geometry built before TAA chooses this frame's
-    /// jitter. Cover a whole rendered pixel on each side, at the configured
-    /// resolution scale/upscale, rather than borrowing the previous frame's size.
-    /// With `camera_frustum`'s world views.
-    pub fn camera_frustum_with_jitter(
-        &self,
-        fov_degrees: f32,
-        yaw: f32,
-        pitch: f32,
-        bob: Mat4,
-        depth_far: f32,
-    ) -> JoinedFrusta {
-        let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
-        let size = self
-            .world_post
-            .taa_render_size([self.config.width, self.config.height]);
-        self.asked_world_views(taa_frustum(views.cull().view_proj(bob), size))
-    }
-    fn screen_view(&self, fov_degrees: f32, yaw: f32, pitch: f32, far: f32) -> View {
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        View::screen(yaw, pitch, fov_degrees, aspect, far)
-    }
     fn update_lightmap(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -4024,114 +3977,6 @@ impl Renderer {
     pub fn device_lost(&self) -> bool {
         self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
-    /// The frame size of the pending `scaled` screenshot when it is larger than the
-    /// window: the window's times the Resolution Scale (when above 100%) and
-    /// `screenshot_quality`, cut down to what one texture and one readback buffer hold,
-    /// and halved for each time it ran out of video memory.
-    fn screenshot_size(&self) -> Option<[u32; 2]> {
-        let request = self.screenshot.as_ref()?;
-        if !request.scaled || request.size.is_some() || self.suspended {
-            return None;
-        }
-        let window = [self.config.width, self.config.height];
-        let limits = self.device.limits();
-        let factor = scaled_screenshot_factor(
-            window,
-            self.world_post.scale,
-            self.screenshot_quality,
-            limits.max_texture_dimension_2d,
-            limits.max_buffer_size,
-        ) / 2f32.powi(self.screenshot_halvings as i32);
-        (factor > 1.0).then(|| window.map(|side| (side as f32 * factor) as u32))
-    }
-    /// Draws one frame at `size` into a texture of its own, for the pending screenshot:
-    /// every pass sizes itself by `config`, which says `size` for this frame, the HUD
-    /// keeps its layout at a larger scale, and the world is drawn at `size` (a Resolution
-    /// Scale below 100% stays as low). The window keeps its last frame.
-    fn draw_scaled_frame(&mut self, frame: &Frame, size: [u32; 2]) -> Result<bool> {
-        let window = [self.config.width, self.config.height];
-        let mut config = self.config.clone();
-        [config.width, config.height] = size;
-        config.usage |= wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
-        // A frame the overlays draw on past 8 bits (16-bit, or the layered float frame), read
-        // back through an 8-bit copy (`take_readback`). A 0.2 pack's float frame in SDR keeps
-        // the swapchain's format here, which its picture finishes on (`Readback::finish`).
-        if self.output.frame.overlay_format != config.format.remove_srgb_suffix() {
-            config.format = self.output.frame.format;
-            config.view_formats = vec![self.output.frame.format];
-            config.usage |= wgpu::TextureUsages::TEXTURE_BINDING;
-        }
-        // The layered float frame keeps HDR: its world's light and HUD layer make the picture
-        // (`Hdr::sdr_screenshot`), in HDR's own targets at `size`; it presents nothing, as the
-        // swapchain is set aside. Other frames draw without HDR, into a target of their own.
-        let output = self.output.scaled_screenshot();
-        let layered = output.hdr_on();
-        // Out of video memory (an invalid texture's view is a validation error):
-        // tried again at half the size next frame; the window keeps its last one.
-        let checks = GpuChecks::push(&self.device);
-        let target = (!layered).then(|| Self::offscreen_target(&self.device, &config));
-        let depth = Self::depth(&self.device, &config);
-        if let Some(e) = checks.pop() {
-            log::warn!(
-                "Sunrise renderer: no memory for a {}x{} screenshot ({e}); trying half the size",
-                size[0],
-                size[1]
-            );
-            self.screenshot_halvings += 1;
-            return Ok(false);
-        }
-        let scale = self.world_post.scale;
-        self.world_post.scale = scale / scale.max(1.0);
-        self.hud.zoom = size[0] as f32 / window[0] as f32;
-        [self.config.width, self.config.height] = size;
-        // Frame generation's present thread shows the window's frames, not this one: it stops,
-        // and the window's next frame starts it again.
-        self.frame_gen.stop();
-        let surface = self.surface.take();
-        let hdr = self.hdr.take_if(|_| !layered);
-        let offscreen = std::mem::replace(&mut self.offscreen, target);
-        let window_depth = std::mem::replace(&mut self.depth, depth);
-        // The frame's own targets at `size` can run out of memory too.
-        let drawn = self.draw_frame(frame, Some(GpuChecks::push(&self.device)), output);
-        self.depth = window_depth;
-        self.offscreen = offscreen;
-        match hdr {
-            Some(hdr) => self.hdr = Some(hdr),
-            // Not kept for the window, which makes its own at its size next frame.
-            None => {
-                if let Some(hdr) = &mut self.hdr {
-                    hdr.release_targets();
-                }
-            }
-        }
-        self.surface = surface;
-        [self.config.width, self.config.height] = window;
-        self.hud.zoom = 1.0;
-        self.world_post.scale = scale;
-        drawn
-    }
-}
-/// How many times the window's size a scaled screenshot is: the Resolution Scale
-/// `world_scale` when above 1, times `quality`, as far as a side fits in
-/// `max_side` pixels and the readback in `max_buffer` bytes.
-fn scaled_screenshot_factor(
-    [width, height]: [u32; 2],
-    world_scale: f32,
-    quality: u32,
-    max_side: u32,
-    max_buffer: u64,
-) -> f32 {
-    let wanted = world_scale.max(1.0) * quality.max(1) as f32;
-    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
-    let side = f64::from(max_side) / w.max(h);
-    // padded_row(w * f) * h * f <= (4 * w * f + 256) * h * f <= max_buffer.
-    let (a, b) = (4.0 * w * h, 256.0 * h);
-    let buffer = ((b * b + 4.0 * a * max_buffer as f64).sqrt() - b) / (2.0 * a);
-    wanted.min(side.min(buffer) as f32)
-}
-/// Bytes per row of a `width`-pixel frame read back at 4 bytes a pixel.
-fn padded_row(width: u32) -> u32 {
-    (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 /// Encodes the copy of `texture`'s `size` pixels into a mappable buffer.
 pub(crate) fn copy_frame(
@@ -4142,7 +3987,7 @@ pub(crate) fn copy_frame(
 ) -> wgpu::Buffer {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Sunrise screenshot"),
-        size: u64::from(padded_row(width)) * u64::from(height),
+        size: u64::from(screenshot::padded_row(width)) * u64::from(height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -4152,7 +3997,7 @@ pub(crate) fn copy_frame(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(padded_row(width)),
+                bytes_per_row: Some(screenshot::padded_row(width)),
                 rows_per_image: None,
             },
         },
@@ -4163,24 +4008,6 @@ pub(crate) fn copy_frame(
         },
     );
     buffer
-}
-/// `screenshots/2026-10-28_12.00.00.png` -> `screenshots/2026-10-28_12.00.00-hdr.png`.
-fn hdr_screenshot_path(path: &std::path::Path) -> PathBuf {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    path.with_file_name(format!("{stem}-hdr.png"))
-}
-/// `Rgb10a2Unorm` pixels as 16-bit RGB, big-endian as PNG stores it: each 10-bit value
-/// with its top bits repeated below, so 0 stays 0 and 1023 becomes 65535.
-fn hdr10_to_rgb16(pixels: &[[u8; 4]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pixels.len() * 6);
-    for &px in pixels {
-        let v = u32::from_le_bytes(px);
-        for shift in [0, 10, 20] {
-            let c = (v >> shift & 0x3ff) as u16;
-            out.extend_from_slice(&(c << 6 | c >> 4).to_be_bytes());
-        }
-    }
-    out
 }
 /// Centre-crop the frame to a square and average it down to `size`.
 pub(crate) fn square_downscale(pixels: &[u8], width: u32, height: u32, size: [u32; 2]) -> Vec<u8> {
@@ -4222,9 +4049,7 @@ mod view_frustum;
 pub use view_frustum::Frustum;
 
 #[cfg(feature = "test-support")]
-pub fn test_frustum(planes: [Vec4; 6]) -> JoinedFrusta {
-    JoinedFrusta::new(Frustum::from_planes(planes), [])
-}
+pub use view::test_frustum;
 /// Vanilla's `Projection`: reversed depth (near maps to 1, far to 0, tests
 /// are GREATER_THAN_OR_EQUAL), which keeps far faces a hair apart, like
 /// fire_side's 0.01 pixel in front of its block, from z-fighting.
