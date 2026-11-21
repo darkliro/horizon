@@ -341,6 +341,7 @@ impl Game<'_> {
         if this.world.game_time % 20 == 0 {
             this.forget_gone_hoppers();
         }
+        this.wake_hoppers_near_vehicles();
         let ticking = this.block_ticking_area();
         this.spawner_tick_positions.clear();
         this.trial_spawner_tick_positions.clear();

@@ -892,6 +892,8 @@ impl Game<'_> {
             .chain(self.chest_other_half(pos))
             .collect();
         for pos in halves {
+            // A hopper asleep below reads this container.
+            self.world.block_entities.wake_below(&pos);
             self.world.modified.insert((pos.0 >> 4, pos.2 >> 4));
             self.with_level(|b, level, ticks| {
                 b.container_changed(level, ticks, BlockPos::new(pos.0, pos.1, pos.2))
@@ -1150,6 +1152,95 @@ impl Game<'_> {
         }
         let state = self.world.block(pos.0, pos.1, pos.2);
         self.hopper_try_move_items_with_state(pos, state);
+        self.sleep_idle_hopper(pos, state);
+    }
+    /// Puts the hopper at `pos` to sleep when nothing it can reach could change
+    /// without waking it: it is switched off by redstone (`state_changed` wakes
+    /// it), or it is empty and has no container (block, minecart or boat) above
+    /// to take from. Items that land in its suck area wake it
+    /// (`wake_hoppers_near_items`), and so does a change to the block above or
+    /// to the container there (`BlockEntities::wake_below`, `container_changed`).
+    /// A minecart or boat reaching it wakes it too (`wake_hoppers_near_vehicles`).
+    /// It stays awake while a mod answers for entity containers, has a
+    /// `prepare_hopper_transfer` subscriber, or has a hopper beside it.
+    fn sleep_idle_hopper(&mut self, pos: Pos, state: BlockStateId) {
+        if self.hoppers.get(&pos).is_some_and(|h| h.cooldown > 0)
+            // `prepare_hopper_transfer` runs for every attempt of an enabled
+            // hopper, empty ones too: a subscriber keeps its hoppers awake.
+            || mod_api::__private::listened(mod_api::HookId::PrepareHopperTransfer)
+        {
+            return;
+        }
+        let above = (pos.0, pos.1 + 1, pos.2);
+        let c = self.containers();
+        let facts = self.res.facts();
+        // A hopper feeding this one from the side reads when this one ticked
+        // (`tickedGameTime`), disabled or not: keep it ticking.
+        let hopper_beside = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dz)| {
+            horizon_client::block_entity_types::factory_block(
+                &facts
+                    .get(self.world.block(pos.0 + dx, pos.1, pos.2 + dz))
+                    .name,
+            ) == "minecraft:hopper"
+        });
+        let enabled = c.prop(state, "enabled") != Some("false");
+        let busy = enabled
+            && match c.view(pos, false) {
+                None => true,
+                Some(view) => {
+                    !c.is_empty(&view)
+                        || !self.carts.is_empty()
+                        || !self.boats.is_empty()
+                        || mod_api::has_entity_providers(&ENTITY_AUTOMATION)
+                        || c.hopper_insertion_view(above).is_some()
+                }
+            };
+        if hopper_beside || busy {
+            return;
+        }
+        if enabled && self.item_part_at(above, Direction::Down).is_some() {
+            return;
+        }
+        self.world.block_entities.sleep(pos);
+    }
+    /// Wakes the sleeping hoppers whose suck area (`Hopper.SUCK_AABB`) a dropped
+    /// item's box reaches, once a tick before the hoppers tick.
+    pub(super) fn wake_hoppers_near_items(&mut self) {
+        if !self.world.block_entities.any_asleep() {
+            return;
+        }
+        let boxes: Vec<_> = self.dropped.iter().map(|item| item.bounds()).collect();
+        for b in boxes {
+            self.wake_hoppers_reaching(b);
+        }
+    }
+    /// Wakes the sleeping hoppers a minecart or boat could be taken from: those
+    /// whose container cell above, or suck area, the vehicle's box reaches.
+    /// Runs before the block entities tick.
+    pub(super) fn wake_hoppers_near_vehicles(&mut self) {
+        if !self.world.block_entities.any_asleep() {
+            return;
+        }
+        let boxes: Vec<_> = self
+            .carts
+            .iter()
+            .map(|c| c.bounds())
+            .chain(self.boats.iter().map(|b| b.bounds()))
+            .collect();
+        for b in boxes {
+            self.wake_hoppers_reaching(b);
+        }
+    }
+    /// Wakes the hoppers whose block or the two above it meet `b`.
+    fn wake_hoppers_reaching(&mut self, b: horizon_core::geometry::Aabb) {
+        let (lo, hi) = (b.min_position(), b.max_position());
+        for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
+            for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
+                for y in lo.y.floor() as i32 - 1..=hi.y.floor() as i32 {
+                    self.world.block_entities.wake(&(x, y, z));
+                }
+            }
+        }
     }
     /// Drops the cooldowns of hoppers whose block entity is gone.
     pub(super) fn forget_gone_hoppers(&mut self) {
@@ -1192,6 +1283,7 @@ impl Game<'_> {
     /// its suck area runs `tryMoveItems` with that item as the pickup, in the
     /// entity phase, before the hopper's own tick counts its cooldown down.
     pub(super) fn hoppers_catch_items(&mut self) {
+        self.wake_hoppers_near_items();
         let mut i = 0;
         while i < self.dropped.len() {
             let item = &self.dropped[i];
@@ -2259,6 +2351,52 @@ mod brewing_fuel_transfer_tests {
     #[ignore = "daily"]
     fn prepare_transfer_inventory_write_is_ejected() {
         check_prepare_transfer(true);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn an_idle_hopper_sleeps_and_wakes_for_what_it_could_take() {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let pos = (8, 64, 8);
+            let above = (8, 65, 8);
+            let block = |game: &mut Game<'_>, at: Pos, name: &str| {
+                let state = game.pack.assets.registry.default_state(name).unwrap();
+                game.world.set(at.0, at.1, at.2, state).unwrap();
+            };
+            block(game, pos, "minecraft:hopper");
+            game.world
+                .block_entities
+                .insert(pos, BlockEntity::Chest(vec![None; HOPPER_SLOTS]));
+            game.tick_hopper(pos);
+            assert!(game.world.block_entities.is_asleep(&pos));
+            // A chest filled above wakes it, and it takes from the chest.
+            block(game, above, "minecraft:chest");
+            game.world
+                .block_entities
+                .insert(above, BlockEntity::Chest(vec![None; 27]));
+            assert!(!game.world.block_entities.is_asleep(&pos));
+            game.tick_hopper(pos);
+            assert!(
+                !game.world.block_entities.is_asleep(&pos),
+                "a chest is above"
+            );
+            game.world.block_entities.sleep(pos);
+            if let Some(BlockEntity::Chest(slots)) = game.world.block_entities.get_mut(&above) {
+                slots[0] = Some(ItemStack::new("minecraft:stone", 3));
+            }
+            game.container_changed(above);
+            assert!(!game.world.block_entities.is_asleep(&pos));
+            game.hoppers.get_mut(&pos).unwrap().cooldown = 0;
+            game.hopper_try_move_items(pos);
+            let containers = game.containers();
+            let view = containers.view(pos, false).unwrap();
+            assert_eq!(containers.get(&view, 0).unwrap().count, 1);
+        });
     }
 
     #[test]
