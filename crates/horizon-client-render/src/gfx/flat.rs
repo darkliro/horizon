@@ -101,7 +101,7 @@ pub struct Flat {
     pub solid_mirror: wgpu::RenderPipeline,
     pub translucent: wgpu::RenderPipeline,
     /// `solid` and `translucent` as a mirrored world view draws them, culling the front.
-    pub flipped: super::world_views::Flipped,
+    pub(crate) flipped: super::world_views::Flipped,
     flatten: wgpu::ComputePipeline,
     compute_layout: wgpu::BindGroupLayout,
     flatten_seen: wgpu::ComputePipeline,
@@ -123,6 +123,9 @@ pub struct Flat {
     translucent_blocks_per_page: u64,
     /// Block tables by page key.
     pages: Vec<Option<PageTable>>,
+    /// Each page key's quad looks (`looks::LookGroups`), bound beside the page while a pack
+    /// reads them (`bind_looks`).
+    looks: Vec<wgpu::BindGroup>,
     free_ids: Vec<u32>,
     next_id: u32,
     origins: wgpu::Buffer,
@@ -436,12 +439,20 @@ impl Flat {
     ) -> Self {
         let vertex = wgpu::ShaderStages::VERTEX;
         let compute = wgpu::ShaderStages::COMPUTE;
+        let (vtm, vm) = if super::surface_setup::mesh_shader::on(device) {
+            (
+                vertex | wgpu::ShaderStages::TASK | wgpu::ShaderStages::MESH,
+                vertex | wgpu::ShaderStages::MESH,
+            )
+        } else {
+            (vertex, vertex)
+        };
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Flat section draws"),
             entries: &[
-                storage(0, vertex, true),
-                storage(1, vertex, true),
-                storage(ARENA_BINDING, vertex, true),
+                storage(0, vtm, true),
+                storage(1, vtm, true),
+                storage(ARENA_BINDING, vm, true),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -491,6 +502,7 @@ impl Flat {
         let storage_usage = wgpu::BufferUsages::STORAGE;
         let back = Some(wgpu::Face::Back);
         Self {
+            looks: Vec::new(),
             // The solid draws read either layout of the solid quads (`mesher::packed`) from
             // the page; translucent ones keep their vertex buffer.
             solid: solid(
@@ -709,6 +721,45 @@ impl Flat {
             }
         }
     }
+    /// Uploads the frame's camera-relative origins by section id into `self.origins`, growing
+    /// the storage buffer if needed and resetting cached page bind groups so `bind_pages` rebinds.
+    pub fn write_origins(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &mut super::upload::Uploads,
+        origins: impl Iterator<Item = (u32, [f32; 4])>,
+    ) {
+        self.origin_data.clear();
+        self.origin_data.resize(self.next_id as usize, [0.0; 4]);
+        for (id, o) in origins {
+            let id = id as usize;
+            if self.origin_data.len() <= id {
+                self.origin_data.resize(id + 1, [0.0; 4]);
+            }
+            self.origin_data[id] = o;
+        }
+        if self.origin_data.len() as u64 > self.origin_capacity {
+            self.origin_capacity = (self.origin_data.len() as u64).next_power_of_two();
+            self.origins = buffer(
+                device,
+                "Section origins by id",
+                self.origin_capacity * 16,
+                wgpu::BufferUsages::STORAGE,
+            );
+            for page in self.pages.iter_mut().flatten() {
+                page.group = None;
+            }
+        }
+        if !self.origin_data.is_empty() {
+            uploads.buffer(
+                encoder,
+                &self.origins,
+                0,
+                bytemuck::cast_slice(&self.origin_data),
+            );
+        }
+    }
     /// Builds the frame's index list from `draws` (`DrawIndexedIndirectArgs`:
     /// index count, instances, first index, base vertex, first instance),
     /// solid ones first, with their (vertex page, sorted index page) and
@@ -744,34 +795,7 @@ impl Flat {
             solid_draws
         };
         // Origins by section id.
-        self.origin_data.clear();
-        for (id, o) in origins {
-            let id = id as usize;
-            if self.origin_data.len() <= id {
-                self.origin_data.resize(id + 1, [0.0; 4]);
-            }
-            self.origin_data[id] = o;
-        }
-        if self.origin_data.len() as u64 > self.origin_capacity {
-            self.origin_capacity = (self.origin_data.len() as u64).next_power_of_two();
-            self.origins = buffer(
-                device,
-                "Section origins by id",
-                self.origin_capacity * 16,
-                wgpu::BufferUsages::STORAGE,
-            );
-            for page in self.pages.iter_mut().flatten() {
-                page.group = None;
-            }
-        }
-        if !self.origin_data.is_empty() {
-            uploads.buffer(
-                encoder,
-                &self.origins,
-                0,
-                bytemuck::cast_slice(&self.origin_data),
-            );
-        }
+        self.write_origins(device, encoder, uploads, origins);
         let Plan {
             phase1_calls,
             solid_calls,
@@ -1023,6 +1047,14 @@ impl Flat {
             }));
         }
     }
+    /// Binds `looks`' group of each page with it from now on (none: no looks).
+    pub fn bind_looks(&mut self, looks: Option<&super::looks::LookGroups>) {
+        self.looks.clear();
+        if let Some(looks) = looks {
+            let keys = 0..self.pages.len() as u32;
+            self.looks.extend(keys.map(|k| looks.get(k).clone()));
+        }
+    }
     /// The bind group of the section arena's page `page` (`bind_pages`), which the solid
     /// draws read their vertices through.
     pub fn page_group(&self, page: u32) -> Option<&wgpu::BindGroup> {
@@ -1178,6 +1210,9 @@ impl Flat {
             .expect("prepared page");
         pass.set_vertex_buffer(0, vertices(page));
         pass.set_bind_group(1, table, &[]);
+        if let Some(looks) = self.looks.get(page as usize) {
+            pass.set_bind_group(super::looks::GROUP, looks, &[]);
+        }
     }
 }
 

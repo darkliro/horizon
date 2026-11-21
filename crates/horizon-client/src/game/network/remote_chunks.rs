@@ -253,7 +253,8 @@ impl ChunkDecoder {
             }),
             Condvar::new(),
         ));
-        let worker_count = horizon_threads::worker_count().clamp(1, 4);
+        let worker_count =
+            horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::ChunkDecoder);
         let workers_alive = Arc::new(AtomicUsize::new(0));
 
         let mut spawned = 0;
@@ -264,7 +265,7 @@ impl ChunkDecoder {
             let builder = std::thread::Builder::new()
                 .name(format!("Chunk decoder {i}"))
                 .spawn(move || {
-                    horizon_threads::favour_current();
+                    horizon_threads::chunk_decoder_current();
                     'worker: loop {
                         let job = {
                             let mut q = match queue.0.lock() {
@@ -469,15 +470,10 @@ impl Game<'_> {
             horizon_client::spans::time("replace_remote", || {
                 self.streaming.replace_remote(&mut self.world, chunk)
             });
-            self.world
-                .block_entities
-                .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
         } else {
             self.streaming.insert_remote(&mut self.world, chunk);
         }
-        self.world
-            .block_entities
-            .unload(|k| (k.0 >> 4, k.2 >> 4) == (x, z));
+        self.world.block_entities.unload_chunks(&[(x, z)]);
         self.load_block_entities((x, z), &p.chunk.block_entities);
         // After the column's block entities load: an attachment keeps its block entity if the
         // packet sent it again, and one left from a forgotten column goes.

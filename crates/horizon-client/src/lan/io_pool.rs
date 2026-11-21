@@ -311,10 +311,13 @@ struct Pool {
     workers: Vec<Arc<Worker>>,
 }
 
-/// The pool, started the first time: one thread per two cores.
+/// The pool, started the first time: one thread per two cores, the automatic
+/// size Battery Mode halves. It used to count `available_parallelism` itself;
+/// through `horizon_threads` now, `HORIZON_WORKER_THREADS` caps it too, as
+/// [`horizon_threads::worker_count`] says it caps every pool.
 fn pool() -> Result<&'static Pool, String> {
     static POOL: OnceLock<Result<Pool, String>> = OnceLock::new();
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().div_ceil(2));
+    let threads = horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::Net);
     POOL.get_or_init(|| start(threads).map_err(|e| format!("network threads: {e}")))
         .as_ref()
         .map_err(Clone::clone)
@@ -377,6 +380,7 @@ fn run(mut poll: Poll, worker: &Arc<Worker>) {
     let mut free: Vec<usize> = Vec::new();
     let mut touched: Vec<usize> = Vec::new();
     let mut sweep_at = Instant::now() + SWEEP;
+    let mut release_seen = horizon_threads::release_seen();
     loop {
         let wait = sweep_at.saturating_duration_since(Instant::now());
         if let Err(e) = poll.poll(&mut events, Some(wait))
@@ -431,6 +435,15 @@ fn run(mut poll: Poll, worker: &Arc<Worker>) {
         }
         if now >= sweep_at {
             sweep_at = now + SWEEP;
+            // Give back what was freed into this thread's heap (the packets it
+            // read, the buffers of connections gone) when the server asks.
+            if horizon_threads::release_asked(&mut release_seen) {
+                if conns.iter().all(Option::is_none) {
+                    conns = Vec::new();
+                    free = Vec::new();
+                }
+                horizon_threads::release_free_memory();
+            }
             touched.clear();
             for (i, slot) in conns.iter_mut().enumerate() {
                 if let Some(c) = slot {
@@ -612,7 +625,9 @@ impl Conn {
     /// Frame `bodies` into `out`, `queued` ones counted off `pending`: false
     /// if one could not be.
     fn frame(&mut self, now: Instant, bodies: Vec<Queued>, _queued: bool) -> bool {
-        for body in &bodies {
+        // By value: each body is freed once it is framed, so a large batch (a reopened
+        // world's first view, uncapped in process, #18313) is never held twice.
+        for body in bodies {
             let result = if body.prepared {
                 self.writer.frame_into(&body.body, &mut self.out);
                 Ok(())

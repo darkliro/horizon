@@ -59,7 +59,7 @@ ServerLevel.addEntity	inline	crates/horizon-client/src/game/mobs/creatures/mod.r
 ServerLevel.tryAddFreshEntityWithPassengers	inline	crates/horizon-client/src/game/world/persist.rs::Game::load_mob	gap: minor: loads a mob with its Passengers but never refuses a UUID that is already loaded, so /summon with a fixed UUID twice makes two
 ServerLevel.unload	inline	crates/horizon-client/src/game.rs::Game::update_world	unloaded columns drop their block entities and names, and their entities are saved out
 ServerLevel.playSeededSound	port	crates/horizon-client/src/lan/containers.rs::Hub::sound
-ServerLevel.sendBlockUpdated	inline	crates/horizon-client-render/src/world.rs::World::set	gap: minor: mobs never re-plan a path when a block on it changes (Mob::recompute_path is never triggered by a block update), so they walk a stale path until a goal re-paths
+ServerLevel.sendBlockUpdated	inline	crates/horizon-client/src/mobs.rs::blocks_changed	a write that changes a collision shape re-paths the mobs whose path runs near it (should_recompute_path), found once per tick (collision_changes)
 ServerLevel.neighborChanged	port	crates/horizon-world/src/level/hooks.rs::Sim::neighbor_changed
 ServerLevel.getDestroyType	port	crates/horizon-client/src/game/explosion.rs::Game::explode	mob explosions pick Keep, Destroy or DestroyWithDecay from mob_griefing and mob_explosion_drop_decay
 ServerLevel.doBlockEvent	inline	crates/horizon-world/src/level/pistons.rs::Behaviours::run_block_events
@@ -105,7 +105,7 @@ ServerPlayer.hurtServer	port	crates/horizon-client/src/game/network/lan_pvp.rs::
 ServerPlayer.addPostEffect	port	crates/horizon-client/src/game/administration/commands/extra.rs::Game::cmd_posteffect	each target keeps its own list (change_post_effects: the player's here, a guest's on its record); the client builds its post chain from the player's, and a guest's is sent when it changes (Hub::send_post_effects)
 ServerPlayer.clearPostEffects	port	crates/horizon-client/src/game/administration/commands/extra.rs::Game::cmd_posteffect	the same per-target lists; clearing empties the target's
 ServerPlayer.removePostEffect	port	crates/horizon-client/src/game/administration/commands/extra.rs::Game::cmd_posteffect	the same per-target lists; removing takes the one effect out
-ServerPlayer.forceSetRotation	inline	crates/horizon-client/src/game/administration/commands/world_cmds.rs::Game::cmd_rotate	/rotate turns a guest through a teleport packet with the new rotation
+ServerPlayer.forceSetRotation	inline	crates/horizon-gameplay/src/commands/rotate.rs::rotate	/rotate turns a guest through a teleport packet with the new rotation
 ServerPlayer.triggerDimensionChangeTriggers	port	crates/horizon-client/src/game/interface/advancements/mod.rs::Game::trigger_dimension	nether_travel fires on the way back to the Overworld from the position the Nether was entered at (adv.marks.nether); gap: minor: that position is not restored from entered_nether_pos after a reload
 ServerPlayer.broadcastToPlayer	port	crates/horizon-client/src/lan/entity.rs::broadcast_to_player	a spectator viewer sees a player only while its camera is that player; anyone else never sees a spectator
 ServerPlayer.startSleeping	port	crates/horizon-client/src/game.rs::Game::try_sleep

@@ -470,33 +470,43 @@ impl Launcher {
         // backup that keeps its worlds' content.
         let named = self.stop_names(&id);
         let reason = tr("Choose what to do about your worlds first");
+        // A wasm or content `.hmod` copied into `horizon-mods/` by hand needs no native consent.
+        let native = row.native();
         let flip = switch(format!("native-switch-{id}"), on, &t);
-        right = right.child(if named {
-            self.with_reason(disabled(flip), reason)
-        } else {
-            flip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if !on && this.settings.native_mods_allowed_at.is_none() {
-                    this.pending_consent = Some(PendingConsent::Local(id.clone()));
-                    cx.notify();
-                    return;
-                }
-                let home = this.mods.home();
-                // An update holds the folder: the window doesn't wait for it.
-                let Some(_lock) = horizon_launcher::browser::try_lock_home(&home) else {
+        // A retired file can't load: Remove is all its row offers. It can't be read, so it has
+        // no switch (`Installed::switch`).
+        right = right.when(row.switch, |right| {
+            right.child(if named {
+                self.with_reason(disabled(flip), reason)
+            } else {
+                flip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if native && !on && this.settings.native_mods_allowed_at.is_none() {
+                        this.pending_consent = Some(PendingConsent::Local(id.clone()));
+                        cx.notify();
+                        return;
+                    }
+                    let home = this.mods.home();
+                    // An update holds the folder: the window doesn't wait for it.
+                    let Some(_lock) = horizon_launcher::browser::try_lock_home(&home) else {
+                        this.mods.message =
+                            Some(Err(tr("Wait for the current operation to finish.").into()));
+                        cx.notify();
+                        return;
+                    };
                     this.mods.message =
-                        Some(Err(tr("Wait for the current operation to finish.").into()));
+                        horizon_launcher::browser::java::set_enabled(&home, &id, !on)
+                            .err()
+                            .map(Err);
+                    this.instance_mods_changed();
                     cx.notify();
-                    return;
-                };
-                this.mods.message = horizon_launcher::browser::java::set_enabled(&home, &id, !on)
-                    .err()
-                    .map(Err);
-                this.instance_mods_changed();
-                cx.notify();
-            }))
+                }))
+            })
         });
-        right = right.child(blocks::badge(tr("NATIVE"), t.muted, &t));
-        if self.settings.native_mods_allowed_at.is_none() {
+        if native {
+            right = right.child(blocks::badge(tr("NATIVE"), t.muted, &t));
+        }
+        // Canceling its prompt turns `mod.<id>` off: only a row that may switch it asks.
+        if native && row.switch && self.settings.native_mods_allowed_at.is_none() {
             let id = row.id.clone();
             right = right
                 .child(blocks::badge(tr("Needs permission"), t.muted, &t))
@@ -568,10 +578,11 @@ impl Launcher {
         cx: &Context<Self>,
     ) -> Div {
         let t = self.theme;
-        let source = row.origin.as_ref().map_or_else(
-            || trf("Local file · {file}", &[("file", &row.file)]),
-            |o| trf("from GitHub: {source}", &[("source", &o.label())]),
-        );
+        let source = match (row.note(), &row.origin) {
+            (Some(note), _) => note.to_string(),
+            (None, Some(o)) => trf("from GitHub: {source}", &[("source", &o.label())]),
+            (None, None) => trf("Local file · {file}", &[("file", &row.file)]),
+        };
         slot_row(
             Some(blocks::slot(None, &row.id, 40., &t)),
             row.id.clone(),

@@ -1,9 +1,12 @@
 //! The server side of `horizon:lod`: what each request gets
 //! ([`Service::request`]), the one background thread that samples the tiles
 //! admitted, every player in turn, and the replies it hands back to the game
-//! thread ([`Service::deliver`]), which sends them with its own packets.
+//! thread ([`Service::deliver`]), which sends them with its own packets. A
+//! tile sampled once answers every player who asks for it next (`cache`).
 use super::{
-    Bucket, IN_FLIGHT, MAX_DISTANCE, Offer, PER_SECOND, Request, SIDE, encode_reply, refusal,
+    Bucket, IN_FLIGHT, MAX_DISTANCE, Offer, PER_SECOND, Request, SIDE,
+    cache::{self, TileCache},
+    encode_tile, refusal, reply,
 };
 use crate::streaming::{LodSampler, LodSource};
 use std::{
@@ -60,7 +63,7 @@ pub struct Service {
     biome_names: Arc<Vec<String>>,
     worker: Option<Worker>,
     /// Replies the worker finished, waiting for their connection.
-    ready: VecDeque<(u32, Vec<u8>)>,
+    ready: VecDeque<Completed>,
 }
 /// A tile admitted, waiting for the worker.
 pub struct Job {
@@ -70,6 +73,13 @@ pub struct Job {
     pub source: Arc<dyn LodSource>,
     pub request: Request,
 }
+
+struct Completed {
+    conn: u32,
+    level: String,
+    data: Vec<u8>,
+}
+
 impl Service {
     pub fn new(distance: u32, biome_names: Vec<String>) -> Self {
         Self {
@@ -147,21 +157,28 @@ impl Service {
     /// keep their place among the game's packets. A reply its connection
     /// is too busy for waits; one taken frees its player's slot.
     pub fn deliver(&mut self, mut send: impl FnMut(u32, &mut Vec<u8>) -> Delivery) {
+        self.deliver_in_level(|conn, _, data| send(conn, data));
+    }
+
+    /// Also supplies the level sampled by the worker, so the game can recheck the
+    /// player's current dimension and terrain view before sending the reply.
+    pub fn deliver_in_level(&mut self, mut send: impl FnMut(u32, &str, &mut Vec<u8>) -> Delivery) {
         if let Some(worker) = &self.worker {
             self.ready.extend(lock(&worker.shared.done).drain(..));
         }
         let players = &mut self.players;
-        self.ready
-            .retain_mut(|(conn, data)| match send(*conn, data) {
+        self.ready.retain_mut(
+            |reply| match send(reply.conn, &reply.level, &mut reply.data) {
                 Delivery::Sent => {
-                    if let Some(p) = players.get_mut(conn) {
+                    if let Some(p) = players.get_mut(&reply.conn) {
                         p.in_flight = p.in_flight.saturating_sub(1);
                     }
                     false
                 }
                 Delivery::Busy => true,
                 Delivery::Gone => false,
-            });
+            },
+        );
     }
 }
 
@@ -177,7 +194,8 @@ struct WorkerShared {
     queue: Mutex<Queue>,
     wake: Condvar,
     /// Replies sampled, for [`Service::deliver`].
-    done: Mutex<Vec<(u32, Vec<u8>)>>,
+    done: Mutex<Vec<Completed>>,
+    tiles: Mutex<TileCache>,
 }
 #[derive(Default)]
 struct Queue {
@@ -191,6 +209,7 @@ impl Worker {
             queue: Mutex::default(),
             wake: Condvar::new(),
             done: Mutex::default(),
+            tiles: Mutex::new(TileCache::new(cache::MAX_BYTES)),
         });
         let worker = shared.clone();
         let thread = thread::Builder::new()
@@ -203,9 +222,19 @@ impl Worker {
                     HashMap::new();
                 while let Some(job) = worker.next() {
                     let r = job.request;
-                    // A sampler that panics is dropped, and the tile refused:
-                    // every job gets a reply, which frees its slot.
-                    let reply = catch_unwind(AssertUnwindSafe(|| {
+                    let kept = lock(&worker.tiles).get(&job.level, &job.source, &r);
+                    if let Some(reply) = kept {
+                        lock(&worker.done).push(Completed {
+                            conn: job.conn,
+                            level: job.level,
+                            data: reply,
+                        });
+                        continue;
+                    }
+                    // A sampler that panics is dropped, and the tile refused
+                    // (not kept): every job gets a reply, which frees its slot.
+                    let mut sampled = false;
+                    let tile = catch_unwind(AssertUnwindSafe(|| {
                         let same = samplers
                             .get(&job.level)
                             .is_some_and(|(source, _)| same_source(source, &job.source));
@@ -218,14 +247,25 @@ impl Worker {
                         let (_, sampler) = samplers.get_mut(&job.level).expect("inserted above");
                         sampler.set_approximate(r.approximate);
                         let columns = sampler.grid(r.x, r.z, r.stride, SIDE);
-                        encode_reply(r.id, Some(&columns), &biome_names)
-                    }))
-                    .unwrap_or_else(|_| {
+                        // Not kept when part of it is still on its way.
+                        sampled = !sampler.waited();
+                        encode_tile(Some(&columns), &biome_names)
+                    }));
+                    let tile = tile.unwrap_or_else(|_| {
                         log::warn!("Far terrain: sampling {} failed; tile refused", job.level);
                         samplers.remove(&job.level);
-                        refusal(r.id)
+                        encode_tile(None, &[])
                     });
-                    lock(&worker.done).push((job.conn, reply));
+                    // The tile, not this request's reply: a refusal kept is
+                    // one every request gets (`encode_tile`).
+                    if sampled {
+                        lock(&worker.tiles).put(&job.level, &job.source, &r, &tile);
+                    }
+                    lock(&worker.done).push(Completed {
+                        conn: job.conn,
+                        level: job.level,
+                        data: reply(r.id, &tile),
+                    });
                 }
             })
             .expect("far terrain server thread");
@@ -276,6 +316,7 @@ fn same_source(a: &Arc<dyn LodSource>, b: &Arc<dyn LodSource>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lod_net::encode_reply;
     use std::time::Duration;
 
     fn request(id: u32, x: i32) -> Vec<u8> {
@@ -331,8 +372,13 @@ mod tests {
             service.request(1, &request(0, 0), at, true, later),
             Verdict::Refuse(_)
         ));
-        service.ready.push_back((1, Vec::new()));
-        service.ready.push_back((2, Vec::new()));
+        for conn in [1, 2] {
+            service.ready.push_back(Completed {
+                conn,
+                level: "minecraft:overworld".into(),
+                data: Vec::new(),
+            });
+        }
         service.deliver(|conn, _| {
             if conn == 1 {
                 Delivery::Sent
@@ -363,6 +409,106 @@ mod tests {
         fn sampler(self: Arc<Self>) -> Box<dyn LodSampler> {
             Box::new(Brittle)
         }
+    }
+
+    /// Far terrain that counts the columns it samples.
+    struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+    impl LodSampler for Counted {
+        fn sample(&mut self, x: i32, z: i32) -> Option<crate::lod::Surface> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(crate::lod::Surface {
+                height: 60 + (x ^ z) % 9,
+                state: horizon_world::registry::BlockStateId(1 + (x & 3) as u32),
+                water: (z % 5 == 0).then_some((62, horizon_world::registry::BlockStateId(86))),
+                biome: (x & 1) as u16,
+            })
+        }
+    }
+    impl LodSource for Counted {
+        fn sampler(self: Arc<Self>) -> Box<dyn LodSampler> {
+            Box::new(Counted(self.0.clone()))
+        }
+    }
+
+    /// Every reply in `service` for `count` requests.
+    fn replies(service: &mut Service, count: usize) -> Vec<(String, Vec<u8>)> {
+        let mut replies = Vec::new();
+        let start = Instant::now();
+        while replies.len() < count && start.elapsed() < Duration::from_secs(10) {
+            service.deliver_in_level(|_, level, data| {
+                replies.push((level.to_owned(), std::mem::take(data)));
+                Delivery::Sent
+            });
+            thread::sleep(Duration::from_millis(2));
+        }
+        replies
+    }
+
+    #[test]
+    fn players_asking_for_the_same_tile_cost_one_sample_and_get_the_same_bytes() {
+        let now = Instant::now();
+        let names: Vec<String> = ["minecraft:plains", "minecraft:desert"]
+            .map(String::from)
+            .into();
+        let mut service = Service::new(64, names.clone());
+        let columns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source: Arc<dyn LodSource> = Arc::new(Counted(columns.clone()));
+        let at = [0.0; 3];
+        // Four players, the same tile, each its own id; one asks again later.
+        for (conn, id) in [(1, 5), (2, 300), (3, 7), (4, 1 << 20), (1, 6)] {
+            let Verdict::Serve(request) = service.request(conn, &request(id, -16), at, true, now)
+            else {
+                panic!("served");
+            };
+            service.push(Job {
+                conn,
+                level: "minecraft:overworld".into(),
+                source: source.clone(),
+                request,
+            });
+        }
+        let got = replies(&mut service, 5);
+        assert_eq!(got.len(), 5);
+        assert_eq!(
+            columns.load(std::sync::atomic::Ordering::Relaxed),
+            SIDE * SIDE
+        );
+        // Each the bytes a fresh sample makes for its id.
+        let mut fresh = Counted(Arc::default());
+        let fresh = fresh.grid(-16, 0, 1, SIDE);
+        for (level, reply) in &got {
+            assert_eq!(level, "minecraft:overworld");
+            let id = super::super::reply_id(reply).unwrap();
+            assert_eq!(*reply, encode_reply(id, Some(&fresh), &names));
+        }
+        // Another level, or the same one under another source, is sampled anew.
+        let reopened: Arc<dyn LodSource> = Arc::new(Counted(columns.clone()));
+        for (level, source) in [
+            ("minecraft:the_nether", &source),
+            ("minecraft:overworld", &reopened),
+        ] {
+            let Verdict::Serve(request) = service.request(2, &request(8, -16), at, true, now)
+            else {
+                panic!("served");
+            };
+            service.push(Job {
+                conn: 2,
+                level: level.into(),
+                source: source.clone(),
+                request,
+            });
+        }
+        assert_eq!(
+            replies(&mut service, 2)
+                .into_iter()
+                .map(|(level, _)| level)
+                .collect::<Vec<_>>(),
+            ["minecraft:the_nether", "minecraft:overworld"]
+        );
+        assert_eq!(
+            columns.load(std::sync::atomic::Ordering::Relaxed),
+            3 * SIDE * SIDE
+        );
     }
 
     #[test]

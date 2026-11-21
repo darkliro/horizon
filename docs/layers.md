@@ -87,7 +87,9 @@ and no engine crate outside the portable list. The platform sits on the desktop 
 (`wgpu`, `winit`, `cpal`), which a handheld console or a browser can't run, so a port there builds on these crates
 instead. They stay that way: the layer check fails when one takes `winit`, `wgpu`, `cpal`, `gilrs`, `arboard` or
 `ureq`, or an engine crate outside the list (#13002). Gameplay itself still lives in `horizon-client`; step P of
-the [plan](#plan) moves it here over time.
+the [plan](#plan) moves it into `horizon-gameplay` (what the server jar holds) and `horizon-client-gameplay`
+(client only) over time. `horizon-gameplay` is not on the list yet: `portable.pending` in `tools/layers.json`
+lets it take `horizon-client-lib` until the types it needs move down, and only ever shrinks.
 
 ## Platform
 
@@ -587,7 +589,8 @@ gives every crate its layer. It fails when:
   dependency, is enough);
 - a pull request adds an entry to `allowed` or `optional` for a crate that already had a layer (a crate newly split
   out of another may carry the old crate's exceptions, and an `allowed` entry may move to `optional`);
-- shipped code depends on a tool.
+- shipped code depends on a tool;
+- a `portable.pending` crate depends on anything beyond its entry, or a pull request adds to an entry.
 
 Each failure names the section of this page that applies. An `allowed` or `optional` entry that has no dependency
 left is only reported: take it out when you like. `--list` prints every crate's layer and the upward dependencies
@@ -595,6 +598,39 @@ left.
 
 `python3 tools/check_addresses.py` (horizon-rust/horizon#12990) checks the built-in addresses
 ([below](#built-in-addresses)); it runs in CI's verify job and in `tools/pr_ready.py` too.
+
+### Mod points stay put
+
+Every function under `horizon_client::game::` that the point generator admits is a mod injection point: the `&self` and
+`&mut self` methods of `Game`, its free functions and the methods of its other types. So is each function marked
+`#[horizon_mod_api_macros::replaceable]` in a lower crate. A point's name, module path and signature are part of the
+mod API ([agent rules](mod-api/agent-rules.md), rule 7), and a mod's `[[inject]]` row names it by that path and a hash
+of its signature.
+
+When you move code out of `impl Game` into a lower crate, a `Game` method keeps its name, module path and signature,
+and only its body changes to call the new function. No wrapper is needed for the other functions: moving one out of
+`game/` removes its point, and callers inside the new crate would skip a wrapper anyway, so its hooks would stop firing
+without a sign. List each removed point in `tools/mod_points_removed.txt` (`name | #PR | reason`). A mod that needs a
+moved function asks for `#[replaceable]` on it in the lower crate, which keeps its point.
+
+`python3 tools/check_mod_points_unchanged.py` checks this. It runs the `hook_snapshot` example of
+`horizon-mod-api-gen` on the base (the merge base with `origin/main`, in a temporary worktree) and on your tree, and
+prints how many points were added, removed (accepted and failing) and changed. It fails when:
+
+- a point is removed and is not listed in `tools/mod_points_removed.txt`, is a `Game` method or a published loop, or is
+  named by a fixture (`tools/ci/fn-replace-check`, the wasm host's), a doc or a mod manifest;
+- a point changes (same name, new target or signature hash) and is not listed in that file;
+- the generated API differs without an accepted point change, or `loops.json` differs at all. With `--allow-added`,
+  a new catalog hook may add its own guest dispatch and update the catalog and hook notes. Existing guest dispatch
+  must match after accounting for the new hook and generated helper numbering;
+- `internals.json` loses an entry, or, without `--allow-added`, differs at all. With the flag, added and changed entries
+  are listed and pass: `cargo horizon-mod update` already reports signature-hash changes for declared internals.
+  Becoming `shape_only`, or losing a `cfg` variant, counts as a removal.
+
+CI runs it, with `--allow-added`, on a pull request that can reach the points: a change to `crates/horizon-client/src/game/`
+or `game.rs`, to the generator's crates (`crates/horizon-mod-*`), to the check itself, to a `Cargo.toml` or `Cargo.lock`,
+or to a Rust file under `crates/` that mentions `replaceable` before or after (`needs_mod_points` in
+`tools/ci/rust_changes.py`). A new hook on purpose adds points and passes with that flag.
 
 ### Today's exceptions
 
@@ -690,7 +726,7 @@ mechanical steps (checks, M1–M4) continue meanwhile. M5 and M6 started on 2026
 | M4 | Cosmetics leave `horizon-client-render`: the tab list's mark through a name-decoration callback (#13094); the settings lines leave with `extras.rs` and `extras_ui.rs` in M5, as clients of the UI page API | render → cosmetics | #13094, merged; the rest in M5 |
 | M5 | Horizon's in-game parts (extras, cosmetics, emotes, Discord, Friends, ping, benchmark upload, official server) leave `horizon-client` for Horizon crates linked into the official build through platform hooks | client, client-lib → cosmetics, friends, telemetry, bench | started 2026-11-09 |
 | M6 | The engine crates stop depending on platform crates: the renderer's shader-pack, pack-format, HDR and theme code moves behind engine extension points; the mod host and agent control move to platform crates; controllers, splitscreen, replay recording and the UI page API move to platform crates on the engine's input-source, compositor and screen hooks; the launcher and `horizon-server` reach the engine through platform API (done, #13905) | the engine → platform and Horizon → engine exceptions | started 2026-11-09; HDR's part with NikitaMGrimm, below |
-| P | Optional, longer: gameplay into the portable crates. `Game` holds the world and its presentation (renderer, screens, particles, sound): split its state module by module, turn gameplay's direct particle and sound calls into level events as vanilla's server sends them, then move each clean module into a portable crate | | any time, small PRs |
+| P | Optional, longer: gameplay into the portable crates. `Game` holds the world and its presentation (renderer, screens, particles, sound): split its state module by module, turn gameplay's direct particle and sound calls into level events as vanilla's server sends them, then move each clean module into `horizon-gameplay` (server side) or `horizon-client-gameplay` (client only) | | any time, small PRs |
 | R | The Horizon layer moves to its own repository and ships in every official download (the table above) | | after the split, Ludovic's call |
 
 HDR in M6: moving HDR behind engine extension points moves the frame pipeline (float targets, tone mapping,

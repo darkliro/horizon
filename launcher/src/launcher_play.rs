@@ -2,27 +2,27 @@
 use super::*;
 
 impl Launcher {
-    /// After a crash with no report: when the game's output ends while its Vulkan renderer
-    /// started, a native crash in the graphics driver (arismoko/horizon#746), switches the game to
-    /// `backend::vulkan_crash_fallback` (DirectX 12 on Windows, OpenGL on Linux; only where the
-    /// player left the graphics API on Auto). The API's label when it did.
-    pub(crate) fn switched_from_vulkan(&self) -> Option<&'static str> {
-        let (api, label) = backend::vulkan_crash_fallback(std::env::consts::OS)?;
-        if !backend::vulkan_start_crashed(&self.prepare_log) {
-            return None;
-        }
-        // The GPU is the same for every profile: the game home's setting and the crashed run's.
-        let home = backend::game_home();
-        let mut homes = vec![home.clone()];
-        homes.extend(self.client_home.clone().filter(|h| *h != home));
-        let mut switched = false;
-        for home in homes {
-            match backend::switch_from_auto(&home, api) {
-                Ok(changed) => switched |= changed,
-                Err(e) => eprintln!("Horizon launcher: could not switch to {label}: {e}"),
+    /// After a native crash with no report (`backend::native_crash_exit`): when the game's output
+    /// ends while its Vulkan or OpenGL renderer started, a crash in the graphics driver
+    /// (arismoko/horizon#746, #18291), switches the game to `backend::start_crash_fallback`
+    /// (DirectX 12 on Windows, OpenGL after Vulkan on Linux; only where the crashed run left the
+    /// graphics API on Auto, `backend::switch_after_start_crash`). The crashed API's label and the
+    /// new one's when it did.
+    pub(crate) fn switched_after_start_crash(&self) -> Option<(&'static str, &'static str)> {
+        let crashed = backend::renderer_start_crash(&self.prepare_log)?;
+        let (api, label) = backend::start_crash_fallback(crashed, std::env::consts::OS)?;
+        let game_home = backend::game_home();
+        let run_home = self
+            .client_home
+            .clone()
+            .unwrap_or_else(|| game_home.clone());
+        match backend::switch_after_start_crash(&run_home, &game_home, api) {
+            Ok(switched) => switched.then_some((crashed.label(), label)),
+            Err(e) => {
+                eprintln!("Horizon launcher: could not switch to {label}: {e}");
+                None
             }
         }
-        switched.then_some(label)
     }
 
     /// The version Play starts: the selected instance's own, else the launcher's.
@@ -63,12 +63,35 @@ impl Launcher {
         self.install_started = Some(Instant::now());
         self.bar = (0., 0.);
         self.install_error = None;
+        let stable = self
+            .stable_install
+            .as_ref()
+            .is_some_and(|r| r.tag == release.tag);
         std::thread::spawn(move || {
-            let progress = |p| {
-                let _ = tx.send(Msg::Progress(tag.clone(), p));
+            let install = |r: &Release| {
+                backend::install(r, |p| {
+                    let _ = tx.send(Msg::Progress(r.tag.clone(), p));
+                })
             };
-            let result = backend::install(&release, progress);
-            let _ = tx.send(Msg::Installed(tag, result));
+            if !stable {
+                let result = install(&release);
+                let _ = tx.send(Msg::Installed(tag, result));
+                return;
+            }
+            // Home's Stable update: one press, even when `nightly` moved on since the offer.
+            let (done, result) = horizon_launcher::nightly::install_stable(
+                release,
+                backend::releases_from_network,
+                |list, next| {
+                    let _ = tx.send(Msg::ReleasesFromNetwork(list));
+                    if let Some(next) = next {
+                        let _ = tx.send(Msg::StableRetry(next.clone()));
+                    }
+                },
+                |tag| backend::installed().iter().any(|t| t == tag),
+                install,
+            );
+            let _ = tx.send(Msg::Installed(done.tag, result));
         });
     }
 
@@ -89,8 +112,7 @@ impl Launcher {
         self.install_error = None;
         self.removing.push(tag.to_string());
         self.installed.retain(|t| t != tag);
-        self.settings.selected =
-            selection_after_removal(&self.installed, self.settings.selected.take());
+        self.settings.keep_installed_selection(&self.installed);
         let (tag, tx) = (tag.to_string(), self.tx.clone());
         std::thread::spawn(move || {
             let result = backend::remove_version(&tag);
@@ -149,9 +171,14 @@ impl Launcher {
     /// Prepares the selected version, its Minecraft files from the player's install or, for an
     /// owner who asks, from Mojang.
     pub(crate) fn prepare(&mut self, from: backend::MinecraftFrom) {
-        let Some(tag) = self.selected().cloned() else {
-            return;
-        };
+        if let Some(tag) = self.selected().cloned() {
+            self.prepare_version(tag, from);
+        }
+    }
+
+    /// [`Self::prepare`] for `tag` rather than the selected version.
+    pub(crate) fn prepare_version(&mut self, tag: String, from: backend::MinecraftFrom) {
+        self.prepare_tag = Some(tag.clone());
         horizon_launcher::mojang::CANCEL.store(false, Ordering::Relaxed);
         let minecraft = self
             .settings
@@ -168,6 +195,8 @@ impl Launcher {
             let log = |line| {
                 let _ = tx.send(Msg::Line(Job::Prepare, line));
             };
+            // A native build reads its base's files: those are the ones prepared.
+            let tag = backend::prepared_in(&tag);
             let result = backend::preparer(&tag, &minecraft, from, &log)
                 .inspect(|(_, minecraft)| backend::sounds(&tag, minecraft, &log))
                 .map(|(p, _)| {
@@ -239,18 +268,50 @@ impl Launcher {
         self.client_started =
             Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2));
         self.starting_client = Some(instance.id.clone());
+        self.starting_instance = Some(instance.id.clone());
+        let stop = self.pre_launch_stop_for(&instance.launch);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let log = |line: String| {
                 let _ = tx.send(Msg::Line(Job::Client, line));
             };
-            let cmd = backend::java_game(&instance, server.as_deref(), &log).map(|mut cmd| {
+            let cmd = backend::java_game(&instance, server.as_deref(), &log).and_then(|mut cmd| {
                 let vars = instance.vars(cmd.get_program());
                 cmd.envs(vars.iter().map(|(k, v)| (k, v)));
-                (horizon_launcher::launch::wrap(cmd, &instance.launch), vars)
+                let launch = &instance.launch;
+                Ok((
+                    horizon_launcher::launch::wrap_stoppable(cmd, launch, &stop)?,
+                    vars,
+                ))
             });
             let _ = tx.send(Msg::JavaGame(instance.id, instance.home, cmd));
         });
+    }
+
+    /// Whether the start under way can be stopped for its instance's pre-launch command, which
+    /// Windows runs to its end before the game.
+    pub(crate) fn pre_launch_stoppable(&self) -> bool {
+        self.pre_launch_stop.is_some()
+    }
+
+    /// Stops the start under way, its pre-launch command with what it started; once that
+    /// succeeded, the game still does not start.
+    pub(crate) fn stop_pre_launch(&self) {
+        if let Some(stop) = &self.pre_launch_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The Stop for a start with `launch`, handed to the start's thread; the window keeps it
+    /// ([`Self::pre_launch_stoppable`]) when Windows runs a pre-launch command.
+    pub(crate) fn pre_launch_stop_for(
+        &mut self,
+        launch: &horizon_launcher::launch::Launch,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let stop = std::sync::Arc::default();
+        self.pre_launch_stop = (cfg!(windows) && !launch.pre_launch.trim().is_empty())
+            .then(|| std::sync::Arc::clone(&stop));
+        stop
     }
 
     /// Whether `tag` can start now ([`starts_now`]): prepared, no preparation under way, no game
@@ -279,6 +340,22 @@ impl Launcher {
     /// Starts the game: the session first (a network round trip when the token needs
     /// renewing), then `drain` starts the process when it arrives.
     pub(crate) fn start_client(&mut self, tag: String, instance_id: Option<String>) {
+        // The folder this start reads, a pack's carried mods among it: never one being ported.
+        let work = self.starting_pack.clone().or_else(|| {
+            self.instances
+                .list
+                .iter()
+                .find(|i| Some(&i.id) == instance_id.as_ref())
+                .map(|i| i.work.clone())
+        });
+        if let Some(why) = work.as_deref().and_then(|w| self.pack_folder_busy(w)) {
+            self.client_error = Some(tr(why).into());
+            self.starting_pack = None;
+            self.joining = None;
+            self.quick_play = None;
+            return;
+        }
+        self.starting_work = work;
         self.client_error = None;
         self.crash = None;
         self.prepare_log.clear();
@@ -304,23 +381,37 @@ impl Launcher {
         let mods_tx = self.mods.tx.clone();
         let auto_enabled = self.settings.auto_updates_mods();
         std::thread::spawn(move || {
-            // One line per step: a terminal run shows where Play stops (#12179).
-            backend::play_step("checking the game's assets");
+            // One step at a time, on stderr and in the window.
+            let say = |stderr: &str, shown: &str| play_step::say(&tx, stderr, shown.into());
+            say(
+                "checking the game's assets",
+                tr("Checking the game's assets…"),
+            );
             backend::complete_assets(&tag);
             if let Some(auto) = auto {
-                backend::play_step("updating registry mods");
-                let lines = mods_page::auto_update(&[auto], auto_enabled);
+                say("updating registry mods", tr("Updating registry mods…"));
+                // The project downloading now, once per project.
+                let last = std::cell::RefCell::new(String::new());
+                let progress = |project: &str| {
+                    if *last.borrow() != project {
+                        project.clone_into(&mut last.borrow_mut());
+                        let shown =
+                            trf("Updating registry mods: {project}", &[("project", project)]);
+                        play_step::say(&tx, &format!("updating {project}"), shown);
+                    }
+                };
+                let lines = mods_page::auto_update(&[auto], auto_enabled, &progress);
                 if !lines.is_empty() {
                     let _ = mods_tx.send(mods_page::Event::AutoUpdated(lines));
                 }
             }
-            backend::play_step("reading the sign-in");
+            say("reading the sign-in", tr("Reading the sign-in…"));
             let session = if horizon_launcher::developer_offline::enabled(&tag) {
                 Ok(None)
             } else {
                 account::session_for_game(&backend::game_home()).map(Some)
             };
-            backend::play_step("starting the game");
+            say("starting the game", tr("Starting the game…"));
             let _ = tx.send(Msg::Session(session));
         });
     }

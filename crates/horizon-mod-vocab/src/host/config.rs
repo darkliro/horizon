@@ -102,6 +102,25 @@ pub trait ConfigServerHost {
     #[access(WorldOnly)]
     fn tick_times(&self) -> Vec<u64>;
     /// Side: server.
+    /// Times every mob's own tick (its riders inside it) from now on, or no longer, summed by
+    /// level and mob type for `take_mob_costs`, as a profiler samples them: while on, two
+    /// clock reads and a map update a mob; off, one thread-local read. Apart from the server's
+    /// own performance report, so both can run. Off drops what was sampled. False on a client.
+    #[access(WorldOnly)]
+    fn mob_cost_sampling(&mut self, on: bool) -> bool;
+    /// Side: server.
+    /// The mob tick costs sampled since the last call (`mob_cost_sampling`), costliest first;
+    /// clears them. Empty while nothing was sampled and on a client.
+    #[access(WorldOnly)]
+    fn take_mob_costs(&mut self) -> Vec<MobTickCost>;
+    /// Side: server.
+    /// Counts every player's play packets by id and direction from now on, or no longer, for
+    /// `player_take_packet_counts`. While on, each packet costs its connection a lock and a
+    /// map update; off, one atomic read. One switch for the whole server, shared by every
+    /// mod. False on a client.
+    #[access(WorldOnly)]
+    fn count_packets(&mut self, on: bool) -> bool;
+    /// Side: server.
     /// The server's view distance in chunks (`PlayerList.getViewDistance`, `view-distance`):
     /// how far players are sent chunks at most. None off a server open to players.
     #[access(WorldOnly)]
@@ -197,4 +216,16 @@ pub trait ConfigClientHost {
     /// when the mod registered no colour by that key.
     #[access(WorldOnly)]
     fn setting_color(&self, key: &str) -> Option<u32>;
+    /// Side: client.
+    /// The calling mod's old settings from `horizon-extras.txt`, when it is the official mod
+    /// that took over a built-in extra (`fps_overlay`, `keystrokes`, `minimap`, `zoom`): each
+    /// of that extra's keys the file has a line for, with the value the extra used, as it wrote
+    /// it (`("fpsCorner", "top_left")`). A written key doesn't mean the player changed it: the
+    /// game writes every key once any extra differs from its default, so a line can hold the
+    /// extra's default. Empty for any other mod (the file isn't read), outside a mod's call,
+    /// for a player who never changed the extras, and for a file that isn't a regular UTF-8
+    /// file of at most 1 MiB. Read-only and read from disk on each call: a port reads it once,
+    /// keeps what it takes in its own settings, and remembers that it did.
+    #[access(ClientSetup)]
+    fn official_extra_settings(&self) -> Vec<(String, String)>;
 }

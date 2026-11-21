@@ -1014,6 +1014,21 @@ pub(super) fn content_root(
             overlay.root.prepared().display()
         );
     }
+    // Only the mods' own HUD textures may lose resolution to fit the atlas.
+    horizon_client::hud::set_mod_namespaces(
+        overlay
+            .mods
+            .iter()
+            .flat_map(|m| m.content.namespaces.iter().cloned())
+            .collect(),
+    );
+    super::code_block_owners::stage(
+        overlay.root.prepared(),
+        overlay
+            .mods
+            .iter()
+            .map(|m| (m.id.as_str(), &m.content.namespaces[..])),
+    );
     register_mob_effects(&overlay.mods);
     resolve_particle_providers(overlay.root.source())?;
     mod_api::__private::resolve_effects(

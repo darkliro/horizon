@@ -74,6 +74,7 @@ impl Reader {
         Ok(PendingScreenshot {
             path: request.path.clone(),
             background: request.background,
+            no_replace: false,
             image: mod_api::ScreenshotImage::new(width, height, pixels),
             hdr,
         })
@@ -88,6 +89,11 @@ pub(super) struct Readbacks(
     #[cfg(test)] Vec<std::thread::JoinHandle<()>>,
 );
 impl Readbacks {
+    /// No readback is running or waiting to be polled.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn start(
         &mut self,
         reader: Reader,
@@ -236,7 +242,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(saved_path, path);
-        assert_eq!(result, Ok([w, h]));
+        assert_eq!(result.map(|saved| saved.size), Ok([w, h]));
         let decoder =
             png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let mut reader = decoder.read_info().unwrap();

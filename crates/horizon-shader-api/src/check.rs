@@ -6,18 +6,20 @@
 //! naga, checked against its signature and the API's rules (no bindings, no
 //! entry points, no `horizon_` names; in 0.2 none of the structs Horizon hands it
 //! constructed), then translated to SPIR-V, Metal and HLSL with its options at their
-//! defaults, minimums and maximums. A post stage of a pack with `[ray_tracing]`, and its
-//! material stage where that traces, is checked twice: as every device runs it, where `trace`
-//! misses, and against the scene.
-use crate::inputs::{COMPUTE_INPUT, DISPLACEMENT_INPUT, Frame, RAY_HIT};
+//! defaults, minimums and maximums. With `[ray_tracing]`, post passes and the other stages that
+//! trace are checked twice: with the stub where rays miss and against the scene.
+use crate::inputs::{
+    COMPUTE_INPUT, DISPLACEMENT_INPUT, ENTITY_LIGHT_SOURCE, Frame, LIT_TINT, RAY_HIT, SHADED_TINT,
+};
 use crate::manifest::{OptionKind, PackOption};
 use crate::package::Pack;
 use crate::stages::{
-    Composed, GROUP, RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING, RAY_SCENE_BINDING,
-    StageKind, compose_traced, identifiers,
+    Composed, GROUP, KEPT_BINDING, RAY_ENTITY_RETAINED_BINDING, RAY_ENTITY_STORE_BINDING,
+    RAY_LIGHTS_BINDING, RAY_LOOKS_BINDING, RAY_SCENE_BINDING, STEP_NAMES, StageKind, TRACE_NAMES,
+    compose_traced, identifiers, lights_on,
 };
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// naga expressions a stage may hold, over all its functions.
@@ -67,8 +69,8 @@ pub struct CheckedStage {
     pub label: String,
     pub module: naga::Module,
     pub info: ModuleInfo,
-    /// A post stage of a pack with `[ray_tracing]`, or its material stage where that calls
-    /// a trace function, built against the scene (`compose_scene`): what the renderer runs
+    /// A post pass of a pack with `[ray_tracing]`, or another stage that calls a trace function,
+    /// built against the scene (`compose_scene`): what the renderer runs
     /// while it binds the scene, on a device with ray queries. `module` is the same stage with a
     /// `trace` that misses, which every device takes.
     pub scene: Option<naga::Module>,
@@ -81,6 +83,9 @@ pub struct CheckedStage {
     /// What the budgets hold: with `scene`, its counts, the larger ones.
     pub expressions: usize,
     pub texture_reads: usize,
+    /// Whether the stage against the scene has Horizon's `trace_step` (`traces_steps`), read off
+    /// its prelude: a pack's own function of that name, without the key, isn't it.
+    steps: bool,
 }
 
 impl CheckedStage {
@@ -94,6 +99,74 @@ impl CheckedStage {
                     .is_some_and(|b| b.group == GROUP && b.binding == RAY_ENTITY_STORE_BINDING)
             })
         })
+    }
+
+    /// Whether the stage against the scene reads the light sources: its own files name them
+    /// (`[ray_tracing] lights = true`, `stages::names_lights`), so the renderer binds their list in
+    /// this pass's layout (binding 80) and keeps it for the pack.
+    pub fn traces_lights(&self) -> bool {
+        (self.scene.as_ref()).is_some_and(|module| binds(module, RAY_LIGHTS_BINDING))
+    }
+
+    /// Whether the stage against the scene reads a terrain hit's look (`RAY_LOOK_FIELDS`), so the
+    /// renderer binds the scene's looks for it (`RAY_LOOKS_BINDING`).
+    pub fn traces_looks(&self) -> bool {
+        (self.scene.as_ref()).is_some_and(|module| binds(module, RAY_LOOKS_BINDING))
+    }
+
+    /// Whether the stage against the scene has `trace_step` (`[ray_tracing] step = true`, and its
+    /// files name one of `STEP_NAMES`), whose candidates the pack's `ray_step` sees.
+    pub fn traces_steps(&self) -> bool {
+        self.steps
+    }
+
+    /// Whether the stage's inputs end with `shaded_tint` (`SHADED_TINT`): its pack's files name
+    /// it (`stages::names_shaded_tint`), so the renderer's constructors of them pass it.
+    pub fn shaded_tint(&self) -> bool {
+        let inputs = ["MaterialInput", "VertexInput", "RayHit"];
+        self.module.types.iter().any(|(_, t)| match &t.inner {
+            naga::TypeInner::Struct { members, .. } => {
+                t.name.as_deref().is_some_and(|n| inputs.contains(&n))
+                    && (members.iter()).any(|m| m.name.as_deref() == Some(SHADED_TINT.name))
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether the stage's `MaterialInput` has `lit_tint` (`LIT_TINT`): its pack's files name it
+    /// (`stages::names_lit_tint`), so the renderer's terrain carries its varying and the
+    /// constructor passes it.
+    pub fn lit_tint(&self) -> bool {
+        self.module.types.iter().any(|(_, t)| match &t.inner {
+            naga::TypeInner::Struct { members, .. } => {
+                t.name.as_deref() == Some("MaterialInput")
+                    && (members.iter()).any(|m| m.name.as_deref() == Some(LIT_TINT.name))
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether the stage's input has its light-source fields (`inputs::light_source`): its
+    /// pack's files name one (`stages::names_light_source`), so the renderer's constructor of
+    /// it passes them.
+    pub fn light_source(&self) -> bool {
+        let inputs = ["MaterialInput", "EntityInput"];
+        self.module.types.iter().any(|(_, t)| match &t.inner {
+            naga::TypeInner::Struct { members, .. } => {
+                t.name.as_deref().is_some_and(|n| inputs.contains(&n))
+                    && (members.iter())
+                        .any(|m| m.name.as_deref() == Some(ENTITY_LIGHT_SOURCE[0].name))
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether a function of the stage, called or not, reads one of `LOOK_FIELDS`: where only
+    /// the terrain's quad looks hold the value, not the vertex. A field is read through its
+    /// struct, a copy of it (an argument, a `let`, a `var`) or a pointer to it, in whichever file
+    /// of the pack: every one is a member access on a value or pointer of the struct's type.
+    pub fn reads_looks(&self) -> bool {
+        reads_fields(&self.module, &self.info, &LOOK_FIELDS, false)
     }
 
     /// Whether the stage's function, or a function it calls, reads the prelude's `global`
@@ -115,6 +188,173 @@ impl CheckedStage {
     }
 }
 
+/// The fields of the terrain's inputs that only its quads' looks hold, by struct: the vertex
+/// holds their product (`shaded_tint`). `RayHit`'s aren't among them: a terrain hit reads the
+/// ray scene's own looks (`RAY_LOOK_FIELDS`), not the arenas'.
+const LOOK_FIELDS: [(&str, &[&str]); 2] = [
+    ("MaterialInput", &["tint", "shade", "ao", "face"]),
+    ("VertexInput", &["tint", "shade", "ao", "face"]),
+];
+
+/// A terrain hit's fields that only its quad's look holds: a stage against the scene that reads
+/// one of them binds the scene's looks, and the renderer keeps them (`Report::ray_looks`).
+/// The vertex already holds `shaded_tint` and the block's light level (`emission`).
+pub(crate) const RAY_LOOK_FIELDS: [(&str, &[&str]); 1] = [("RayHit", &["tint", "shade", "ao"])];
+
+/// Whether the selected functions read one of `fields`, by struct. A direct read, a copy or
+/// a pointer to a struct all resolve to the struct's type. Ray looks count only functions
+/// reachable from an entry point, so an unused helper cannot add a scene binding.
+fn reads_fields(
+    m: &naga::Module,
+    info: &ModuleInfo,
+    fields: &[(&str, &[&str])],
+    reachable_only: bool,
+) -> bool {
+    let looked = |ty: naga::Handle<naga::Type>, index: u32| {
+        // Through a pointer (`ptr<function, MaterialInput>`, a `var`): its pointee.
+        let ty = match m.types[ty].inner {
+            naga::TypeInner::Pointer { base, .. } => base,
+            _ => ty,
+        };
+        let t = &m.types[ty];
+        let naga::TypeInner::Struct { members, .. } = &t.inner else {
+            return false;
+        };
+        let field = members.get(index as usize).and_then(|f| f.name.as_deref());
+        fields.iter().any(|(name, fields)| {
+            t.name.as_deref() == Some(*name) && field.is_some_and(|f| fields.contains(&f))
+        })
+    };
+    struct Reads {
+        field: bool,
+        parameters: Vec<bool>,
+    }
+    let reads = |f: &naga::Function, info: &naga::valid::FunctionInfo, callees: &[Reads]| {
+        let field = |base: naga::Handle<naga::Expression>, index| {
+            let ty = match &info[base].ty {
+                naga::proc::TypeResolution::Handle(ty) => Some(*ty),
+                naga::proc::TypeResolution::Value(naga::TypeInner::Pointer { base, .. }) => {
+                    Some(*base)
+                }
+                naga::proc::TypeResolution::Value(_) => None,
+            };
+            ty.is_some_and(|ty| looked(ty, index))
+        };
+        let mut parameters = vec![false; f.arguments.len()];
+        let mut read_pointer = |mut pointer| loop {
+            match f.expressions[pointer] {
+                naga::Expression::AccessIndex { base, index } => {
+                    if field(base, index) {
+                        break true;
+                    }
+                    pointer = base;
+                }
+                naga::Expression::Access { base, .. } => pointer = base,
+                naga::Expression::FunctionArgument(index) => {
+                    parameters[index as usize] = true;
+                    break false;
+                }
+                _ => break false,
+            }
+        };
+        let reads_field = f
+            .expressions
+            .iter()
+            .any(|(_, expression)| match *expression {
+                naga::Expression::AccessIndex { base, index }
+                    if !reachable_only
+                        || !matches!(
+                            info[base].ty.inner_with(&m.types),
+                            naga::TypeInner::Pointer { .. }
+                        ) =>
+                {
+                    field(base, index)
+                }
+                // A pointer projection alone could be the destination of a store.
+                naga::Expression::Load { pointer } if reachable_only => read_pointer(pointer),
+                _ => false,
+            });
+        let reads_field = reads_field
+            || reachable_only
+                && find_statement(&f.body, &mut |statement| {
+                    let naga::Statement::Call {
+                        function,
+                        arguments,
+                        ..
+                    } = statement
+                    else {
+                        return false;
+                    };
+                    let callee = &callees[function.index()];
+                    callee.field
+                        || callee
+                            .parameters
+                            .iter()
+                            .zip(arguments)
+                            .any(|(&read, &arg)| read && read_pointer(arg))
+                })
+                .is_some();
+        Reads {
+            field: reads_field,
+            parameters,
+        }
+    };
+    if !reachable_only
+        && m.functions
+            .iter()
+            .any(|(h, f)| reads(f, &info[h], &[]).field)
+    {
+        return true;
+    }
+
+    // Naga stores callees before callers. Summarize pointer parameters as well as direct
+    // reads so a caller can distinguish a member passed for reading from one only written.
+    let mut callees = Vec::new();
+    if reachable_only {
+        for (handle, function) in m.functions.iter() {
+            callees.push(reads(function, &info[handle], &callees));
+        }
+    }
+    m.entry_points
+        .iter()
+        .enumerate()
+        .any(|(i, e)| reads(&e.function, info.get_entry_point(i), &callees).field)
+}
+
+#[cfg(test)]
+#[test]
+fn traces_looks_through_a_pointer_parameter_that_reads_the_field() {
+    let shader = |operation| {
+        format!(
+            "struct RayHit {{ ao: f32 }}
+             fn use_ao(p: ptr<function, f32>) {{ {operation} }}
+             fn forward(p: ptr<function, f32>) {{ use_ao(p); }}
+             @compute @workgroup_size(1)
+             fn main() {{ var h: RayHit; if true {{ forward(&h.ao); }} }}"
+        )
+    };
+    assert!(reads_hit_looks(&shader("let ao = *p;"), false));
+    assert!(!reads_hit_looks(&shader("*p = 1.0;"), false));
+}
+
+/// Whether the stage composed as `text` (its build where `trace` misses) reads one of
+/// `RAY_LOOK_FIELDS`, or with `step` (it has `trace_step`) calls `candidate_tint` from an entry
+/// point (the stub's `trace_step` keeps the pack's `ray_step` reachable); false where it doesn't
+/// build, which the check reports.
+pub(crate) fn reads_hit_looks(text: &str, step: bool) -> bool {
+    let Ok(module) = naga::front::wgsl::parse_str(text) else {
+        return false;
+    };
+    let mut validator = Validator::new(ValidationFlags::all(), Capabilities::default());
+    let tint = |module: &naga::Module| {
+        (module.entry_points.iter())
+            .any(|e| reached_call(module, &e.function.body, &["candidate_tint"]).is_some())
+    };
+    validator.validate(&module).is_ok_and(|info| {
+        reads_fields(&module, &info, &RAY_LOOK_FIELDS, true) || step && tint(&module)
+    })
+}
+
 #[derive(Debug)]
 pub struct Report {
     pub stages: Vec<CheckedStage>,
@@ -124,13 +364,37 @@ pub struct Report {
     pub reflection: Option<crate::manifest::Reflection>,
     /// The manifest's `[shadow]`.
     pub shadow: Option<crate::manifest::Shadow>,
-    /// Whether Horizon fogs the material's colour: not under `[material] fog = false` or
-    /// `[frame] fog = "pack"`.
+    /// Whether Horizon fogs the material's colour: not under `[frame] fog = "pack"`.
     pub material_fog: bool,
     /// The manifest's `[[textures]]`, and each image decoded, in that order.
     pub textures: Vec<(crate::manifest::PackTexture, Image)>,
     /// The manifest the stages were checked against.
     pub manifest: crate::manifest::Manifest,
+}
+
+impl Report {
+    /// Whether the pack reads the terrain's own inputs, which the vertex doesn't hold: a stage
+    /// reads one of `LOOK_FIELDS` (`CheckedStage::reads_looks`), what needs the renderer's
+    /// sections to carry their quads' looks. Nothing else does: a pack naming none of them pays
+    /// nothing for them.
+    pub fn looks(&self) -> bool {
+        (self.stages.iter()).any(CheckedStage::reads_looks)
+    }
+
+    /// Whether a stage against the scene reads a terrain hit's look (`CheckedStage::traces_looks`):
+    /// the renderer's scene then keeps its quads' looks. Apart from `looks`: the arenas' stay
+    /// as they are.
+    pub fn ray_looks(&self) -> bool {
+        (self.stages.iter()).any(CheckedStage::traces_looks)
+    }
+
+    /// Whether a stage against the scene has `trace_step` (`CheckedStage::traces_steps`): what
+    /// a renderer reads to give the scene's geometry the no-duplicate flag, so that a step that
+    /// gathers sees each triangle once where the graphics API keeps that promise. The scene
+    /// doesn't set the flag yet.
+    pub fn ray_steps(&self) -> bool {
+        (self.stages.iter()).any(CheckedStage::traces_steps)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,10 +463,16 @@ pub fn check(pack: &Pack) -> Result<Report, Vec<Problem>> {
         )
         .chain(m.post.iter().enumerate().map(|(i, s)| match s.compute {
             true => (StageKind::Compute, s, Some(i)),
-            // In a pack without kept resources or compute passes an ordinary pass keeps the first
-            // entry with its file, as such packs were built before, so they compose
-            // byte-identically; with them, each entry's own `reads` decide its declarations.
-            false => (StageKind::Post, s, m.computes().then_some(i)),
+            // In a pack without kept resources, compute passes or the light sources an ordinary
+            // pass keeps the first entry with its file, as such packs were built before, so they
+            // compose byte-identically; with them, each entry's own `reads` and `files` decide
+            // its declarations and whether it binds the light sources. So do they where an
+            // entry of the file has `trace_step`, which each entry's own files decide.
+            false => (
+                StageKind::Post,
+                s,
+                (m.computes() || lights_on(pack) || steps_in(pack, &s.file)).then_some(i),
+            ),
         }))
         .chain(m.tonemap.iter().map(|s| (StageKind::Tonemap, s, None)))
         .chain(m.entity.iter().map(|s| (StageKind::Entity, s, None)));
@@ -257,8 +527,7 @@ pub fn check(pack: &Pack) -> Result<Report, Vec<Problem>> {
             textures,
             reflection: m.reflection.clone(),
             shadow: m.shadow.clone(),
-            material_fog: m.fog == crate::Fog::Engine
-                && m.material.as_ref().and_then(|s| s.fog).unwrap_or(true),
+            material_fog: m.fog == crate::Fog::Engine,
             manifest: m.clone(),
         })
     } else {
@@ -321,6 +590,7 @@ fn check_entry(
     }
     problems.extend(api_rules(&module, kind, &own));
     problems.extend(constructions(&module, &own));
+    problems.extend(step_rules(&module, &own));
     problems.extend(options(&module, &pack.manifest.options, file));
     if !problems.is_empty() {
         return Err(problems);
@@ -328,20 +598,63 @@ fn check_entry(
     let composed = compose_traced(pack, kind, file, at, false);
     let module = parse(&composed)?;
     let info = validate(&module, &composed, Capabilities::default())?;
-    let problems = sampled_data(&module, &info, &composed, &pack.manifest);
+    let mut problems = sampled_data(&module, &info, &composed, &pack.manifest);
+    if kind == StageKind::Material {
+        let what = "a kept resource: it runs in a vertex shader, which reads none, and casts the \
+                    shadow, which gets none";
+        let kept = KEPT_BINDING..=u32::MAX;
+        problems.extend(vertex_reach(
+            &module,
+            &info,
+            &composed,
+            &pack.manifest,
+            (kept, what),
+        ));
+    }
     if !problems.is_empty() {
         return Err(problems);
     }
-    // A stage the scene changes nothing in (a material stage that doesn't trace) is built once.
+    // A stage whose composition is unchanged is built once.
     let traced =
         Some(compose_traced(pack, kind, file, at, true)).filter(|s| s.text != composed.text);
+    let steps = traced.as_ref().is_some_and(stepped);
     let scene = match traced {
         Some(mut composed) => {
             let module = parse(&composed)?;
+            // A material or entity stage that reads the light sources shares its module with
+            // Horizon's vertex code, whose builtin calls a pack function of the same name would
+            // take over, reaching binding 80 from a vertex shader. (One that only traces or
+            // reads looks keeps such helpers, as 0.2 packs had them.)
+            let who = match kind {
+                StageKind::Material => Some("a `[material]`"),
+                StageKind::Entity => Some("an `[entity]`"),
+                _ => None,
+            };
+            if let Some(who) = who.filter(|_| binds(&module, RAY_LIGHTS_BINDING)) {
+                let problems = shadowed_builtins(&composed, who);
+                if !problems.is_empty() {
+                    return Err(problems);
+                }
+            }
             let capabilities = Capabilities::default() | Capabilities::RAY_QUERY;
             let info = validate(&module, &composed, capabilities)?;
             if kind == StageKind::Material {
-                let problems = vertex_rays(&module, &info, &composed, &pack.manifest);
+                // The scene's bindings, the entity layer's last, and the light sources'.
+                let reached = [
+                    (
+                        RAY_SCENE_BINDING..=RAY_ENTITY_RETAINED_BINDING,
+                        "a trace function: it runs in a vertex shader, and only `material` \
+                         traces rays",
+                    ),
+                    (
+                        RAY_LIGHTS_BINDING..=RAY_LIGHTS_BINDING,
+                        "the light sources: it runs in a vertex shader, and only `material` \
+                         reads them",
+                    ),
+                ];
+                let problems: Vec<_> = (reached.into_iter())
+                    .flat_map(|r| vertex_reach(&module, &info, &composed, &pack.manifest, r))
+                    .collect();
                 if !problems.is_empty() {
                     return Err(problems);
                 }
@@ -415,7 +728,22 @@ fn check_entry(
         scene: scene.map(|s| s.0),
         expressions,
         texture_reads,
+        steps,
     })
+}
+
+/// Whether `composed`'s prelude has Horizon's `trace_step` (`[ray_tracing] step = true`, and the
+/// stage's files name one of `STEP_NAMES`).
+fn stepped(composed: &Composed) -> bool {
+    composed.text[composed.parts[0].1.clone()].contains("fn trace_step(")
+}
+
+/// Whether an ordinary `[[post]]` entry of `pack` whose file is `file` has `trace_step`: its own
+/// files name one of `STEP_NAMES` under `[ray_tracing] step = true`.
+fn steps_in(pack: &Pack, file: &str) -> bool {
+    (pack.manifest.post.iter().enumerate())
+        .filter(|(_, e)| !e.compute && e.file == file)
+        .any(|(i, _)| stepped(&compose_traced(pack, StageKind::Post, file, Some(i), false)))
 }
 
 /// naga's validation of a composed stage, for a device with `capabilities`.
@@ -491,8 +819,16 @@ fn undeclared(mut problems: Vec<Problem>, m: &crate::Manifest, kind: StageKind) 
                         "`{name}` is a kept resource this pass doesn't list in `reads`/`writes`"
                     )
                 }
+                StageKind::Material => {
+                    format!("`{name}` is a kept resource the material doesn't list in `reads`")
+                }
+                StageKind::Entity | StageKind::Sky => format!(
+                    "`{name}` is a kept resource the {} stage doesn't list in `reads`",
+                    kind.name()
+                ),
                 _ => format!(
-                    "`{name}` is a kept resource, which the {} stage can't read yet",
+                    "`{name}` is a kept resource, which the {} stage doesn't read: `material`, \
+                     `entity`, `sky` and the passes do, as their `reads` list",
                     kind.name()
                 ),
             };
@@ -549,22 +885,20 @@ fn sampled_data(
         .collect()
 }
 
-/// Where a material stage built against the scene reaches it from a function that runs in a
-/// vertex shader: `displacement`, and the vertex stage's `vertex`, which shares its module. The
-/// renderer binds the scene for the fragment stage only.
-fn vertex_rays(
+/// Where a material stage reaches group 3's `bindings` (`what` they are and why not) from a
+/// function that runs in a vertex shader: `displacement`, and the vertex stage's `vertex`, which
+/// shares its module. The renderer binds the scene and the kept resources for the fragment
+/// stage only.
+fn vertex_reach(
     module: &naga::Module,
     info: &ModuleInfo,
     composed: &Composed,
     manifest: &crate::manifest::Manifest,
+    (bindings, what): (std::ops::RangeInclusive<u32>, &str),
 ) -> Vec<Problem> {
-    // The entity layer's bindings come last.
     let scene: Vec<_> = (module.global_variables.iter())
         .filter(|(_, g)| {
-            g.binding.as_ref().is_some_and(|b| {
-                let bindings = RAY_SCENE_BINDING..=RAY_ENTITY_RETAINED_BINDING;
-                b.group == GROUP && bindings.contains(&b.binding)
-            })
+            (g.binding.as_ref()).is_some_and(|b| b.group == GROUP && bindings.contains(&b.binding))
         })
         .map(|(handle, _)| handle)
         .collect();
@@ -581,16 +915,54 @@ fn vertex_rays(
                 .get_span(handle)
                 .to_range()
                 .map(|r| r.start);
-            problems.push(located(
-                composed,
-                at,
-                format!(
-                    "`{name}` reaches a trace function: it runs in a vertex shader, and only `material` traces rays"
-                ),
-            ));
+            problems.push(located(composed, at, format!("`{name}` reaches {what}")));
         }
     }
     problems
+}
+
+/// Whether `module` has a global at `binding` of group 3.
+fn binds(module: &naga::Module, binding: u32) -> bool {
+    (module.global_variables.iter()).any(|(_, g)| {
+        (g.binding.as_ref()).is_some_and(|b| b.group == GROUP && b.binding == binding)
+    })
+}
+
+/// WGSL's builtin functions.
+const WGSL_BUILTINS: &str = "\
+    abs acos acosh all any arrayLength asin asinh atan atan2 atanh atomicAdd atomicAnd \
+    atomicCompareExchangeWeak atomicExchange atomicLoad atomicMax atomicMin atomicOr \
+    atomicStore atomicSub atomicXor bitcast ceil clamp cos cosh countLeadingZeros countOneBits \
+    countTrailingZeros cross degrees determinant distance dot dot4I8Packed dot4U8Packed dpdx \
+    dpdxCoarse dpdxFine dpdy dpdyCoarse dpdyFine exp exp2 extractBits faceForward \
+    firstLeadingBit firstTrailingBit floor fma fract frexp fwidth fwidthCoarse fwidthFine \
+    insertBits inverseSqrt ldexp length log log2 max min mix modf normalize pack2x16float \
+    pack2x16snorm pack2x16unorm pack4x8snorm pack4x8unorm pack4xI8 pack4xI8Clamp pack4xU8 \
+    pack4xU8Clamp pow quantizeToF16 radians reflect refract reverseBits round saturate select \
+    sign sin sinh smoothstep sqrt step storageBarrier tan tanh textureBarrier \
+    textureDimensions textureGather textureGatherCompare textureLoad textureNumLayers \
+    textureNumLevels textureNumSamples textureSample textureSampleBaseClampToEdge \
+    textureSampleBias textureSampleCompare textureSampleCompareLevel textureSampleGrad \
+    textureSampleLevel textureStore transpose trunc unpack2x16float unpack2x16snorm \
+    unpack2x16unorm unpack4x8snorm unpack4x8unorm unpack4xI8 unpack4xU8 workgroupBarrier \
+    workgroupUniformLoad";
+
+/// The pack's functions in `composed` named as a WGSL builtin: Horizon's own code in the same
+/// module would call them in place of the builtin. `who`: the stage, and what puts it there.
+fn shadowed_builtins(composed: &Composed, who: &str) -> Vec<Problem> {
+    let names = identifiers(&composed.text);
+    (names.windows(2))
+        .filter(|w| w[0].1 == "fn" && WGSL_BUILTINS.split_whitespace().any(|b| b == w[1].1))
+        .map(|w| {
+            let message = format!(
+                "`fn {}` takes the name of a WGSL builtin: {who} stage that reads the light \
+                 sources shares its module with Horizon's vertex code, which would call it in \
+                 place of the builtin; name it otherwise",
+                w[1].1
+            );
+            located(composed, Some(w[1].0), message)
+        })
+        .collect()
 }
 
 fn located(composed: &Composed, offset: Option<usize>, message: String) -> Problem {
@@ -615,7 +987,40 @@ fn parse(composed: &Composed) -> Result<naga::Module, Vec<Problem>> {
         if let Some((_, text)) = label.filter(|(_, t)| !t.is_empty() && !message.contains(*t)) {
             message += &format!(" ({text})");
         }
+        // A light function named without the key, or outside the stages that trace: undefined.
+        let light =
+            |n: &&str| e.message() == format!("no definition in scope for identifier: `{n}`");
+        if crate::stages::LIGHT_NAMES.iter().any(light) {
+            message += "; the light sources are only in the post, compute, `[[before_world]]`, \
+                        material and entity stages of a pack with `lights = true` under \
+                        `[ray_tracing]`";
+        }
+        if STEP_NAMES.iter().any(light) {
+            message += "; `trace_step` and its names are only in the post, compute, \
+                        `[[before_world]]`, material and entity stages of a pack with \
+                        `step = true` under `[ray_tracing]`";
+        }
+        // `trace_step` calls them: the pack's own, which a stage that has it defines.
+        let stepped = stepped(composed);
+        if stepped && ["RayState", "ray_step"].iter().any(light) {
+            message += &format!(
+                "; a stage that has `trace_step` defines `struct RayState` and `{STEP_SIGNATURE}`"
+            );
+        }
+        let cyclic =
+            e.message().starts_with("declaration of `") && e.message().ends_with("` is cyclic");
+        if stepped && cyclic {
+            message += "; `ray_step` runs inside the ray query of `trace_step`, so it can't reach \
+                        `trace_step` (WGSL has no recursion)";
+        }
         let at = label.and_then(|(span, _)| span.to_range()).map(|r| r.start);
+        // Where naga points into `trace_step` itself, the stage's own file is the one to fix.
+        if stepped && at.is_some_and(|at| composed.parts[0].1.contains(&at)) {
+            let file = (composed.parts.iter().rev())
+                .find(|(name, _)| !name.starts_with('<'))
+                .map_or("<prelude>", |(name, _)| name.as_str());
+            return vec![problem(file, message)];
+        }
         vec![located(composed, at, message)]
     })
 }
@@ -630,6 +1035,10 @@ fn type_name(module: &naga::Module, ty: naga::Handle<naga::Type>) -> String {
         naga::TypeInner::Vector { size, scalar } => {
             format!("vec{}<{}>", size as u8, scalar_name(scalar))
         }
+        naga::TypeInner::Pointer {
+            base,
+            space: naga::AddressSpace::Function,
+        } => format!("ptr<function, {}>", type_name(module, base)),
         _ => format!("{:?}", t.inner),
     }
 }
@@ -736,6 +1145,11 @@ fn api_rules(module: &naga::Module, kind: StageKind, own: &Composed) -> Vec<Prob
     if kind == StageKind::Material {
         text += crate::stages::PBR_STUB;
     }
+    // `trace_step` calls the pack's step with the pack's state: stand-ins, which are the pack's.
+    if text.contains("fn trace_step(") {
+        text += "struct RayState { a: u32 }\n\
+                 fn ray_step(c: RayCandidate, state: ptr<function, RayState>) -> u32 { return 0u; }\n";
+    }
     let prelude = naga::front::wgsl::parse_str(&text).expect("the prelude parses");
     let ours = names(&prelude);
     let file = &own.parts[own.parts.len() - 1].0;
@@ -775,7 +1189,7 @@ fn api_rules(module: &naga::Module, kind: StageKind, own: &Composed) -> Vec<Prob
 }
 
 /// The pack's files construct none of the structs Horizon hands a stage (`Frame`, the
-/// stage inputs, the post helpers' `SurfaceData` and `RayHit`). They may gain fields, which would break a
+/// stage inputs, the post helpers' `SurfaceData`, `RayHit`, `RayLight` and `RayCandidate`). They may gain fields, which would break a
 /// positional `PostInput(...)`; reading them and passing them along stay as they are. `Surface`,
 /// which `material` returns, is built.
 fn constructions(module: &naga::Module, own: &Composed) -> Vec<Problem> {
@@ -788,6 +1202,8 @@ fn constructions(module: &naga::Module, own: &Composed) -> Vec<Problem> {
             COMPUTE_INPUT.name,
             "SurfaceData",
             RAY_HIT.name,
+            "RayLight",
+            CANDIDATE,
             "MotionData",
         ])
         .collect();
@@ -795,68 +1211,264 @@ fn constructions(module: &naga::Module, own: &Composed) -> Vec<Problem> {
         .functions
         .iter()
         .map(|(_, f)| &f.expressions)
+        .chain(module.entry_points.iter().map(|e| &e.function.expressions))
         .chain([&module.global_expressions]);
     let in_pack = |at: Option<usize>| {
         at.is_some_and(|at| own.parts[1..].iter().any(|(_, r)| r.contains(&at)))
     };
+    // A struct the prelude declares (a pack's own struct of the same name is its own).
+    let horizon_s = |ty: naga::Handle<naga::Type>| {
+        (module.types.get_span(ty).to_range()).is_some_and(|r| own.parts[0].1.contains(&r.start))
+    };
+    let is_candidate = |t: naga::Handle<naga::Type>| {
+        module.types[t].name.as_deref() == Some(CANDIDATE) && horizon_s(t)
+    };
+    let has_candidate = module.types.iter().any(|(t, _)| is_candidate(t));
+    let mut candidate_cache = HashMap::new();
+    let constructs = |name: &str, at| {
+        let message = format!(
+            "constructs `{name}`: it is Horizon's and may gain fields; read it, don't construct it"
+        );
+        located(own, at, message)
+    };
     let mut problems = Vec::new();
     for arena in arenas {
         for (handle, e) in arena.iter() {
-            let naga::Expression::Compose { ty, .. } = *e else {
-                continue;
-            };
-            let Some(name) = module.types[ty].name.as_deref() else {
-                continue;
-            };
             let at = arena.get_span(handle).to_range().map(|r| r.start);
-            // Built in the pack's files (the prelude's helpers aren't the pack's), as a struct the
-            // prelude declares (a pack's own struct of the same name is its own).
-            let horizon_s = (module.types.get_span(ty).to_range())
-                .is_some_and(|r| own.parts[0].1.contains(&r.start));
-            if provided.contains(&name) && horizon_s && in_pack(at) {
-                problems.push(located(
-                    own,
-                    at,
-                    format!("constructs `{name}`: it is Horizon's and may gain fields; read it, don't construct it"),
-                ));
+            if !in_pack(at) {
+                continue;
+            }
+            match *e {
+                // A zero value (`RayCandidate()`, or a struct/array holding one) is a candidate
+                // no ray crossed, which only `trace_step` makes; the other structs' zero values
+                // stay as 0.2 packs wrote them.
+                naga::Expression::ZeroValue(ty) if has_candidate => {
+                    if holds(module, ty, &is_candidate, &mut candidate_cache) {
+                        problems.push(constructs(CANDIDATE, at));
+                    }
+                }
+                naga::Expression::Compose { ty, .. } => {
+                    let Some(name) = module.types[ty].name.as_deref() else {
+                        continue;
+                    };
+                    if provided.contains(&name) && horizon_s(ty) {
+                        problems.push(constructs(name, at));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if has_candidate {
+        // A variable without an initializer holds its type's zero value: a `RayCandidate` declared
+        // so, alone or in an array or a struct, is one the pack built. Runtime initializers
+        // (`var copy = c;`) lower to a `Store` carrying the declaration's span, with `v.init == None`.
+        let functions = (module.functions.iter().map(|(_, f)| f))
+            .chain(module.entry_points.iter().map(|e| &e.function));
+        for f in functions {
+            for (h, v) in f.local_variables.iter() {
+                let span = f.local_variables.get_span(h);
+                let at = span.to_range().map(|r| r.start);
+                if v.init.is_none()
+                    && in_pack(at)
+                    && holds(module, v.ty, &is_candidate, &mut candidate_cache)
+                    && !has_decl_store(&f.body, &f.expressions, h, span)
+                {
+                    problems.push(constructs(CANDIDATE, at));
+                }
+            }
+        }
+        for (h, v) in module.global_variables.iter() {
+            let span = module.global_variables.get_span(h);
+            let at = span.to_range().map(|r| r.start);
+            if v.init.is_none()
+                && in_pack(at)
+                && holds(module, v.ty, &is_candidate, &mut candidate_cache)
+            {
+                problems.push(constructs(CANDIDATE, at));
             }
         }
     }
     problems
 }
 
+/// Whether `block` stores into local variable `var` at the declaration's exact `span` (how naga
+/// lowers runtime `var` initializers such as `var copy = c;`).
+fn has_decl_store(
+    block: &naga::Block,
+    expressions: &naga::Arena<naga::Expression>,
+    var: naga::Handle<naga::LocalVariable>,
+    decl_span: naga::Span,
+) -> bool {
+    for (stmt, span) in block.span_iter() {
+        let found = match stmt {
+            naga::Statement::Store { pointer, .. } => {
+                *span == decl_span
+                    && matches!(expressions[*pointer], naga::Expression::LocalVariable(h) if h == var)
+            }
+            naga::Statement::Block(inner) => has_decl_store(inner, expressions, var, decl_span),
+            naga::Statement::If { accept, reject, .. } => {
+                has_decl_store(accept, expressions, var, decl_span)
+                    || has_decl_store(reject, expressions, var, decl_span)
+            }
+            naga::Statement::Switch { cases, .. } => cases
+                .iter()
+                .any(|c| has_decl_store(&c.body, expressions, var, decl_span)),
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                has_decl_store(body, expressions, var, decl_span)
+                    || has_decl_store(continuing, expressions, var, decl_span)
+            }
+            _ => false,
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+/// `trace_step`'s candidate, which only Horizon makes.
+const CANDIDATE: &str = "RayCandidate";
+
+/// Whether `ty` is a type `is` picks, or an array or a struct with one in it, however deep.
+fn holds(
+    module: &naga::Module,
+    ty: naga::Handle<naga::Type>,
+    is: &dyn Fn(naga::Handle<naga::Type>) -> bool,
+    cache: &mut HashMap<naga::Handle<naga::Type>, bool>,
+) -> bool {
+    if let Some(&cached) = cache.get(&ty) {
+        return cached;
+    }
+    let answer = is(ty)
+        || match &module.types[ty].inner {
+            naga::TypeInner::Array { base, .. } | naga::TypeInner::BindingArray { base, .. } => {
+                holds(module, *base, is, cache)
+            }
+            naga::TypeInner::Struct { members, .. } => {
+                members.iter().any(|m| holds(module, m.ty, is, cache))
+            }
+            _ => false,
+        };
+    cache.insert(ty, answer);
+    answer
+}
+
+/// The span of the first statement in a block or its nested control flow that matches.
+fn find_statement(
+    block: &naga::Block,
+    matches: &mut impl FnMut(&naga::Statement) -> bool,
+) -> Option<naga::Span> {
+    for (statement, span) in block.span_iter() {
+        if matches(statement) {
+            return Some(*span);
+        }
+        let found = match statement {
+            naga::Statement::Block(b) => find_statement(b, matches),
+            naga::Statement::If { accept, reject, .. } => {
+                find_statement(accept, matches).or_else(|| find_statement(reject, matches))
+            }
+            naga::Statement::Switch { cases, .. } => {
+                cases.iter().find_map(|c| find_statement(&c.body, matches))
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => find_statement(body, matches).or_else(|| find_statement(continuing, matches)),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// The pack's step as `trace_step` calls it.
+const STEP_SIGNATURE: &str = "fn ray_step(c: RayCandidate, state: ptr<function, RayState>) -> u32";
+
+/// In a stage that has `trace_step` (its prelude defines it), the pack's `ray_step` takes the
+/// prelude's `RayCandidate` and a pointer to the pack's `RayState`, the type `trace_step` takes,
+/// returns a `u32` of `RAY_` actions, and reaches no trace function.
+fn step_rules(module: &naga::Module, own: &Composed) -> Vec<Problem> {
+    if !stepped(own) {
+        return Vec::new();
+    }
+    let find = |name| (module.functions.iter()).find(|(_, f)| f.name.as_deref() == Some(name));
+    let file = &own.parts[own.parts.len() - 1].0;
+    let (Some((_, trace_step)), Some((handle, step))) = (find("trace_step"), find("ray_step"))
+    else {
+        return vec![problem(file, format!("defines no `{STEP_SIGNATURE}`"))];
+    };
+    let at = module
+        .functions
+        .get_span(handle)
+        .to_range()
+        .map(|r| r.start);
+    let args: Vec<_> = step.arguments.iter().map(|a| a.ty).collect();
+    let result = step.result.as_ref().map(|r| type_name(module, r.ty));
+    let typed = args.len() == 2
+        && type_name(module, args[0]) == "RayCandidate"
+        && Some(args[1]) == trace_step.arguments.get(4).map(|a| a.ty)
+        && result.as_deref() == Some("u32");
+    if !typed {
+        let args: Vec<_> = args.iter().map(|&ty| type_name(module, ty)).collect();
+        let message = format!(
+            "`fn ray_step({}) -> {}` should be `{STEP_SIGNATURE}`",
+            args.join(", "),
+            result.as_deref().unwrap_or("()")
+        );
+        return vec![located(own, at, message)];
+    }
+    // A step runs inside one ray query and starts no other.
+    let tracing: Vec<&str> = TRACE_NAMES.iter().copied().chain(["trace_step"]).collect();
+    match reached_call(module, &step.body, &tracing) {
+        Some(name) => vec![located(
+            own,
+            at,
+            format!(
+                "`ray_step` reaches `{name}`: a step runs inside the ray query of `trace_step` \
+                 and traces no ray of its own"
+            ),
+        )],
+        None => Vec::new(),
+    }
+}
+
+/// The first function of `names` that `body` calls, itself or through the functions it calls,
+/// however deep.
+fn reached_call(module: &naga::Module, body: &naga::Block, names: &[&str]) -> Option<String> {
+    let (mut blocks, mut seen) = (vec![body], HashSet::new());
+    while let Some(block) = blocks.pop() {
+        let mut found = None;
+        find_statement(block, &mut |statement| {
+            let naga::Statement::Call { function, .. } = *statement else {
+                return false;
+            };
+            let name = module.functions[function]
+                .name
+                .as_deref()
+                .unwrap_or_default();
+            if names.contains(&name) {
+                found = Some(name.to_owned());
+                return true;
+            }
+            if seen.insert(function) {
+                blocks.push(&module.functions[function].body);
+            }
+            false
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 /// Where a `discard` is that the function `name` can reach: in its own body, its nested blocks,
 /// or a function it calls, however deep.
 fn reachable_discard(module: &naga::Module, name: &str) -> Option<naga::Span> {
-    fn walk(
-        block: &naga::Block,
-        calls: &mut Vec<naga::Handle<naga::Function>>,
-    ) -> Option<naga::Span> {
-        for (statement, span) in block.span_iter() {
-            let found = match statement {
-                naga::Statement::Kill => return Some(*span),
-                naga::Statement::Block(b) => walk(b, calls),
-                naga::Statement::If { accept, reject, .. } => {
-                    walk(accept, calls).or_else(|| walk(reject, calls))
-                }
-                naga::Statement::Switch { cases, .. } => {
-                    cases.iter().find_map(|c| walk(&c.body, calls))
-                }
-                naga::Statement::Loop {
-                    body, continuing, ..
-                } => walk(body, calls).or_else(|| walk(continuing, calls)),
-                naga::Statement::Call { function, .. } => {
-                    calls.push(*function);
-                    None
-                }
-                _ => None,
-            };
-            if found.is_some() {
-                return found;
-            }
-        }
-        None
-    }
     let (start, _) = module
         .functions
         .iter()
@@ -864,7 +1476,18 @@ fn reachable_discard(module: &naga::Module, name: &str) -> Option<naga::Span> {
     let (mut calls, mut seen) = (vec![start], HashSet::new());
     while let Some(f) = calls.pop() {
         if seen.insert(f)
-            && let Some(span) = walk(&module.functions[f].body, &mut calls)
+            && let Some(span) =
+                find_statement(
+                    &module.functions[f].body,
+                    &mut |statement| match *statement {
+                        naga::Statement::Call { function, .. } => {
+                            calls.push(function);
+                            false
+                        }
+                        naga::Statement::Kill => true,
+                        _ => false,
+                    },
+                )
         {
             return Some(span);
         }

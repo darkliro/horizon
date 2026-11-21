@@ -28,6 +28,15 @@ pub const MIRROR: &str = "https://mcp.playhorizon.dev/github/public";
 /// [`backend::CHECK_EVERY`], so a few minutes late at worst.
 pub const FRESH_SECS: u64 = 5 * 60;
 
+/// How long one source may take to start answering, its connection included. With only the
+/// agent's limits (15 s to connect, 60 s for each read) a source that took the request and said
+/// nothing held the release list for two minutes, GitHub's turn and the mirror's one after the
+/// other (#18074). The body is then read for as long as it keeps coming, each read under the
+/// agent's limit: the release list is about 2 MB, which a slow line takes most of a minute to
+/// bring. Tests wait less.
+const HEADERS: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 1 } else { 20 });
+
 /// What one source answered.
 #[derive(Debug)]
 pub(crate) enum Answer {
@@ -56,6 +65,15 @@ pub fn json_optional(url: &str) -> Result<Option<serde_json::Value>, String> {
     json_with(url, &cache_dir(), now, github, mirror)
 }
 
+/// [`json_optional`] as GitHub or the mirror answer it now, never a copy kept on disk (fresh or
+/// not): for a list that must be current, such as after a download that failed its check.
+pub fn json_from_network(url: &str) -> Result<Option<serde_json::Value>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    json_with_mode(url, &cache_dir(), now, true, github, mirror)
+}
+
 /// [`json`] with its cache folder, the time (Unix seconds) and its two sources given (tests).
 pub(crate) fn json_with(
     url: &str,
@@ -64,9 +82,21 @@ pub(crate) fn json_with(
     github: impl Fn(&str, Option<&str>) -> Answer,
     mirror: impl Fn(&str) -> Answer,
 ) -> Result<Option<serde_json::Value>, String> {
+    json_with_mode(url, cache, now, false, github, mirror)
+}
+
+/// [`json_with`]; `network_only`: a copy on disk is never the answer, only its ETag is sent.
+pub(crate) fn json_with_mode(
+    url: &str,
+    cache: &Path,
+    now: u64,
+    network_only: bool,
+    github: impl Fn(&str, Option<&str>) -> Answer,
+    mirror: impl Fn(&str) -> Answer,
+) -> Result<Option<serde_json::Value>, String> {
     let file = cache.join(cache_name(url));
     let kept = read_kept(&file, url);
-    if let Some(k) = kept.as_ref() {
+    if let Some(k) = kept.as_ref().filter(|_| !network_only) {
         // A copy saved "later" than now (the clock was set back) is not trusted as fresh.
         if now >= k.saved && now - k.saved < FRESH_SECS {
             return Ok(Some(k.body.clone()));
@@ -106,7 +136,7 @@ pub(crate) fn json_with(
         },
         None => None,
     };
-    if let Some(k) = kept {
+    if let Some(k) = kept.filter(|_| !network_only) {
         return Ok(Some(k.body));
     }
     Err(match from_mirror {
@@ -148,7 +178,7 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
     if let Some(etag) = etag {
         request = request.set("If-None-Match", etag);
     }
-    match request.call() {
+    match call(request, url) {
         Ok(r) if r.status() == 304 => Answer::NotModified,
         Ok(r) => {
             let etag = r.header("ETag").map(str::to_owned);
@@ -157,17 +187,36 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
                 Err(e) => Answer::Failed(e.to_string()),
             }
         }
-        Err(e) => failure(url, e),
+        Err(answer) => answer,
     }
 }
 
 fn mirror(url: &str) -> Answer {
-    match backend::agent(url).get(url).call() {
+    match call(backend::agent(url).get(url), url) {
         Ok(r) => match r.into_json() {
             Ok(body) => Answer::Fresh(body, None),
             Err(e) => Answer::Failed(e.to_string()),
         },
-        Err(e) => failure(url, e),
+        Err(answer) => answer,
+    }
+}
+
+/// `request`'s response once its headers are in, or the source's failure; one that takes
+/// longer than [`HEADERS`] fails.
+fn call(request: ureq::Request, url: &str) -> Result<ureq::Response, Answer> {
+    let (sent, response) = std::sync::mpsc::channel();
+    // A late request is left to end on its own, within the agent's limits (15 s to connect, 60 s
+    // for a read); what it brings back is dropped.
+    std::thread::spawn(move || {
+        let _ = sent.send(request.call());
+    });
+    match response.recv_timeout(HEADERS) {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(failure(url, e)),
+        Err(_) => Err(Answer::Failed(format!(
+            "No connection: {url} didn't answer within {} s",
+            HEADERS.as_secs()
+        ))),
     }
 }
 
@@ -210,6 +259,11 @@ struct Kept {
     /// When it was saved or last confirmed (Unix seconds).
     saved: u64,
     body: serde_json::Value,
+}
+
+/// The answer to `url` kept on disk, however old, without asking anyone.
+pub(crate) fn kept(url: &str) -> Option<serde_json::Value> {
+    read_kept(&cache_dir().join(cache_name(url)), url).map(|k| k.body)
 }
 
 fn read_kept(file: &Path, url: &str) -> Option<Kept> {

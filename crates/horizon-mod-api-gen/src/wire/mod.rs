@@ -5,6 +5,7 @@ mod append;
 mod borrowed;
 mod calls;
 mod host;
+mod names;
 mod prepared;
 #[cfg(test)]
 mod prepared_tests;
@@ -40,6 +41,7 @@ pub(super) const IMPORTS: &[&str] = &[
     "Levels",
     "Messages",
     "Players",
+    "Profiles",
     "RuntimeLevels",
     "ClientSession",
     "RenderAssets",
@@ -86,6 +88,7 @@ pub(super) const REACHED: &[(&str, &str, &str)] = &[
     ("Levels", "server_host", "Ok(h.levels())"),
     ("Messages", "server_host", "Ok(h.messages())"),
     ("Players", "server_host", "Ok(h.players())"),
+    ("Profiles", "server_host_mut", "Ok(h.profiles())"),
     ("RuntimeLevels", "server_host_mut", "Ok(h.runtime_levels())"),
     ("ClientSession", "client_host", "Ok(h.client_session())"),
     ("RenderAssets", "client_host", "Ok(h.render_assets())"),
@@ -640,6 +643,7 @@ pub fn generate(root: &Path, included: &[(&str, &str)]) -> Result<Generated, Str
     with_providers.push(("capability_providers_generated.rs", providers.as_str()));
     let surface = surface(root, &with_providers)?;
     coverage(&surface)?;
+    names::check_names(&surface.methods)?;
     let mut wire = borrowed::calls(&surface.types);
     let mut guest = calls::guest(
         &surface.types,
@@ -656,12 +660,31 @@ pub fn generate(root: &Path, included: &[(&str, &str)]) -> Result<Generated, Str
         .collect::<Vec<_>>();
     guest.push_str(&calls::dispatch(&surface.types, &surface.methods, &prepared).0);
     let abis = prepared::describe(&surface.methods, &prepared)?;
+    let (codecs, codec_sources) = codecs(root)?;
+    // The transport's own payloads, by the aliases both sides use: no call's signature names
+    // them. `HOST_RELEASE` takes one `Id`; `HOST_LOG` and a refusal's reason are a `String`.
+    let control = [
+        "crate::wire::InitInput",
+        "crate::wire::ReleaseInput",
+        "crate::wire::Id",
+        "String",
+        "crate::wire::CallsAnswer",
+    ]
+    .iter()
+    .map(|ty| format!("hash = crate::wire::layout_mix(hash, <{ty} as crate::wire::Wire>::layout(&mut vec![]));"))
+    .collect::<String>();
     let _ = writeln!(
         wire,
-        "#[doc(hidden)]\npub fn wire_core_layout() -> u64 {{ let mut hash = {:#x}; {layouts} hash }}",
-        layout(&surface),
-        layouts = surface.types.defs.iter().filter(|def| def.lifetimes == 0).map(|def| format!("hash = crate::wire::layout_mix(hash, <{} as crate::wire::Wire>::layout(&mut vec![]));", def.rust.replace("mod_api::", "crate::"))).collect::<String>()
+        "/// What every mod of a group and the game must agree on exactly; each call is checked on\n/// its own (`call_layouts`).\n#[doc(hidden)]\npub fn wire_core_layout() -> u64 {{ wire_core_layout_with(crate::wire::PROTOCOL) }}\n/// [`wire_core_layout`] with `protocol` for the transport's values.\n#[doc(hidden)]\npub fn wire_core_layout_with(protocol: &[(&str, u64)]) -> u64 {{ let mut hash = {:#x}; {control} for &(name, value) in protocol {{ hash = crate::wire::layout_mix(crate::wire::layout_mix(hash, crate::wire::layout_name(name)), value); }} hash }}\nconst _: () = assert!(crate::wire::PREPARE == {:#x} && crate::wire::RELEASE_PREPARED == {:#x}, \"the generator's prepared ids are the transport's\");",
+        core(codecs, FILE_ROOTS),
+        prepared::PREPARE,
+        prepared::RELEASE,
     );
+    wire.push_str(&names::layouts(
+        &surface.types,
+        &surface.methods,
+        &surface.dropped,
+    ));
     writeln!(
         wire,
         "#[doc(hidden)] pub fn prepared_abi_layout() -> u64 {{ {} }}",
@@ -674,11 +697,94 @@ pub fn generate(root: &Path, included: &[(&str, &str)]) -> Result<Generated, Str
         "crate::wire::layout_mix(wire_core_layout(),prepared_abi_layout())"
     };
     writeln!(wire, "#[doc(hidden)] pub static WIRE_LAYOUT: ::std::sync::LazyLock<u64> = ::std::sync::LazyLock::new(|| {{ {complete} }});").unwrap();
-    let sources = surface.types.index.read.take();
+    let mut sources = surface.types.index.read.take();
+    sources.extend(codec_sources);
     Ok(Generated {
         wire,
         guest,
         sources,
+    })
+}
+
+/// The owned types the transport's control payloads reach, which no call names: `InitInput`, what
+/// a mod's start receives, is a list of `PackageInfo`. The core hash mixes in their layouts.
+const CONTROL_OWNED: &[&str] = &["mod_api::PackageInfo"];
+
+/// The owned types the core reaches, by the path the glue names them by: the control payloads'
+/// and those of the prepared hooks' entries (`reads:Vec<crate::EquipReadRow>`), sorted.
+fn core_owned(abis: &[prepared::Abi]) -> Vec<String> {
+    let mut paths: std::collections::BTreeSet<String> = CONTROL_OWNED
+        .iter()
+        .map(|path| (*path).to_owned())
+        .collect();
+    for entry in abis.iter().flat_map(|abi| &abi.entries) {
+        for argument in entry.input.iter().chain(&entry.output) {
+            let ty = argument.split_once(':').map_or(*argument, |(_, ty)| ty);
+            let ty = ty
+                .strip_prefix("Vec<")
+                .and_then(|ty| ty.strip_suffix('>'))
+                .unwrap_or(ty);
+            // `crate::wire::Id` is a transport value; scalars and tuples have no owned type.
+            if let Some(name) = ty.strip_prefix("crate::")
+                && !name.starts_with("wire::")
+            {
+                paths.insert(format!("mod_api::{name}"));
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// What a wasm mod and the game check each other by when it loads (`mod_surface::boundary`):
+/// every call's key, signature hash and the owned types it reaches, as `call_layouts` mixes them,
+/// a fingerprint of the core hash's inputs that the source holds (the hand-written codecs and
+/// the transport values `codecs` reads, and the prepared hooks' ABI) and the owned types the
+/// core reaches: the control payloads' and the prepared hooks' entries' (`prepared_abi_layout`
+/// mixes in each entry type's layout). The owned types' shapes are left for the surface export
+/// to fill in.
+pub(crate) fn boundary(
+    root: &Path,
+    surface: &Surface<'_>,
+) -> Result<mod_surface::boundary::Boundary, String> {
+    let prepared = crate::Catalog::load(root)?
+        .hooks
+        .into_iter()
+        .filter_map(|hook| hook.prepared.map(|field| (hook.name, field)))
+        .collect::<Vec<_>>();
+    let abis = prepared::describe(&surface.methods, &prepared)?;
+    let (codecs, _) = codecs(root)?;
+    let core = names::fnv(&format!(
+        "{:#x};{:#x};{:#x};{}",
+        core(codecs, FILE_ROOTS),
+        prepared::PREPARE,
+        prepared::RELEASE,
+        prepared::layout_code(&abis)
+    ));
+    let calls = names::calls(&surface.types, &surface.methods, &surface.dropped)
+        .into_iter()
+        .map(
+            |(key, signature, found, export)| mod_surface::boundary::Call {
+                key,
+                signature: format!("{signature:016x}"),
+                export,
+                owned: found
+                    .iter()
+                    .map(|def| mod_surface::boundary::Owned {
+                        path: surface.types.defs[*def].rust.clone(),
+                        shape: None,
+                    })
+                    .collect(),
+            },
+        )
+        .collect();
+    Ok(mod_surface::boundary::Boundary {
+        schema: mod_surface::boundary::SCHEMA,
+        core: format!("{core:016x}"),
+        core_owned: core_owned(&abis)
+            .into_iter()
+            .map(|path| mod_surface::boundary::Owned { path, shape: None })
+            .collect(),
+        calls,
     })
 }
 
@@ -847,44 +953,514 @@ fn public_path(index: &Index<'_>, path: &str) -> bool {
     })
 }
 
-/// A hash of everything the two sides must agree on: every method's id and signature, and
-/// every type's shape (FNV-1a over their descriptions). This is the core seed;
-/// `generate` appends owned Wire layouts and the prepared marker/entry ABI layouts
-/// to the final WIRE_LAYOUT. wire_core_layout also supports refusal diagnostics:
-/// a guest presenting it without the prepared component is refused, never accepted.
-fn layout(surface: &Surface<'_>) -> u64 {
+/// The seed of the core hash: the transport's rules no call's signature carries, and the
+/// hand-written codecs (`codecs`), whose bytes no declared layout describes. The calls
+/// themselves are checked one by one (`names`), so an added call leaves it as it was.
+fn core(codecs: u64, file_roots: &[(u8, &str, &str)]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let mut feed = |text: &str| {
         for byte in text.bytes() {
             hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
         }
     };
+    // A new value here refuses every mod built before it, those of the positional ABI first.
+    feed(
+        "calls by name (#18253): imports horizon.<owner>::<name>#<signature>, horizon.host for the reserved ids only; exports by name-hash id; CALLS answers call_layouts",
+    );
     // Resource-control values are part of the interface even though they do not
     // appear in a catalog signature. Older guests may have allocated identity zero.
     feed(
         "resource generation zero reserved; Any identity zero is Unsupported/cross-group capability",
     );
-    // The group's mods share one handler table, which lives in a word of the std member.
-    feed(
-        "group state: 32 words in the std member's horizon_group_state; 0 handler table, 1 cache budget, 2 eviction guard, 3.. eviction callbacks; members allocate through an evicting global allocator",
-    );
-    feed("static replies: bounded acknowledged ids or uncached text");
-    feed("ConfigFiles imports: u8 root selector, 0 config, 1 data, 2 world; other values refused");
-    feed("Hooks::subscribed: Vec<(hook name, i32 priority, bool receive_cancelled)>");
-    for method in &surface.methods {
-        feed(&format!("{method:?}"));
-    }
-    for def in &surface.types.defs {
-        // Private borrowed descriptors also define bytes and checked writeback policy.
-        // Hash the complete definition so private writeback contracts affect compatibility.
-        feed(&format!("{def:?}"));
-    }
-    feed(&format!("{:?}", surface.hooks));
+    // The reserved ids and the group state's words are mixed in at run time from the
+    // constants the transport uses (`crate::wire::PROTOCOL`), not described here.
+    // Behaviour, not a value: what a member's allocator does with the group's budget.
+    feed("members allocate through an evicting global allocator");
+    // The selector table the generated guest proxy and host dispatch are both written from.
+    feed(&format!("file roots {file_roots:?}"));
+    feed(&format!("hand-written codecs {codecs:#x}"));
     hash
 }
 
+/// A hash of every hand-written `Wire` codec of the API (`impl Wire for …` and the macros that
+/// write one), doc comments aside, and the files read for it. Their bytes are what the code
+/// says, which no declared layout describes, so a change to one refuses every mod built before.
+fn codecs(root: &Path) -> Result<(u64, Vec<std::path::PathBuf>), String> {
+    fn strip_docs(tokens: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        use proc_macro2::TokenTree;
+        let mut out = Vec::new();
+        let mut trees = tokens.into_iter().peekable();
+        while let Some(tree) = trees.next() {
+            if let TokenTree::Punct(punct) = &tree
+                && punct.as_char() == '#'
+                && let Some(TokenTree::Group(group)) = trees.peek()
+                && group.delimiter() == proc_macro2::Delimiter::Bracket
+                && group
+                    .stream()
+                    .into_iter()
+                    .next()
+                    .is_some_and(|first| first.to_string() == "doc")
+            {
+                trees.next();
+                continue;
+            }
+            out.push(match tree {
+                TokenTree::Group(group) => {
+                    let mut inner =
+                        proc_macro2::Group::new(group.delimiter(), strip_docs(group.stream()));
+                    inner.set_span(group.span());
+                    TokenTree::Group(inner)
+                }
+                tree => tree,
+            });
+        }
+        out.into_iter().collect()
+    }
+    fn test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg")
+                && quote::ToTokens::to_token_stream(attr)
+                    .to_string()
+                    .contains("test")
+        })
+    }
+    fn attrs(item: &Item) -> &[syn::Attribute] {
+        match item {
+            Item::Const(item) => &item.attrs,
+            Item::Enum(item) => &item.attrs,
+            Item::Fn(item) => &item.attrs,
+            Item::Impl(item) => &item.attrs,
+            Item::Macro(item) => &item.attrs,
+            Item::Mod(item) => &item.attrs,
+            Item::Static(item) => &item.attrs,
+            Item::Struct(item) => &item.attrs,
+            Item::Trait(item) => &item.attrs,
+            Item::Type(item) => &item.attrs,
+            Item::Use(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+    /// Every item of a codec module (`horizon-mod-vocab/src/wire`): the helpers its `Wire`
+    /// impls delegate to (`tag_tree`, `json_tree`) encode as much as the impls do.
+    fn whole(list: &[Item], texts: &mut Vec<String>) {
+        for item in list.iter().filter(|item| !test_only(attrs(item))) {
+            match item {
+                Item::Mod(module) => {
+                    if let Some((_, content)) = &module.content {
+                        whole(content, texts);
+                    }
+                }
+                item => texts.push(strip_docs(quote::ToTokens::to_token_stream(item)).to_string()),
+            }
+        }
+    }
+    /// The `serde` shape of every item in a file holding a `#[wire(via = String)]` type: its
+    /// wire bytes are JSON written by `serde` (`MeshDefinition`), which no layout describes.
+    fn json(list: &[Item], texts: &mut Vec<String>) {
+        for item in list.iter().filter(|item| !test_only(attrs(item))) {
+            let serde = attrs(item).iter().any(|attr| {
+                attr.path().is_ident("derive")
+                    && ["Serialize", "Deserialize"].iter().any(|derive| {
+                        quote::ToTokens::to_token_stream(attr)
+                            .to_string()
+                            .contains(derive)
+                    })
+                    || attr.path().is_ident("serde")
+            });
+            if serde {
+                texts.push(strip_docs(quote::ToTokens::to_token_stream(item)).to_string());
+            }
+        }
+    }
+    fn items(list: &[Item], texts: &mut Vec<String>) {
+        for item in list {
+            match item {
+                Item::Impl(block)
+                    if !test_only(&block.attrs)
+                        && block.trait_.as_ref().is_some_and(|(_, path, _)| {
+                            path.segments.last().is_some_and(|s| s.ident == "Wire")
+                        }) =>
+                {
+                    texts.push(strip_docs(quote::ToTokens::to_token_stream(block)).to_string());
+                }
+                Item::Macro(mac)
+                    if mac.mac.path.is_ident("macro_rules")
+                        && mac.mac.tokens.to_string().contains("Wire for") =>
+                {
+                    texts.push(strip_docs(mac.mac.tokens.clone()).to_string());
+                }
+                Item::Mod(module) if !test_only(&module.attrs) => {
+                    if let Some((_, content)) = &module.content {
+                        items(content, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn walk(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                walk(&path, files)?;
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    let dirs = [
+        root.join("crates/horizon-mod-vocab/src"),
+        root.join("crates/horizon-mod-api/src"),
+    ];
+    let mut files = Vec::new();
+    for dir in &dirs {
+        walk(dir, &mut files)?;
+    }
+    let mut keyed: Vec<(String, std::path::PathBuf)> = files
+        .into_iter()
+        .map(|path| {
+            let key = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (key, path)
+        })
+        .filter(|(key, _)| !key.contains("tests") && !key.contains("golden"))
+        .collect();
+    keyed.sort();
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for (key, path) in &keyed {
+        // Line ends as Git stores them: a literal spanning lines must hash the same in a
+        // Windows checkout as in the SDK's.
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{key}: {e}"))?
+            .replace("\r\n", "\n");
+        let codec_module = key.starts_with("crates/horizon-mod-vocab/src/wire/");
+        let via_json = text.contains("wire(via = String)");
+        if !codec_module && !via_json && !text.contains("Wire for") {
+            continue;
+        }
+        let file = syn::parse_file(&text).map_err(|e| format!("{key}: {e}"))?;
+        let mut texts = Vec::new();
+        if codec_module {
+            whole(&file.items, &mut texts);
+        } else {
+            items(&file.items, &mut texts);
+        }
+        if via_json {
+            json(&file.items, &mut texts);
+        }
+        for text in &texts {
+            for byte in text.bytes().chain([0]) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    // The network NBT that `AttachmentBatch` embeds as bytes: its tag ids and the limits both
+    // sides read and write it with. The rest of the codec is vanilla's format.
+    let nbt = root.join(NBT);
+    let text = std::fs::read_to_string(&nbt)
+        .map_err(|e| format!("{NBT}: {e}"))?
+        .replace("\r\n", "\n");
+    let file = syn::parse_file(&text).map_err(|e| format!("{NBT}: {e}"))?;
+    let mut found = 0;
+    for item in &file.items {
+        let Item::Impl(block) = item else { continue };
+        let target = quote::ToTokens::to_token_stream(&block.self_ty).to_string();
+        let texts: Vec<String> = match &block.trait_ {
+            Some((_, path, _)) if target == "Limits" && path.is_ident("Default") => {
+                vec![quote::ToTokens::to_token_stream(block).to_string()]
+            }
+            None if target == "Tag" => block
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::ImplItem::Fn(method) if method.sig.ident == "id" => {
+                        Some(strip_docs(quote::ToTokens::to_token_stream(method)).to_string())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        for text in texts {
+            found += 1;
+            for byte in text.bytes().chain([0]) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    if found != 2 {
+        return Err(format!("{NBT}: no `Tag::id` or `Limits::default` to hash"));
+    }
+    // The directories, so a codec in a new file reruns the build script too.
+    let mut sources = dirs.to_vec();
+    sources.push(nbt);
+    Ok((hash, sources))
+}
+
+/// Where the network NBT codec lives (`codecs`).
+const NBT: &str = "crates/horizon-core/src/nbt.rs";
+
 #[cfg(test)]
 mod tests {
+    /// The core hash covers what a codec module encodes beyond its `impl Wire` blocks
+    /// (`tag_tree`'s NBT discriminants), the same in a CRLF checkout as in an LF one.
+    #[test]
+    fn the_core_hash_covers_codec_helpers_whatever_the_line_ends() {
+        let root = std::env::temp_dir().join(format!("horizon-codecs-{}", std::process::id()));
+        let wire = root.join("crates/horizon-mod-vocab/src/wire");
+        std::fs::create_dir_all(&wire).unwrap();
+        std::fs::create_dir_all(root.join("crates/horizon-mod-api/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/horizon-core/src")).unwrap();
+        std::fs::write(root.join(super::NBT), NBT).unwrap();
+        let hash = |tag_tree: &str| {
+            std::fs::write(wire.join("tag_tree.rs"), tag_tree).unwrap();
+            super::codecs(&root).unwrap().0
+        };
+        let helper = "pub fn tag(kind: u8) -> u8 {\n    match kind { 1 => 10, _ => 0 }\n}\nconst NOTE: &str = \"one\ntwo\";\n";
+        let before = hash(helper);
+        assert_ne!(before, hash(&helper.replace("10", "11")));
+        assert_eq!(before, hash(&helper.replace('\n', "\r\n")));
+        // The embedded network NBT's tag ids and limits.
+        let nbt = |text: &str| {
+            std::fs::write(root.join(super::NBT), text).unwrap();
+            hash(helper)
+        };
+        assert_eq!(before, nbt(&NBT.replace("fn get", "fn find")));
+        assert_ne!(before, nbt(&NBT.replace("=> 3", "=> 13")));
+        assert_ne!(before, nbt(&NBT.replace("512", "511")));
+        std::fs::write(root.join(super::NBT), NBT).unwrap();
+        // The JSON shape of a type crossing as a string: its serde items, not the file's code.
+        let models = root.join("crates/horizon-mod-vocab/src/models.rs");
+        let json = |text: &str| {
+            std::fs::write(&models, text).unwrap();
+            hash(helper)
+        };
+        let shape = "#[derive(serde::Serialize, mod_api::Wire)]\n#[wire(via = String)]\npub struct Mesh { parts: Vec<Part> }\n#[derive(serde::Deserialize)]\nstruct Part { size: f32 }\nfn helper() {}\n";
+        let with_shape = json(shape);
+        assert_eq!(with_shape, json(&shape.replace("fn helper", "fn other")));
+        assert_ne!(with_shape, json(&shape.replace("size", "width")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    const NBT: &str = "impl Tag {\n    pub fn id(&self) -> u8 { match self { Self::End => 0, Self::Int(_) => 3 } }\n    pub fn get(&self) {}\n}\nimpl Default for Limits {\n    fn default() -> Self { Self { max_depth: 512 } }\n}\n";
+
+    /// `codecs` reads a file outside the codec module only when its text says `Wire for`, so an
+    /// `impl Wire` whose header splits that over two lines would cross unhashed (#18400). Every
+    /// hand-written codec of the tree it reads must be in a file it reads.
+    #[test]
+    fn every_hand_written_codec_is_in_a_file_the_core_hash_reads() {
+        use syn::Item;
+        fn test_only(attrs: &[syn::Attribute]) -> bool {
+            attrs.iter().any(|attr| {
+                attr.path().is_ident("cfg")
+                    && quote::ToTokens::to_token_stream(attr)
+                        .to_string()
+                        .contains("test")
+            })
+        }
+        /// Whether `items` hold what `codecs`' `items` hashes: a `Wire` impl or a macro writing one.
+        fn codec(items: &[Item]) -> bool {
+            items.iter().any(|item| match item {
+                Item::Impl(block) => {
+                    !test_only(&block.attrs)
+                        && block.trait_.as_ref().is_some_and(|(_, path, _)| {
+                            path.segments.last().is_some_and(|s| s.ident == "Wire")
+                        })
+                }
+                Item::Macro(mac) => {
+                    mac.mac.path.is_ident("macro_rules")
+                        && mac.mac.tokens.to_string().contains("Wire for")
+                }
+                Item::Mod(module) if !test_only(&module.attrs) => module
+                    .content
+                    .as_ref()
+                    .is_some_and(|(_, content)| codec(content)),
+                _ => false,
+            })
+        }
+        fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, files);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        // `codecs`' directories; below, the files it skips and the codec module it reads whole.
+        for dir in ["crates/horizon-mod-vocab/src", "crates/horizon-mod-api/src"] {
+            walk(&root.join(dir), &mut files);
+        }
+        let (mut read, mut unread) = (0, Vec::new());
+        for path in files {
+            let key = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if key.contains("tests")
+                || key.contains("golden")
+                || key.starts_with("crates/horizon-mod-vocab/src/wire/")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            if !codec(&syn::parse_file(&text).unwrap().items) {
+                continue;
+            }
+            // Read by the production filter: the file's codecs move the hash `codecs` gives.
+            if core_hash_of(&key, &text) != core_hash_of(&key, "") {
+                read += 1;
+            } else {
+                unread.push(key);
+            }
+        }
+        assert!(
+            unread.is_empty(),
+            "codecs the core hash doesn't read: {unread:?}"
+        );
+        assert!(
+            read > 0,
+            "no hand-written codec found outside the codec module"
+        );
+    }
+
+    /// `codecs`' hash of a tree holding only `text` at `key` (and the real network NBT codec).
+    fn core_hash_of(key: &str, text: &str) -> u64 {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUN: AtomicUsize = AtomicUsize::new(0);
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = std::env::temp_dir().join(format!(
+            "horizon-core-hash-{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = root.join(key);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("crates/horizon-mod-vocab/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/horizon-mod-api/src")).unwrap();
+        std::fs::create_dir_all(root.join(super::NBT).parent().unwrap()).unwrap();
+        std::fs::copy(repo.join(super::NBT), root.join(super::NBT)).unwrap();
+        std::fs::write(&file, text).unwrap();
+        let hash = super::codecs(&root).unwrap().0;
+        std::fs::remove_dir_all(&root).ok();
+        hash
+    }
+
+    /// A codec written with a qualified path (`impl crate::wire::Wire for …`) is in the core
+    /// hash: an edit to its body alone, the bytes it writes, moves it (#18400).
+    #[test]
+    fn a_qualified_wire_impls_body_is_in_the_core_hash() {
+        let key = "crates/horizon-mod-vocab/src/entity/attachment_query.rs";
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(repo.join(key)).unwrap();
+        assert!(text.contains("impl crate::wire::Wire for AttachmentWriteToken {"));
+        let body = "out.put(&generation);";
+        assert_eq!(text.matches(body).count(), 1);
+        assert_ne!(
+            core_hash_of(key, &text),
+            core_hash_of(key, &text.replace(body, "out.put(&(generation + 1));"))
+        );
+    }
+
+    /// A wasm guest builds an `EntityTypeKey` from its slot without the native `from_slot`
+    /// (`entity/types.rs`), in code neither hash reads and no native test runs (#18400). It is
+    /// pinned here as written; it is the only wasm-only branch of the projections
+    /// `wire_layout_tests` covers outside the codec module (`AttachmentBatch::query`'s is no codec).
+    #[test]
+    fn a_guest_keeps_an_entity_type_keys_slot() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let wasm_only = "#[cfg(target_arch = \"wasm32\")]";
+        let read = |key: &str| std::fs::read_to_string(repo.join(key)).unwrap();
+        let branches: Vec<(&str, usize)> = [
+            "crates/horizon-core/src/identifier.rs",
+            "crates/horizon-mod-runtime/src/attachments/index.rs",
+            "crates/horizon-mod-vocab/src/client/keyframe_animation.rs",
+            "crates/horizon-mod-vocab/src/client/model_instance.rs",
+            "crates/horizon-mod-vocab/src/client/posed_parts.rs",
+            "crates/horizon-mod-vocab/src/client/render_pipeline.rs",
+            "crates/horizon-mod-vocab/src/content/registry_keys.rs",
+            "crates/horizon-mod-vocab/src/entity/attachment_query.rs",
+            "crates/horizon-mod-vocab/src/entity/types.rs",
+            "crates/horizon-mod-vocab/src/item/item_stack.rs",
+            "crates/horizon-mod-vocab/src/item/storage.rs",
+            "crates/horizon-mod-vocab/src/item/types.rs",
+            "crates/horizon-mod-vocab/src/world/ticket_controller.rs",
+        ]
+        .into_iter()
+        .map(|key| (key, read(key).matches(wasm_only).count()))
+        .filter(|(_, count)| *count > 0)
+        .collect();
+        assert_eq!(
+            branches,
+            [
+                ("crates/horizon-mod-vocab/src/entity/attachment_query.rs", 1),
+                ("crates/horizon-mod-vocab/src/entity/types.rs", 1),
+            ],
+            "a new wasm-only branch in a projection's helpers needs pinning here"
+        );
+        let file = syn::parse_file(&read("crates/horizon-mod-vocab/src/entity/types.rs")).unwrap();
+        let try_from = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Impl(block)
+                    if quote::ToTokens::to_token_stream(&block.self_ty).to_string()
+                        == "EntityTypeKey"
+                        && block.trait_.as_ref().is_some_and(|(_, path, _)| {
+                            quote::ToTokens::to_token_stream(path).to_string() == "TryFrom < u32 >"
+                        }) =>
+                {
+                    block.items.iter().find_map(|item| match item {
+                        syn::ImplItem::Fn(f) if f.sig.ident == "try_from" => Some(f),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("EntityTypeKey's TryFrom<u32>");
+        let guest: Vec<String> = try_from
+            .block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Expr(syn::Expr::Block(block), _)
+                    if block.attrs.iter().any(|attr| {
+                        quote::ToTokens::to_token_stream(attr).to_string()
+                            == "# [cfg (target_arch = \"wasm32\")]"
+                    }) =>
+                {
+                    Some(quote::ToTokens::to_token_stream(&block.block).to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let expected = syn::parse_str::<syn::Block>("{ Ok(Self(slot)) }").unwrap();
+        assert_eq!(
+            guest,
+            [quote::ToTokens::to_token_stream(&expected).to_string()]
+        );
+    }
+
+    /// The core hash covers the file roots' selectors: swapping two refuses mods built before.
+    #[test]
+    fn swapped_file_roots_change_the_core_hash() {
+        let mut roots = super::FILE_ROOTS.to_vec();
+        let before = super::core(0, &roots);
+        let (config, data) = (roots[0].0, roots[1].0);
+        roots[0].0 = data;
+        roots[1].0 = config;
+        assert_ne!(before, super::core(0, &roots));
+    }
+
     /// The generated impls depend on the hand-written `Wire` impls the generator skips, so an
     /// edit to that file must rerun the build script.
     #[test]
@@ -987,6 +1563,14 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn layout_includes_private_borrowed_shapes() {
+        // What the calls carry: each call's signature, which covers the borrowed shapes.
+        fn layout(surface: &super::Surface<'_>) -> Vec<u64> {
+            surface
+                .methods
+                .iter()
+                .map(|m| super::names::signature(&surface.types, m))
+                .collect()
+        }
         let run = || {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let generated = crate::sources(&root, crate::FillMode::Require).unwrap();
@@ -998,7 +1582,7 @@ mod tests {
                 ("capability_providers_generated.rs", providers.as_str()),
             ];
             let mut surface = super::surface(&root, &included).unwrap();
-            let baseline = super::layout(&surface);
+            let baseline = layout(&surface);
             assert!(
                 surface
                     .types
@@ -1019,7 +1603,7 @@ mod tests {
                 super::ty::BorrowedShape::None
             ));
             surface.types.defs[append].append.as_mut().unwrap().field += 1;
-            assert_ne!(baseline, super::layout(&surface));
+            assert_ne!(baseline, layout(&surface));
             surface.types.defs[append].append.as_mut().unwrap().field -= 1;
             let projection = surface
                 .types
@@ -1032,8 +1616,8 @@ mod tests {
                 super::ty::BorrowedShape::None
             ));
             projection.projection.as_mut().unwrap()[0].ty = super::ty::Ty::Unit;
-            assert_ne!(baseline, super::layout(&surface));
-            let before_borrowed = super::layout(&surface);
+            assert_ne!(baseline, layout(&surface));
+            let before_borrowed = layout(&surface);
             let borrowed = surface
                 .types
                 .defs
@@ -1049,7 +1633,7 @@ mod tests {
                 })
                 .expect("a borrowed call record");
             borrowed.ty = super::ty::Ty::Unit;
-            assert_ne!(before_borrowed, super::layout(&surface));
+            assert_ne!(before_borrowed, layout(&surface));
         };
         std::thread::Builder::new()
             .stack_size(64 << 20)

@@ -1073,7 +1073,7 @@ fn on_off(value: &str) -> Result<bool, String> {
 fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), String> {
     let folder = |value: &str| (value != "default").then(|| PathBuf::from(value));
     match key {
-        "selected-version" => s.selected = Some(backend::resolve_version(Some(value))?),
+        "selected-version" => s.pick(backend::resolve_version(Some(value))?),
         "minecraft-dir" => s.minecraft_dir = folder(value),
         "server-dir" => s.server_dir = folder(value),
         "install-new-versions" => s.install_new_versions = Some(on_off(value)?),
@@ -1201,7 +1201,10 @@ fn json(value: serde_json::Value) {
 
 /// Runs a game process in this terminal and reports how it ended.
 fn attached(cmd: Command) -> Result<i32, String> {
-    let (mut cmd, _runtime) = backend::prepare_command(cmd)?;
+    let (mut cmd, mut runtime) = backend::prepare_command(cmd)?;
+    if let Some(warning) = runtime.warning.take() {
+        eprintln!("warning: {warning}");
+    }
     let status = backend::spawn_attached(&mut cmd)
         .and_then(|mut child| child.wait())
         .map_err(|e| format!("Could not start {:?}: {e}", cmd.get_program()))?;
@@ -1410,13 +1413,32 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                 }
             };
             let explicit = folder.is_some() || profile.is_some();
-            let folder = match folder {
-                Some(folder) => folder,
-                None => native_mods::installed_mods(&target.home)?,
-            };
             let profile = explicit.then_some(target.native_profile);
-            let built =
-                native_mods::build(&base, &folder, &target, profile, back_up_worlds, steps, registry_consent).map_err(|error| {
+            let asked = native_mods::Asked {
+                caller: native_mods::Caller::CommandLine,
+                back_up: back_up_worlds,
+            };
+            // The installed mods are staged once this build has its turn: never before a wait.
+            let built = match folder {
+                Some(folder) => native_mods::build(
+                    &base,
+                    &folder,
+                    &target,
+                    profile,
+                    asked,
+                    steps,
+                    registry_consent,
+                ),
+                None => native_mods::build_installed(
+                    &base,
+                    &target,
+                    profile,
+                    asked,
+                    steps,
+                    registry_consent,
+                ),
+            };
+            let built = built.map_err(|error| {
                     if let native_mods::Failed::Worlds(stake) = &error {
                         return trf(
                             "{error}\n{stay}: nothing changed. Or run again with --back-up-worlds to back them up into {backups} and build without the mods named.",
@@ -1455,13 +1477,19 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
             download,
             version,
         } => {
-            let tag = backend::resolve_version(version.as_deref())?;
+            // What Play would start: the selected instance's version (a Java one has none).
+            let selected = instances::selected();
+            let tag = match selected.java {
+                None => selected.resolve_version(version.as_deref())?,
+                Some(_) => backend::resolve_version(version.as_deref())?,
+            };
             let minecraft = backend::minecraft_dir(minecraft)?;
             let from = if download {
                 backend::MinecraftFrom::Mojang
             } else {
                 backend::MinecraftFrom::Install
             };
+            let tag = backend::prepared_in(&tag);
             let (preparer, minecraft) =
                 backend::preparer(&tag, &minecraft, from, &|line| eprintln!("{line}"))?;
             backend::sounds(&tag, &minecraft, &|line| println!("{line}"));
@@ -1475,6 +1503,12 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                 backend::Preparer::InProcess(options) => {
                     backend::prepare_in_process(&options, &|line| println!("{line}"))?
                 }
+            }
+            if !backend::check_prepared(&tag) {
+                return Err(trf(
+                    "The preparation of {version} ended, but its files are still not ready, so the game can't start.",
+                    &[("version", &tag)],
+                ));
             }
             println!("{tag} is prepared.");
         }
@@ -1519,7 +1553,8 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                 let vars = instance.vars(cmd.get_program());
                 cmd.envs(vars.iter().map(|(k, v)| (k, v)));
                 let started = std::time::Instant::now();
-                let played = attached(horizon_launcher::launch::wrap(cmd, &instance.launch));
+                let played =
+                    horizon_launcher::launch::wrap(cmd, &instance.launch).and_then(attached);
                 if let Err(e) = instances::record_play(&instance.id, started.elapsed()) {
                     eprintln!("Play time not saved: {e}");
                 }
@@ -1568,7 +1603,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
                 horizon_launcher::jars::Permission::headless(allow_jar_downloads),
             )
             .map_err(|error| error.to_string())?;
-            let played = attached(horizon_launcher::launch::wrap(cmd, &instance.launch));
+            let played = horizon_launcher::launch::wrap(cmd, &instance.launch).and_then(attached);
             if let Err(e) = instances::record_play(&instance.id, started.elapsed()) {
                 eprintln!("Play time not saved: {e}");
             }
@@ -1769,6 +1804,9 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
         }
         Cmd::Update { check } => update(check, as_json)?,
         Cmd::BugReport { text, log } => {
+            if let Some(note) = old_launcher_note() {
+                eprintln!("{note}");
+            }
             let path = horizon_launcher::bug_report::write(&text, log)?;
             if as_json {
                 json(serde_json::json!({ "path": path }));
@@ -2073,27 +2111,37 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
     }
     Ok(())
 }
+/// What a bug report says first when a newer launcher is out (#18631).
+fn old_launcher_note() -> Option<String> {
+    use horizon_launcher::bug_report;
+    bug_report::old_launcher_note(backend::VERSION, bug_report::newer_launcher().as_deref())
+}
+
 /// `data`: the same consent as Settings → Data collection.
 fn data(action: DataCmd, as_json: bool) -> Result<(), String> {
     use horizon_launcher::telemetry;
-    let review = |item: &horizon_telemetry::Item, yes: bool| -> Result<bool, String> {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(item).map_err(|e| e.to_string())?
-        );
-        if yes {
-            return Ok(true);
-        }
-        if !std::io::stdin().is_terminal() {
-            return Err("Add --yes to send it without asking.".into());
-        }
-        eprint!("Send this? [y/N] ");
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        Ok(line.trim().eq_ignore_ascii_case("y"))
-    };
+    let review =
+        |item: &horizon_telemetry::Item, yes: bool, note: Option<String>| -> Result<bool, String> {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(item).map_err(|e| e.to_string())?
+            );
+            if let Some(note) = note {
+                eprintln!("{note}");
+            }
+            if yes {
+                return Ok(true);
+            }
+            if !std::io::stdin().is_terminal() {
+                return Err("Add --yes to send it without asking.".into());
+            }
+            eprint!("Send this? [y/N] ");
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?;
+            Ok(line.trim().eq_ignore_ascii_case("y"))
+        };
     match action {
         DataCmd::Status => {
             let status = telemetry::status_json();
@@ -2133,14 +2181,14 @@ fn data(action: DataCmd, as_json: bool) -> Result<(), String> {
         DataCmd::Bug { text, log, yes } => {
             telemetry::ensure_allowed(horizon_telemetry::Kind::Bug)?;
             let item = telemetry::bug_report(&text, log)?;
-            if review(&item, yes)? {
+            if review(&item, yes, old_launcher_note())? {
                 println!("{}", telemetry::submit(&item)?);
             }
         }
         DataCmd::Benchmark { file, yes } => {
             telemetry::ensure_allowed(horizon_telemetry::Kind::Benchmark)?;
             let item = telemetry::benchmark_report(&file)?;
-            if review(&item, yes)? {
+            if review(&item, yes, None)? {
                 println!("{}", telemetry::submit(&item)?);
             }
         }

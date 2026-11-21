@@ -130,7 +130,12 @@ impl Game<'_> {
         partial: f32,
     ) -> Option<horizon_client::gfx::BorderDraw> {
         use horizon_client::border_render::{self, BorderRenderer};
-        let distance = f64::from(self.streaming.radius * 16);
+        // The wall and its fade span the effective render distance, never the
+        // streaming radius's margin nor the far-terrain LOD distance: the
+        // wall's texture coordinates are f32, and at LOD depths one ulp of the
+        // v coordinate is wider than a whole texture tile.
+        let radius = self.effective_render_distance();
+        let distance = f64::from(radius * 16);
         border_render::extract(
             &self.border,
             partial,
@@ -145,9 +150,8 @@ impl Game<'_> {
             self.border_renderer.invalidate();
             self.border_section = Some(section);
         }
-        // Camera.depthFar, as the renderer's far plane.
-        let depth_far =
-            horizon_client::camera::depth_far(self.terrain_distance(), self.settings.cloud_range);
+        // `Camera.depthFar`, from the same radius, caps the wall's height.
+        let depth_far = horizon_client::camera::depth_far(radius, self.settings.cloud_range);
         if !self
             .border_renderer
             .prepare(&self.border_state, camera, distance, depth_far)

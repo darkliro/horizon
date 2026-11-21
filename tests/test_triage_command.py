@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from tools.ci import nightly_set as ns
 from tools.ci import triage_command as tc
@@ -80,6 +81,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(tc.parse("/reopen"), tc.Command("reopen"))
         self.assertEqual(tc.parse("/label bug,  good first issue ,bug"), tc.Command("label", labels=("bug", "good first issue")))
         self.assertEqual(tc.parse("/unlabel bug"), tc.Command("unlabel", labels=("bug",)))
+
+    def test_an_agent_comments_prefix_does_not_hide_the_command(self):
+        self.assertEqual(tc.parse("🤖 Agent: /close not planned"), tc.Command("close", "not_planned"))
+        self.assertEqual(tc.parse("🤖 Agent: /reopen"), tc.Command("reopen"))
+        self.assertEqual(tc.parse("🤖 Agent: /label bug, tooling"), tc.Command("label", labels=("bug", "tooling")))
+        self.assertEqual(tc.parse("🤖 Agent: /unlabel bug"), tc.Command("unlabel", labels=("bug",)))
+        self.assertIsNone(tc.parse("🤖 Agent: thanks"))
 
     def test_first_line_only(self):
         self.assertEqual(tc.parse("/close\n/label release-now"), tc.Command("close", "completed"))
@@ -241,8 +249,30 @@ class LimitTests(unittest.TestCase):
         with self.assertRaises(tc.Refused):
             do("/close", Fake(past=past("kacpherek", 60)), login="Kacpherek")
 
+    def test_prefix_login_is_not_charged(self):
+        api = Fake(past=past("bobby", 60))
+        self.assertEqual(tc.actions_by(api, "bob", NOW), 0)
+        self.assertEqual(tc.actions_by(api, "bobby", NOW), 60)
+
     def test_ludovic_is_unlimited(self):
         do("/close", Fake(past=past("ludovic111", 100)), login="ludovic111")
+
+
+class ApiEncodingTests(unittest.TestCase):
+    def test_a_slashed_label_is_one_path_segment_for_get_and_delete(self):
+        calls = []
+
+        def fake_gh(*args, **options):
+            calls.append(args)
+            return '{"name": "area/foo"}' if args[:2] == ("api", calls[-1][1]) and len(args) == 2 else ""
+
+        with mock.patch.object(tc, "gh", fake_gh):
+            api = tc.Api("o/r")
+            api.remove_label(5, "area/foo")
+            api.label("area/foo")
+        delete, get = calls
+        self.assertTrue(delete[-1].endswith("/issues/5/labels/area%2Ffoo"), delete)
+        self.assertTrue(get[1].endswith("/labels/area%2Ffoo"), get)
 
 
 class WorkflowTests(unittest.TestCase):

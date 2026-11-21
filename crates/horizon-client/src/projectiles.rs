@@ -445,6 +445,11 @@ pub trait ProjectileWorld {
     fn empty(&self, _p: [i32; 3]) -> bool {
         true
     }
+    /// The check that opens `AbstractArrow.tick`: `at` lies inside one of the
+    /// collision boxes of the block it is in.
+    fn inside_collision(&self, _at: Vec3) -> bool {
+        false
+    }
     /// `Level.loadedAndEntityCanStandOn(p, projectile)` with the projectile's
     /// feet at `entity_y`: the top face of the block's collision shape is
     /// full (`Block.isFaceFull`), as on a top slab, not only a full cube.
@@ -697,6 +702,12 @@ impl Projectile {
             self.yaw += rotation;
             self.previous_yaw += rotation;
             self.needs_sync = true;
+        }
+        // `ShulkerBullet.tick` turns the bullet (`rotateTowardsMovement(0.5F)`)
+        // after `hitTargetOrDeflectSelf`, so a deflection in its tick is
+        // followed by the turn, from the reversed motion.
+        if !by_attack && matches!(self.kind, ProjectileKind::ShulkerBullet { .. }) {
+            self.rotate_towards_movement(0.5);
         }
         (self.owner, self.owner_uuid, self.guest) = owner;
         self.owner_vehicle = None;
@@ -1040,7 +1051,9 @@ impl Projectile {
             self.velocity.z + source_velocity.z,
         );
     }
-    /// AbstractHurtingProjectile: movement along the direction at the acceleration power.
+    /// `AbstractHurtingProjectile(type, x, y, z, direction, level)`: movement
+    /// along the direction at the acceleration power. `snapTo` keeps the new
+    /// entity's rotation (0, 0); `rotateTowardsMovement` turns it from there.
     pub fn fireball(
         kind: ProjectileKind,
         position: Vec3,
@@ -1052,8 +1065,17 @@ impl Projectile {
             .sqrt()
             .max(1.0e-9);
         p.velocity = Vec3::new(dir[0] / len * 0.1, dir[1] / len * 0.1, dir[2] / len * 0.1);
-        p.update_rotation();
         p
+    }
+    /// `AbstractHurtingProjectile(type, mob, direction, level)` ends with
+    /// `setRot(mob.getYRot(), mob.getXRot())`: a mob's fireball starts with
+    /// its shooter's angles (`setRot` takes both % 360, `setXRot` clamps the
+    /// pitch to +-90), not its motion's. `yRotO`/`xRotO` stay as `snapTo` left
+    /// them.
+    pub fn shot_by(mut self, yaw: f32, pitch: f32) -> Self {
+        self.yaw = yaw % 360.0;
+        self.pitch = (pitch % 360.0).clamp(-90.0, 90.0);
+        self
     }
     /// `ThrownEgg`'s item: what its hatchlings' variant comes from.
     pub fn set_egg_item(&mut self, stack: &crate::items::ItemStack) {
@@ -1084,13 +1106,15 @@ impl Projectile {
         stack.count = 1;
         self.item = Some(stack);
     }
+    /// The angles along the motion as `Projectile.shoot` sets them:
+    /// `(float)(Mth.atan2(..) * Mth.RAD_TO_DEG)`, the table `Mth.atan2` and the
+    /// float `180 / pi`, not the exact ones.
     fn update_rotation(&mut self) {
+        use horizon_core::geometry::trig::atan2_degrees;
         let v = self.velocity;
         let sd = (v.x * v.x + v.z * v.z).sqrt();
-        use horizon_core::geometry::trig::atan2;
-        // Projectile.shoot uses Mth.atan2 and widened float degree constants.
-        self.yaw = (atan2(v.x, v.z) * 180.0 / f64::from(std::f32::consts::PI)) as f32;
-        self.pitch = (atan2(v.y, sd) * 180.0 / f64::from(std::f32::consts::PI)) as f32;
+        self.yaw = atan2_degrees(v.x, v.z);
+        self.pitch = atan2_degrees(v.y, sd);
         // `Projectile.shoot` ends with `yRotO = getYRot(); xRotO = getXRot()`:
         // a freshly shot projectile interpolates from the rotation it was
         // aimed along, not from where it was created.
@@ -1123,6 +1147,15 @@ impl Projectile {
         }
         self.pitch = self.previous_pitch + t * (x_rot - self.previous_pitch);
         self.yaw = self.previous_yaw + t * (y_rot - self.previous_yaw);
+    }
+    /// `AbstractHurtingProjectile`: fireballs, wither skulls, dragon fireballs
+    /// and wind charges ease towards their motion with `rotateTowardsMovement`.
+    fn turns_like_hurting_projectile(&self) -> bool {
+        self.is_fireball()
+            || matches!(
+                self.kind,
+                ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge
+            )
     }
     /// The kinds whose tick turns them with `Projectile.updateRotation`: a
     /// `ThrowableProjectile` (the thrown kinds and the experience bottle) and
@@ -1390,7 +1423,9 @@ impl Projectile {
             return (false, Hit::Block { pos, at, face });
         }
         self.position = to;
-        self.update_rotation();
+        // `ProjectileUtil.rotateTowardsMovement(this, 0.5F)` ends every tick,
+        // after the move and after a hit (`deflect` turns a deflected bullet).
+        self.rotate_towards_movement(0.5);
         if let Some(b) = target {
             let (dir, steps) = match self.kind {
                 ProjectileKind::ShulkerBullet { dir, steps, .. } => (dir, steps),
@@ -1764,6 +1799,13 @@ impl Projectile {
             self.left_owner = owner_box
                 .is_none_or(|b| !b.inflate(Vec3::new(1.0, 1.0, 1.0)).contains(self.position));
         }
+        // `AbstractHurtingProjectile.tick` turns the projectile
+        // (`rotateTowardsMovement(0.2F)`) before it handles a hit, so a hit
+        // that leaves it alive (a breeze's deflection, a dragon fireball's own
+        // dragon) still has the turn.
+        if impact && self.turns_like_hurting_projectile() && (best.is_some() || block.is_some()) {
+            self.rotate_towards_movement(0.2);
+        }
         // DragonFireball.onHit does nothing for its own owner (`ownedBy`): the
         // selected hit is not replaced by what lies behind it, nothing happens,
         // and the fireball keeps its motion. AbstractHurtingProjectile.tick
@@ -1832,12 +1874,7 @@ impl Projectile {
         self.position = to;
         // `AbstractHurtingProjectile.tick` (fireballs and wind charges) eases towards the motion
         // (`ProjectileUtil.rotateTowardsMovement`); the thrown kinds turned in `tick` above.
-        if self.is_fireball()
-            || matches!(
-                self.kind,
-                ProjectileKind::WindCharge | ProjectileKind::BreezeWindCharge
-            )
-        {
+        if self.turns_like_hurting_projectile() {
             self.rotate_towards_movement(0.2);
         } else if !self.turns_with_update_rotation() {
             self.update_rotation();
@@ -2823,6 +2860,33 @@ mod tests {
         p.tick(&w);
         // Fresh Java 26.3: (0.1 + 0.1) * (double) 0.95f.
         assert_eq!(p.velocity.x, 0.189_999_997_615_814_2);
+    }
+
+    /// `AbstractHurtingProjectile(type, x, y, z, direction, level)` leaves the
+    /// rotation `snapTo` kept, (0, 0); the mob's constructor then
+    /// `setRot(mob.getYRot(), mob.getXRot())`. The first tick eases a fifth of
+    /// the way from there (`rotateTowardsMovement(0.2F)`) towards the motion,
+    /// which along +x is yRot atan2(0, x) + 90 = 90 and xRot atan2(x, 0) - 90 = 0.
+    #[test]
+    fn a_mobs_fireball_starts_with_its_shooters_angles() {
+        let at = Vec3::new(0.0, 100.0, 0.0);
+        let plain = Projectile::fireball(ProjectileKind::SmallFireball, at, None, [1.0, 0.0, -1.0]);
+        assert_eq!((plain.yaw, plain.pitch), (0.0, 0.0));
+        // setRot takes both % 360; setXRot clamps the pitch to +-90.
+        let shot = |yaw, pitch| {
+            Projectile::fireball(ProjectileKind::SmallFireball, at, None, [1.0, 0.0, 0.0])
+                .shot_by(yaw, pitch)
+        };
+        let p = shot(-400.0, 30.0);
+        assert_eq!((p.yaw, p.pitch), (-40.0, 30.0));
+        let p = shot(10.0, 450.0);
+        assert_eq!((p.yaw, p.pitch), (10.0, 90.0));
+        let mut p = shot(360.0, 30.0);
+        p.tick(&Empty(vec![]));
+        // 0 + 0.2 * (90 - 0), and 30 + 0.2 * (x - 30) where x is
+        // (float)(pi / 2 * 57.2957763671875) - 90 = -7.6e-6 (the bytecode
+        // multiplies by the folded RAD_TO_DEG), in floats.
+        assert_eq!((p.yaw, p.pitch), (18.0, 23.999_998));
     }
 
     /// `Fireball.setItem` with `Fireball.defineSynchedData`'s default and

@@ -5,11 +5,21 @@ use super::{
     Renderer, check_layers, cull, describe_adapter, is_software, oit, pack_timing, startup_step,
     surface_format, timing,
 };
-// Ray tracing on request, which the device needs from its creation (gfx.rs may not grow).
-#[path = "ray_query.rs"]
-pub(super) mod ray_query;
+// Mesh shader capability negotiation on request (spec #17243 step 1).
+#[path = "mesh_shader.rs"]
+pub(super) mod mesh_shader;
 use std::sync::Arc;
 use winit::window::Window;
+
+/// Video memory the allocator shares out in blocks of 4-16 MiB (Vulkan and DirectX 12); a
+/// buffer or texture larger than a block gets a block of exactly its size, which is freed
+/// with it. With blocks of 8-64 MiB (`MemoryHints::MemoryUsage`) the size grew with each
+/// block opened, and the few small buffers that live all session (section tests, clouds,
+/// the staging belt) each kept a 32 or 64 MiB block from being freed: some 140 of 540 MB
+/// reserved were empty in a loaded world at render distance 12 (#15723).
+pub(super) const MEMORY_HINTS: wgpu::MemoryHints = wgpu::MemoryHints::Manual {
+    suballocated_device_memory_block_size: 4 << 20..16 << 20,
+};
 
 /// Sets the window surface up on `device`: the swapchain format (`surface_format`), the
 /// copies screenshots and frame generation make, and Mailbox when the surface offers it
@@ -154,7 +164,8 @@ pub(super) async fn open_adapter(
         | pack_timing::PassTiming::features(adapter)
         | cull::Cull::features(adapter)
         | oit::features(adapter)
-        | ray_query::features(adapter, needs.rays)
+        | super::rt::query::features(adapter, needs.rays)
+        | mesh_shader::features(adapter)
         | (adapter.features()
             & (wgpu::Features::INDIRECT_FIRST_INSTANCE
                 | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
@@ -183,11 +194,8 @@ pub(super) async fn open_adapter(
         label: Some("Horizon device"),
         required_features: features,
         required_limits: limits,
-        // Video memory in blocks of 8-64 MiB instead of 128-256 MiB (Vulkan and DirectX 12):
-        // with the larger blocks a few small buffers kept whole blocks the arena's pages had
-        // left, and over half the video memory reserved was unused (1,344 MiB for 500).
-        memory_hints: wgpu::MemoryHints::MemoryUsage,
-        experimental_features: ray_query::experimental(features),
+        memory_hints: MEMORY_HINTS,
+        experimental_features: mesh_shader::experimental(features),
         ..Default::default()
     };
     #[cfg(not(target_os = "macos"))]

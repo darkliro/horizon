@@ -87,7 +87,21 @@ and send then returns `UnsupportedPeer`
 without a packet. Horizon-branded peers must also answer the global raw transport
 revision mark on `horizon:payloads`, even with empty or all-optional declarations.
 Query is `[0, 1]`; Offer starts `[1, 1]` followed by the record count. A missing
-response or wrong revision refuses admission with a named raw-protocol cause.
+response or wrong revision refuses admission with a named raw-protocol cause. One
+exception: a client meeting a Horizon server that sent nothing on `horizon:payloads`
+(a build from before this negotiation) joins it like a vanilla server, with nothing
+negotiated. This applies only to the connection's initial configuration; a
+reconfiguration without a response still refuses. Once that initial configuration
+finished with nothing received on `horizon:payloads`, payloads on channels the client
+declared are dropped instead of refused: they are never decoded or delivered to a mod.
+Such payloads arriving during configuration, before its finish, still refuse. A required
+local declaration the server lacks still refuses admission.
+In the initial configuration each end first names its build on `horizon:build` (one
+string, `Nightly 2026-11-18 · 0c02067`): the server before its Query, the client before
+its first message on `horizon:payloads`. A refusal then says which builds met
+("This server runs Horizon X; your game is Horizon Y.", which side to update when two
+nightlies or two releases meet, and the raw-protocol cause below it); an end that never named its build is
+older than this. Vanilla clients discard the payload, as they discard the Query.
 This is not a build authentication mechanism. Non-Horizon vanilla peers retain
 optional admission. Peers with no mod declarations exchange only protocol metadata and
 an Offer of the engine's optional declarations (below); there is no per-tick scan of

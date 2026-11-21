@@ -12,6 +12,8 @@ pub mod cache;
 mod detail;
 mod kept;
 mod mesh;
+#[cfg(test)]
+pub(crate) use mesh::{far_look, far_top_vertex};
 pub mod packed;
 mod samples;
 use horizon_world::registry::BlockStateId;
@@ -652,6 +654,23 @@ fn resampled_over(
         })
         .collect()
 }
+/// [`Lod::surface`] over `ready`: the finest tile over (x, z) whose cell
+/// there holds a surface; a coarser tile answers where the finer ones are
+/// not sampled or sampled empty.
+fn surface_in(ready: &FxHashMap<TileKey, Arc<Vec<Column>>>, x: i32, z: i32) -> Option<Surface> {
+    (0..=MAX_LEVEL).find_map(|level| {
+        let size = 16 << level;
+        let key = TileKey {
+            x: x.div_euclid(size),
+            z: z.div_euclid(size),
+            level,
+        };
+        let columns = ready.get(&key).filter(|c| c.len() == CELLS * CELLS)?;
+        let cell = size / CELLS as i32;
+        let (cx, cz) = ((x - key.x * size) / cell, (z - key.z * size) / cell);
+        columns[cz as usize * CELLS + cx as usize].surface
+    })
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileKey {
     pub x: i32,
@@ -1203,6 +1222,10 @@ struct Shared {
     stop: AtomicBool,
     /// Reduced far detail: samplers approximate wide cells.
     approximate: AtomicBool,
+    /// Tiles' quads get their looks: `mesh::Mesher::looks`.
+    looks: std::sync::atomic::AtomicU8,
+    /// A `shaders/` pack draws the terrain: `mesh::Mesher::shader_pack`.
+    shader_pack: AtomicBool,
     /// The reduction levels `Lod::apply_detail` reads, one bit each (level
     /// `i` is a cell `2 << i` blocks wide), so the far terrain thread builds
     /// them before it sends a chunk's columns on.
@@ -1343,6 +1366,16 @@ pub struct Lod {
     keeps_observed: bool,
 }
 impl Lod {
+    /// Tiles meshed from now on carry their quads' looks for a shader pack that reads them
+    /// (`Mesher::looks`), with the Nether's face shades where `nether`.
+    pub fn set_looks(&self, looks: bool, nether: bool) {
+        let mode = if looks { 1 + u8::from(nether) } else { 0 };
+        self.shared.looks.store(mode, Ordering::Relaxed);
+    }
+    /// Tiles meshed from now on are for a `shaders/` pack (`Mesher::shader_pack`).
+    pub fn set_shader_pack(&self, on: bool) {
+        self.shared.shader_pack.store(on, Ordering::Relaxed);
+    }
     pub fn new(source: Arc<dyn LodSource>, context: Arc<WorkerContext>) -> Self {
         Self::assemble(Some(source), Some(context), true)
     }
@@ -1370,6 +1403,8 @@ impl Lod {
             mesh_wake: Condvar::new(),
             stop: AtomicBool::new(false),
             approximate: AtomicBool::new(false),
+            looks: Default::default(),
+            shader_pack: AtomicBool::new(false),
             detail_widths: std::sync::atomic::AtomicU8::new(0),
             mesh_held: AtomicBool::new(false),
             near_loading: AtomicBool::new(false),
@@ -1429,6 +1464,8 @@ impl Lod {
                                 let input = job.snapshot.mesh_input(job.key, job.finer);
                                 let columns = input.columns();
                                 let edges = input.edges();
+                                mesher.looks = shared.looks.load(Ordering::Relaxed);
+                                mesher.shader_pack = shared.shader_pack.load(Ordering::Relaxed);
                                 let mut mesh = mesher.mesh(
                                     job.key,
                                     &columns,
@@ -1716,19 +1753,19 @@ impl Lod {
     /// resident chunks (`game.raycast`); water is passed, as the view's ray
     /// passes it.
     pub fn ground(&self, x: i32, z: i32) -> Option<(i32, BlockStateId)> {
-        (0..=MAX_LEVEL).find_map(|level| {
-            let size = 16 << level;
-            let key = TileKey {
-                x: x.div_euclid(size),
-                z: z.div_euclid(size),
-                level,
-            };
-            let columns = self.ready.get(&key).filter(|c| c.len() == CELLS * CELLS)?;
-            let cell = size / CELLS as i32;
-            let (cx, cz) = ((x - key.x * size) / cell, (z - key.z * size) / cell);
-            let surface = columns[cz as usize * CELLS + cx as usize].surface?;
-            Some((surface.height, surface.state))
-        })
+        self.surface(x, z).map(|s| (s.height, s.state))
+    }
+    /// The surface at block column (x, z) as the far terrain draws it: from
+    /// the finest tile sampled there whose cell holds one, whether or not the
+    /// chunk is loaded (a client mod's map past the loaded chunks).
+    pub fn surface(&self, x: i32, z: i32) -> Option<Surface> {
+        surface_in(&self.ready, x, z)
+    }
+    /// A tile's samples as though its source had returned them, for a test
+    /// outside this crate reading the far terrain.
+    #[cfg(feature = "test-support")]
+    pub fn insert_ready_for_test(&mut self, key: TileKey, columns: Vec<Column>) {
+        self.ready.insert(key, Arc::new(columns));
     }
     pub fn stats(&self) -> (usize, usize) {
         (self.active.len(), self.ready.len())
@@ -3408,6 +3445,63 @@ fn retiring_detail<'a>(
 }
 #[cfg(test)]
 mod tests {
+    /// A far column's surface comes from the finest tile sampled over it, its
+    /// water and biome with it; where that tile's cell is empty or there is no
+    /// finer tile, the coarser one answers, and nothing answers where no tile
+    /// is sampled. West and north of the origin count as their own tiles.
+    #[test]
+    fn a_far_columns_surface_is_the_finest_tile_sampled_over_it() {
+        let lake = Surface {
+            height: 63,
+            state: BlockStateId(5),
+            water: Some((70, BlockStateId(9))),
+            biome: 3,
+        };
+        let hills = Surface {
+            height: 90,
+            state: BlockStateId(1),
+            water: None,
+            biome: 7,
+        };
+        let column = |surface| Column {
+            surface,
+            spans: Spans::new(),
+        };
+        // A block-wide tile over x, z in -16..0, one cell of it holding the
+        // lake at (-3, -14); a tile of 2-block cells over -32..0 all hills.
+        let mut fine = vec![column(None); CELLS * CELLS];
+        fine[2 * CELLS + 13] = column(Some(lake));
+        let mut ready = FxHashMap::default();
+        ready.insert(
+            TileKey {
+                x: -1,
+                z: -1,
+                level: 0,
+            },
+            Arc::new(fine),
+        );
+        ready.insert(
+            TileKey {
+                x: -1,
+                z: -1,
+                level: 1,
+            },
+            Arc::new(vec![column(Some(hills)); CELLS * CELLS]),
+        );
+        assert_eq!(surface_in(&ready, -3, -14), Some(lake));
+        assert_eq!(
+            surface_in(&ready, -4, -14),
+            Some(hills),
+            "the fine cell is empty"
+        );
+        assert_eq!(
+            surface_in(&ready, -20, -5),
+            Some(hills),
+            "no fine tile there"
+        );
+        assert_eq!(surface_in(&ready, 5, 5), None, "nothing sampled east");
+    }
+
     /// A spyglass or the zoom mod magnifies only what the narrowed view
     /// covers, so `ZoomAim` asks for finer tiles there and nowhere else. Without
     /// that cone the same request would reach the whole circle, which at the
@@ -4333,6 +4427,146 @@ mod tests {
             "minecraft:cut_copper_slab",
         ] {
             assert!(materials.contains(name), "missing fixture {name}");
+        }
+        Ok(())
+    }
+    /// A far face gives off its block's light level in its vertex, as the section mesher's
+    /// faces do (`MaterialInput.emission`, read from the vertex): the block state's, a fluid's
+    /// own, none for one that gives no light; the same with quad looks or without.
+    #[test]
+    #[ignore = "daily"]
+    fn far_faces_give_off_their_blocks_light_level() -> crate::Result<()> {
+        use crate::{assets::Assets, biome::Biomes, light::LightTables, mesher::MeshTables};
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+        );
+        let assets = Arc::new(Assets::load(&root)?);
+        let resource_root = crate::resource_source::ResourceRoot::directory(root.clone());
+        let render = Arc::new(assets.reload(&resource_root)?);
+        let facts = BlockFacts::load(&root, assets.registry)?;
+        let context = WorkerContext {
+            light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
+            tables: Arc::new(MeshTables::new(
+                &assets,
+                &render,
+                &facts,
+                crate::models::load_visibility(&root, assets.registry)?,
+                None,
+            )?),
+            assets: assets.clone(),
+            render,
+            biomes: Arc::new(Biomes::load(&resource_root)?),
+            hidden_states: Arc::from([]),
+            part_tables: Default::default(),
+        };
+        let kinds = state_kinds(&facts);
+        let registry = assets.registry;
+        let state = |name: &str, properties: &[(&str, &str)]| {
+            let mut state = registry
+                .state(registry.default_state(name).unwrap())
+                .unwrap()
+                .clone();
+            for (key, value) in properties {
+                state.properties.insert((*key).into(), (*value).into());
+            }
+            registry.id(&state).unwrap().0
+        };
+        let blocks: [(&str, &[(&str, &str)], u32); 10] = [
+            ("minecraft:glowstone", &[], 15),
+            ("minecraft:jack_o_lantern", &[], 15),
+            ("minecraft:redstone_lamp", &[("lit", "true")], 15),
+            ("minecraft:redstone_lamp", &[], 0),
+            ("minecraft:crying_obsidian", &[], 10),
+            ("minecraft:magma_block", &[], 3),
+            ("minecraft:shroomlight", &[], 15),
+            ("minecraft:stone", &[], 0),
+            ("minecraft:lava", &[], 15),
+            ("minecraft:water", &[], 0),
+        ];
+        for (name, properties, level) in blocks {
+            let mut chunk = Chunk::empty(0, 0);
+            chunk.set(3, 90, 3, state(name, properties));
+            let columns = summarize(&chunk, &kinds);
+            let meshes = [0, 1].map(|looks| {
+                let mut mesher = mesh::Mesher::default();
+                mesher.looks = looks;
+                mesher.mesh(
+                    TileKey {
+                        x: 0,
+                        z: 0,
+                        level: 0,
+                    },
+                    &columns.iter().collect::<Vec<_>>(),
+                    &FxHashSet::default(),
+                    None,
+                    &context,
+                    &std::array::from_fn(|_| Vec::new()),
+                    &[],
+                )
+            });
+            for (looks, mesh) in meshes.iter().enumerate() {
+                let vertices: Vec<&TerrainVertex> =
+                    mesh.solid.iter().chain(&mesh.translucent).collect();
+                assert!(!vertices.is_empty(), "{name} {properties:?}");
+                let levels: FxHashSet<u32> =
+                    vertices.iter().map(|v| 15 - (v.color >> 28)).collect();
+                assert_eq!(
+                    levels,
+                    [level].into_iter().collect(),
+                    "{name} {properties:?}, looks {looks}"
+                );
+            }
+            let bytes = |v: &[TerrainVertex]| bytemuck::cast_slice::<_, u8>(v).to_vec();
+            assert_eq!(bytes(&meshes[0].solid), bytes(&meshes[1].solid), "{name}");
+            assert_eq!(
+                bytes(&meshes[0].translucent),
+                bytes(&meshes[1].translucent),
+                "{name}"
+            );
+            // A `shaders/` pack's far faces have main's alpha from before the level and the fluid
+            // flag: the same faces, the tier in the low nibble and 0xF in the high one, or on a
+            // fluid 8 plus the face (main's `fluid_face`; with looks, for each quad's face).
+            let mut mesher = mesh::Mesher::default();
+            mesher.shader_pack = true;
+            mesher.looks = 1;
+            let old = mesher.mesh(
+                TileKey {
+                    x: 0,
+                    z: 0,
+                    level: 0,
+                },
+                &columns.iter().collect::<Vec<_>>(),
+                &FxHashSet::default(),
+                None,
+                &context,
+                &std::array::from_fn(|_| Vec::new()),
+                &[],
+            );
+            let fluid = name.ends_with("lava") || name.ends_with("water");
+            let quads = |m: &crate::mesher::SectionMesh| -> Vec<([TerrainVertex; 4], u32)> {
+                let solid = m.solid.as_chunks::<4>().0.iter().zip(&m.solid_looks);
+                let translucent = m.translucent.as_chunks::<4>().0.iter();
+                solid
+                    .chain(translucent.zip(&m.translucent_looks))
+                    .map(|(q, l)| (*q, l.0[0] >> 27 & 7))
+                    .collect()
+            };
+            let (now, then) = (quads(&meshes[1]), quads(&old));
+            assert_eq!(now.len(), then.len(), "{name}");
+            for ((now, _), (then, face)) in now.into_iter().zip(then) {
+                let want = now.map(|v| TerrainVertex {
+                    color: match fluid {
+                        false => v.color | 0xF800_0000,
+                        true => v.color & 0x07FF_FFFF | (0x8 | face) << 28 | 0x0800_0000,
+                    },
+                    ..v
+                });
+                assert_eq!(
+                    bytes(&want),
+                    bytes(&then),
+                    "{name} {properties:?}, face {face}"
+                );
+            }
         }
         Ok(())
     }

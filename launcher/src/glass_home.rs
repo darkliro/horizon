@@ -388,17 +388,14 @@ impl Launcher {
         let running = self.client.is_some();
         let follows = self
             .selected_instance()
-            .is_some_and(|i| i.version.is_none());
+            .is_some_and(|i| i.follows_horizon());
         let stable = self
             .selected_instance()
             .is_some_and(|i| i.channel == horizon_launcher::instances::Channel::Stable);
-        // A Stable instance follows the newest stable build, not each Nightly: its update is
-        // that build when it isn't installed yet.
+        // A Stable instance follows the newest stable build, not each Nightly.
+        let stable_update = self.stable_update(tag);
         let update = if stable {
-            self.stable_builds()
-                .first()
-                .map(|b| b.tag.clone())
-                .filter(|next| follows && !tag.is_empty() && !self.installed.contains(next))
+            stable_update.as_ref().map(|r| r.tag.clone())
         } else {
             self.updates
                 .horizon
@@ -438,15 +435,29 @@ impl Launcher {
             match (installing, self.preparing, &self.starting_client) {
                 (Some(p), _, _) => Some((tr("Updating").into(), Some(p))),
                 (_, _, _) if own.is_some() => Some((tr("Installing").into(), own.flatten())),
+                // A Stable update never replaces another download: it waits, and says so.
+                _ if stable && update.is_some() && self.stable_update_waits() => {
+                    Some((tr("Waiting for another download").into(), None))
+                }
                 (_, true, _) => Some((
                     tr("Preparing").into(),
                     horizon_launcher::mojang::progress().map(|(d, n)| d as f32 / n.max(1) as f32),
                 )),
-                (_, _, Some(_)) => Some((tr("Starting").into(), None)),
+                (_, _, Some(_)) => Some((
+                    self.play_step
+                        .now()
+                        .unwrap_or(tr("Starting"))
+                        .to_owned()
+                        .into(),
+                    None,
+                )),
                 // This instance's mods building (Build and play): the build's overall progress,
                 // the same figure as its card.
                 _ if building => Some((
-                    tr("Building mods").into(),
+                    match self.native_stopping {
+                        true => tr("Stopping the build…").into(),
+                        false => tr("Building mods").into(),
+                    },
                     self.native_progress
                         .map(|p| build_mode::percent(Some(p)) as f32 / 100.),
                 )),
@@ -502,8 +513,9 @@ impl Launcher {
                 }
                 cx.notify();
             }));
-        // A build under way is cancelled from the button it was started from.
-        let more = if building {
+        // A build under way, or a start's pre-launch command, is stopped from the button it was
+        // started from.
+        let more = if building || self.pre_launch_stoppable() {
             div()
                 .id("play-cancel")
                 .occlude()
@@ -517,11 +529,21 @@ impl Launcher {
                 .cursor_pointer()
                 .hover(|s| s.bg(gpui::black().opacity(0.2)))
                 .child(ui::icon("stop", 18., glyph))
-                .tooltip(ui::tip(tr("Stop the build")))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .tooltip(ui::tip(if building {
+                    tr("Stop the build")
+                } else {
+                    tr("Stop")
+                }))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    this.play_after_build = None;
-                    native_mods::cancel();
+                    if building {
+                        // A second press while it stops would only stop it again.
+                        if !this.native_stopping {
+                            this.stop_native_build();
+                        }
+                    } else {
+                        this.stop_pre_launch();
+                    }
                     cx.notify();
                 }))
         } else {
@@ -649,15 +671,11 @@ impl Launcher {
                             cx.notify();
                         }))
                     }
-                    (Some(next), _) if stable => {
-                        let next = next.clone();
+                    (Some(_), _) if stable => {
+                        let release = stable_update.clone();
                         main.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let release = match &this.releases {
-                                Load::Ready(list) => list.iter().find(|r| r.tag == next).cloned(),
-                                _ => None,
-                            };
-                            if let Some(release) = release {
-                                this.install(&release);
+                            if let Some(release) = release.clone() {
+                                this.install_stable_update(release);
                             }
                             cx.notify();
                         }))

@@ -395,7 +395,9 @@ far past the view distance, which helps players find the seed. A player's own LO
 shorter. Each player may have 8 tiles waiting and ask for 64 a second on average, and one background thread
 samples them for everyone in turn, behind the ticks, so far terrain never slows the server down; a tile past the
 distance or over a player's limits is refused, and a client that keeps breaking the limits is disconnected.
-Tiles are sampled again for each player who asks (there is no cache yet). Vanilla clients never hear of it.
+A tile is the same for every player in its level, so the server keeps the tiles it sampled in memory (up to
+32 MiB, about 4,000 tiles; the least recently asked for go first) and answers the next player who asks for one
+with it: players looking at the same land cost one sample. Vanilla clients never hear of it.
 
 `horizon-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600) into
 `reports/profile-<time>Z.hzperf`, a capture the performance tools read ([perf-platform.md](perf-platform.md)), and
@@ -499,7 +501,7 @@ or keeps its settings, fix both in `server.toml`:
 ```toml
 [api]
 bind = "127.0.0.1:8131"      # or your tailnet address, 100.x.y.z:8131
-token = "a long random string only the bot knows"
+token = "b0t-0nly-2f9c41a7d8e35b60"   # 16 characters or more, no spaces
 ```
 
 The same rules as the panel's hold: a tailnet or loopback address, unless `allow_public = true` (the token is then

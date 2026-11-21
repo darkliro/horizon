@@ -512,10 +512,13 @@ impl Game<'_> {
         } else {
             GameMode::Survival
         };
-        self.player = Some(PlayerMotion::new(
-            self.motion,
-            horizon_core::geometry::Vec3::new(0.0, 0.0, 0.0),
-        )?);
+        let mut player =
+            PlayerMotion::new(self.motion, horizon_core::geometry::Vec3::new(0.0, 0.0, 0.0))?;
+        // GameType.updatePlayerAbilities, as a mode change sets it: a creative
+        // player's `Abilities.invulnerable` turns the arrow away in `hurtServer`,
+        // before `applyItemBlocking` counts the shield as used.
+        player.invulnerable = self.creative;
+        self.player = Some(player);
         self.yaw = 0.0;
         self.armor = Default::default();
         self.offhand = Some(stack);
@@ -816,6 +819,9 @@ impl Game<'_> {
         player.fall_flying = op["fall_flying"].as_bool().unwrap_or(false);
         player.flying = op["flying"].as_bool().unwrap_or(false);
         player.may_fly = self.creative;
+        // GameType.updatePlayerAbilities: a creative player's
+        // `Abilities.invulnerable` turns Thorns' damage away in `hurtServer`.
+        player.invulnerable = self.creative;
         if !op["impact"].is_null() {
             player.impulse.impact_position = Some(v3(&op["impact"]));
         }
@@ -1277,6 +1283,11 @@ impl Game<'_> {
                 }
             }
         }
+        super::living_attributes::collect_equipment(
+            &self.motion.attributes,
+            world_items!(self),
+            &mut mob,
+        );
         self.mobs.push(mob);
         Ok(Target::Mob(id))
     }

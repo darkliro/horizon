@@ -313,6 +313,14 @@ pub trait EntitiesBackend {
     #[access(WorldOnly)]
     fn entity_head_yaw(&self, entity: EntityRef) -> Option<f32>;
     /// Side: server.
+    /// The yaw of a mob's body (`LivingEntity.yBodyRot`), which its model
+    /// turns with and its head turns against; `entity_head_yaw` reads the
+    /// head. None for an entity that is gone and for the other kinds, whose
+    /// body yaw Horizon doesn't keep (a player's body trails its head, so its
+    /// facing yaw would be wrong).
+    #[access(WorldOnly)]
+    fn entity_body_yaw(&self, entity: EntityRef) -> Option<f32>;
+    /// Side: server.
     /// The horizontal direction the entity faces (`Entity.getDirection`):
     /// `north`, `south`, `east` or `west`.
     #[access(WorldOnly)]
@@ -576,6 +584,36 @@ pub trait EntitiesBackendMut {
     /// tracking a mob or an armor stand. False where `set_custom_name` is.
     #[access(WorldOnly)]
     fn entity_set_custom_name_visible(&mut self, entity: EntityRef, visible: bool) -> bool;
+    /// Side: server.
+    /// Hides the entity from one viewer's client, or shows it again (Paper's `Player.hideEntity`
+    /// and `showEntity`): the entity tracker never pairs a hidden entity with that client, so it
+    /// is not sent, and a hidden one it already tracks is removed from that client on the next
+    /// tracker pass. Everyone else, and the entity itself, are untouched. A hidden player stays
+    /// in the viewer's Tab list (`player_hide` also lists them out); chat and commands are not
+    /// filtered. Kept per viewer, by the entity's UUID, until shown again or the viewer leaves
+    /// (a rejoin starts with nothing hidden). Returns whether it changed (`false`: it was
+    /// already so). This API refuses with `EntityVisibilityRefusal`: `Client` on a client, `Stale`
+    /// for a viewer handle that no longer identifies a player in the server's list,
+    /// `NoConnection` for a fake viewer, and `StaleEntity` for an entity handle that names
+    /// nothing or the viewer's own player.
+    #[access(WorldOnly)]
+    fn entity_set_visible_to(
+        &mut self,
+        entity: EntityRef,
+        viewer: PlayerRef,
+        visible: bool,
+    ) -> Result<bool, EntityVisibilityRefusal>;
+    /// Side: server.
+    /// Whether `entity_set_visible_to` left the entity visible to that viewer (Paper's
+    /// `Player.canSee(Entity)`): `false` only while a mod has it hidden from that viewer. Not
+    /// the tracker's other rules (range, spectators, `player_hide`); `player_sees` answers those
+    /// for players. Refuses like `entity_set_visible_to`.
+    #[access(WorldOnly)]
+    fn entity_visible_to(
+        &mut self,
+        entity: EntityRef,
+        viewer: PlayerRef,
+    ) -> Result<bool, EntityVisibilityRefusal>;
     /// Side: server.
     /// `Entity.resetFallDistance`: how far the entity has fallen is forgotten, so its next
     /// landing hurts it as a step does (a fan's or a launcher's push, a mod's soft block).

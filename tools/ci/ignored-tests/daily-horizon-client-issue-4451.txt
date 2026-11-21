@@ -508,6 +508,7 @@ horizon-client game::dispenser::tests::the_faced_block_answers_before_the_item_a
 horizon-client game::dragon::dragon_fireball_spawn_tests::the_dragons_fireball_direction_is_normalized_twice lib daily resources
 horizon-client game::dragon::dragon_fireball_spawn_tests::the_dragons_fireball_first_world_tick lib daily resources
 horizon-client game::dragon::dragon_fireball_spawn_tests::the_dragons_fireball_starts_at_its_start_with_a_tenth_of_its_direction lib daily resources
+horizon-client game::dragon::egg_tests::every_win_asks_dragon_fight_won_and_dragon_egg_form_keeps_to_the_first lib daily resources
 horizon-client game::dragon::residency_tests::singleton_client_dragon_install_explicitly_replaces_network_owner lib daily resources
 horizon-client game::dragon::residency_tests::singleton_death_fight_scan_and_resets_discard_owners lib daily resources
 horizon-client game::dragon::residency_tests::singleton_dragon_load_keeps_state_and_reserves_nine_ids lib daily resources
@@ -543,6 +544,7 @@ horizon-client game::enchant_effects::tests::thorns_and_boots_wear_break_the_equ
 horizon-client game::enchant_power_beam_tests::block_parts_answer_the_enchanting_power_and_the_beam_colour lib daily resources
 horizon-client game::enchant_power_beam_tests::enchant_particles_share_native_power_and_rebuild_only_on_parts_reload lib daily resources
 horizon-client game::end::tests::a_pearl_reads_its_end_gateway_cooldown_and_refuses_the_write lib daily resources
+horizon-client game::end::tests::an_entity_keeps_its_motion_through_a_gateway lib daily resources
 horizon-client game::end::ticking_tests::a_ticking_gateway_counts_its_age_in_its_block_entity lib daily resources
 horizon-client game::end::ticking_tests::items_past_the_simulation_distance_enter_no_end_gateway lib daily resources
 horizon-client game::enderman::occupancy_tests::a_carried_block_is_not_placed_into_an_entity lib daily resources
@@ -880,6 +882,7 @@ horizon-client game::lan_menus_tests::a_panicking_turn_leaves_play_state_and_men
 horizon-client game::lan_menus_tests::menu_owners_stay_reachable_through_nested_guest_turns lib daily resources
 horizon-client game::lan_menus_tests::removing_a_fake_player_drops_its_menu_owners lib daily resources
 horizon-client game::lan_mount_menu::tests::horse_inventory_click_keeps_complete_body_stack lib daily resources
+horizon-client game::lan_mount_menu::tests::a_dead_mounts_inventory_takes_no_click lib daily resources
 horizon-client game::lan_trading::tests::a_lowered_level_still_levels_up_with_the_next_trade_set lib daily resources
 horizon-client game::lan_trading::tests::a_merchant_edit_reaches_the_guest_trading_with_it lib daily resources
 horizon-client game::lan_trading::tests::a_trade_hook_fired_by_a_real_select_can_write_the_open_trade lib daily resources
@@ -963,8 +966,11 @@ horizon-client game::machines::part_front_tests::a_part_handing_a_crafters_outpu
 horizon-client game::machines::part_front_tests::a_part_handing_a_droppers_item_back_into_it_loses_none lib daily resources
 horizon-client game::machines::pot_hopper_insertion_tests::actual_hopper_pulls_from_the_saved_pot_slot lib daily resources
 horizon-client game::machines::pot_hopper_insertion_tests::actual_hopper_ticks_insert_into_the_saved_pot_slot lib daily resources
+horizon-client game::machines::pot_signal_tests::a_hand_inserted_item_raises_an_already_powered_comparator lib daily resources
+horizon-client game::machines::pot_signal_tests::a_hand_inserted_item_wakes_the_unpowered_comparator_beside_the_pot lib daily resources
 horizon-client game::machines::pot_signal_tests::a_hopper_inserted_item_updates_the_comparator_beside_the_pot lib daily resources
 horizon-client game::machines::pot_signal_tests::a_pot_feeds_a_comparator_from_its_saved_slot_like_a_chest lib daily resources
+horizon-client game::machines::pot_signal_tests::a_refused_hand_insert_leaves_the_comparator_beside_the_pot_alone lib daily resources
 horizon-client game::machines::tank_reopen_tests::a_committed_mod_tank_survives_a_world_save_close_and_reopen lib daily resources
 horizon-client game::machines::tests::a_container_writing_a_shelf_posts_block_activate lib daily resources
 horizon-client game::mannequin_save_tests::a_mannequin_reads_and_saves_from_its_own_state lib daily resources
@@ -1077,6 +1083,7 @@ horizon-client game::native_block_entity_item_tests::storage_asks_a_game_contain
 horizon-client game::native_block_entity_item_tests::storage_writes_abort_to_the_exact_state_of_every_container_kind lib daily resources
 horizon-client game::native_block_entity_refs::tests::a_level_hook_set_block_replaces_whole_states_and_their_block_entities lib daily resources
 horizon-client game::native_block_entity_refs::tests::an_abort_puts_back_the_lock_and_the_loot_table_roll lib daily resources
+horizon-client game::native_block_entity_refs::tests::block_entities_in_a_box_are_listed_by_position lib daily resources
 horizon-client game::native_block_entity_refs::tests::player_opens_provider_and_refuses_non_provider lib daily resources
 horizon-client game::native_block_entity_refs::tests::retained_handles_reject_replacements_and_rollback_restores_identity lib daily resources
 horizon-client game::native_block_entity_refs::tests::viewers_follow_open_menus_per_level_and_leave_out_fake_players lib daily resources
@@ -1280,6 +1287,7 @@ horizon-client game::native_entity_renderers_tests::an_unregistered_thrown_type_
 horizon-client game::native_entity_riding::tests::a_nested_tree_lists_passengers_depth_first_and_shares_its_root lib daily resources
 horizon-client game::native_entity_riding::tests::a_player_boards_ahead_of_a_mob_and_behind_a_player_as_add_passenger_says lib daily resources
 horizon-client game::native_entity_riding::tests::a_player_gets_off_along_their_own_yaw_on_their_turn_or_not lib daily resources
+horizon-client game::native_entity_riding::tests::a_rider_boards_another_cart_or_boat_straight_from_its_vehicle lib daily resources
 horizon-client game::native_entity_riding::tests::boat_and_cart_interactions_use_shared_mount_path lib daily resources
 horizon-client game::native_entity_riding::tests::camel_admits_multiple_mob_passengers_but_not_a_fourth lib daily resources
 horizon-client game::native_entity_riding::tests::canceled_dismount_keeps_old_mount_and_mount_hook_fires_once lib daily resources
@@ -1600,6 +1608,7 @@ horizon-client game::native_item_places::tests::living_equipment_moves_through_t
 horizon-client game::native_item_places::tests::one_by_one_shows_one_bucket_of_sixteen_and_fills_one lib daily resources
 horizon-client game::native_item_places::tests::scoped_boat_slots_use_the_open_menu_and_refuse_a_removed_owner lib daily resources
 horizon-client game::native_item_places::tests::stand_equipment_effects_wait_for_root_commit lib daily resources
+horizon-client game::native_item_places::tests::the_owners_places_outside_their_turn_are_their_guest_records lib daily resources
 horizon-client game::native_item_places::tests::whole_stack_component_edit_preserves_slot_and_refuses_item_or_count_changes lib daily resources
 horizon-client game::native_item_places::tests::whole_stack_component_edit_rolls_back_with_its_transaction lib daily resources
 horizon-client game::native_key_mappings::tests::opening_and_closing_a_direct_screen_discards_pending_clicks lib daily resources
@@ -1635,6 +1644,7 @@ horizon-client game::native_level_refs::environment_read_tests::floor_reads_real
 horizon-client game::native_level_refs::environment_read_tests::level_environment_reads_match_vanilla_vectors lib daily resources
 horizon-client game::native_level_refs::environment_read_tests::nearest_structure_uses_the_named_generator_without_loading_resident_chunks lib daily resources
 horizon-client game::native_level_refs::environment_read_tests::sky_and_logical_height_read_the_named_dimension_and_client_state lib daily resources
+horizon-client game::native_level_refs::environment_read_tests::structures_at_names_the_starts_whose_box_holds_a_position lib daily resources
 horizon-client game::native_level_refs::tests::a_level_ref_draws_from_its_levels_own_stream lib daily resources
 horizon-client game::native_level_refs::tests::a_level_with_its_own_clock_counts_apart_from_the_overworlds lib daily resources
 horizon-client game::native_level_refs::tests::a_mod_ticket_keeps_a_parked_level_active lib daily resources
@@ -1836,6 +1846,8 @@ horizon-client game::native_player_disconnect_tests::a_second_disconnect_while_p
 horizon-client game::native_player_disconnect_tests::disconnect_reaches_acting_and_displaced_players lib daily resources
 horizon-client game::native_player_disconnect_tests::disconnect_refuses_the_owner_stale_and_offline_players lib daily resources
 horizon-client game::native_player_disconnect_tests::disconnect_sends_the_reason_to_that_guest_only lib daily resources
+horizon-client game::native_player_disconnect_tests::leaving::a_disconnect_inside_player_leaving_is_refused lib daily resources
+horizon-client game::native_player_disconnect_tests::leaving::a_released_guest_does_not_fire_player_leaving lib daily resources
 horizon-client game::native_player_disconnect_tests::wasm_disconnect_crosses_the_generated_forwarder lib daily resources
 horizon-client game::native_player_food::tests::a_stale_handle_gives_nothing lib daily resources
 horizon-client game::native_player_food::tests::levels_are_added_taken_and_clamped_at_zero lib daily resources
@@ -1847,6 +1859,7 @@ horizon-client game::native_player_move_tests::a_veto_corrects_the_player_and_a_
 horizon-client game::native_player_move_tests::a_veto_of_the_first_of_two_reports_in_one_tick_corrects_and_the_second_is_not_heard lib daily resources
 horizon-client game::native_player_move_tests::two_reports_in_one_tick_are_heard_in_order_each_from_the_one_before_when_both_pass lib daily resources
 horizon-client game::native_player_move_tests::two_reports_in_one_tick_with_no_listener_are_committed_in_the_one_pass lib daily resources
+horizon-client game::native_player_move_packet_tests::a_packet_is_heard_with_its_flags_and_a_gone_guest_is_not lib daily resources
 horizon-client game::native_player_spectating_tests::a_guests_camera_is_heard_starting_once_and_stopping lib daily resources
 horizon-client game::native_player_spectating_tests::a_target_that_is_gone_sets_no_camera_and_is_not_heard lib daily resources
 horizon-client game::native_player_spectating_tests::switching_straight_to_another_target_is_one_start_and_no_stop lib daily resources
@@ -1902,6 +1915,7 @@ horizon-client game::native_server::fake_action_tests::a_fake_uses_items_through
 horizon-client game::native_server::fake_action_tests::a_fakes_action_is_refused_before_anything_runs lib daily resources
 horizon-client game::native_server::fake_action_tests::a_fakes_action_leaves_the_per_action_state_as_it_was lib daily resources
 horizon-client game::native_server::fake_action_tests::a_fakes_effects_are_stopped_where_they_start lib daily resources
+horizon-client game::native_server::fake_action_tests::a_panic_inside_a_scoped_action_puts_the_fake_back lib daily resources
 horizon-client game::native_server::fake_action_tests::a_real_player_is_unaffected_at_every_effect_site lib daily resources
 horizon-client game::native_server::fake_action_tests::a_shulker_box_and_an_ender_chest_a_fake_player_used_are_left_shut lib daily resources
 horizon-client game::native_server::fake_action_tests::a_trader_a_fake_player_used_trades_with_the_next_one lib daily resources
@@ -1966,6 +1980,7 @@ horizon-client game::native_world_read::tests::fluid_sameness_buckets_and_bucket
 horizon-client game::native_world_read::tests::recipes_of_type_answers_vanilla_types_from_the_live_table lib daily resources
 horizon-client game::native_world_read::tests::tag_and_fluid_reads_follow_vanilla_and_load_nothing lib daily resources
 horizon-client game::native_worldgen::tests::fresh_game_lifetimes_keep_worker_and_generator_snapshots_separate lib daily resources
+horizon-client game::natural_spawning::tests::a_loner_tropical_fish_reports_its_group_is_full lib daily resources
 horizon-client game::natural_spawning::tests::alive_player_near_tests_guests_where_they_stand lib daily resources
 horizon-client game::natural_spawning::tests::authoritative_world_border_gates_positions_and_whole_chunks lib daily resources
 horizon-client game::natural_spawning::tests::end_spawning_reads_the_level_range_not_the_widened_column lib daily resources
@@ -2163,8 +2178,8 @@ horizon-client game::player_destroy_tests::a_pots_harvest_listener_runs_once_and
 horizon-client game::player_destroy_tests::denied_ice_does_not_melt_above_solid_ground lib daily resources
 horizon-client game::player_destroy_tests::the_mods_harvest_answer_is_read_once_after_the_removal lib daily resources
 horizon-client game::player_destroy_tests::the_parts_answer_decides_the_tool_wear_and_the_statistics lib daily resources
+horizon-client game::player_equipment_change_tests::a_mod_hearing_the_change_needs_no_listened_opt_in lib daily resources
 horizon-client game::player_equipment_change_tests::a_players_hotbar_selection_pickup_and_helmet_are_each_one_change lib daily resources
-horizon-client game::player_equipment_change_tests::players_are_not_told_without_the_listened_opt_in lib daily resources
 horizon-client game::player_residency_tests::actual_dragon_admits_exactly_eight_checked_parts_with_independent_uuids lib daily resources
 horizon-client game::player_residency_tests::actual_guest_membership_and_lifetime_survive_nested_body_loans_and_reset lib daily resources
 horizon-client game::player_residency_tests::dragon_part_registrations_retire_on_replacement_command_and_chunk_unload lib daily resources

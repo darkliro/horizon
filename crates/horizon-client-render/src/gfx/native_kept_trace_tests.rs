@@ -12,7 +12,13 @@ const HEAD: &str = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi =
 const IDENTITY: &str = "fn tonemap(input: TonemapInput) -> vec3<f32> { return input.color; }\n";
 
 /// A device with ray queries, as the game opens one for a `[ray_tracing]` pack.
-fn ray_device() -> Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)> {
+pub(super) fn ray_device() -> Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)> {
+    ray_device_with_storage_limit(u32::MAX)
+}
+
+fn ray_device_with_storage_limit(
+    storage_buffers: u32,
+) -> Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)> {
     let instance = crate::gfx::test_gpu::instance();
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let features = adapter.features() & wgpu::Features::EXPERIMENTAL_RAY_QUERY;
@@ -21,31 +27,36 @@ fn ray_device() -> Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)> {
         eprintln!("no ray queries on {backend:?}: nothing traced");
         return None;
     }
-    eprintln!("tracing on {backend:?}");
+    let mut limits = adapter.limits();
+    limits.max_storage_buffers_per_shader_stage = limits
+        .max_storage_buffers_per_shader_stage
+        .min(storage_buffers);
     let desc = wgpu::DeviceDescriptor {
         required_features: features,
-        required_limits: adapter.limits(),
+        required_limits: limits,
         experimental_features: horizon_hdr::experimental_features(),
         ..Default::default()
     };
-    let (device, queue) = pollster::block_on(adapter.request_device(&desc)).ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&desc))
+        .unwrap_or_else(|error| panic!("ray-query test device creation on {backend:?}: {error}"));
+    eprintln!("tracing on {backend:?}");
     Some((instance, device, queue))
 }
 
 /// A scene: one quad of solid terrain, 16 blocks square at `z` in front of the camera, its
 /// layer marked as over opaque texels (bit 15) so a ray stops on it without reading a sprite,
 /// with its own `generation`.
-struct Scene {
+pub(super) struct Scene {
     generation: u64,
     tlas: wgpu::Tlas,
     store: wgpu::Buffer,
     _blas: wgpu::Blas,
-    sprites: Vec<wgpu::TextureView>,
+    pub(super) sprites: Vec<wgpu::TextureView>,
 }
 
 impl Scene {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, z: f32, generation: u64) -> Self {
-        use crate::gfx::surface_setup::ray_query::{blas_input, quad_indices};
+    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, z: f32, generation: u64) -> Self {
+        use crate::gfx::rt::query::{blas_input, quad_indices};
         let corners = [
             [-8.0, -8.0, z],
             [8.0, -8.0, z],
@@ -53,6 +64,7 @@ impl Scene {
             [-8.0, 8.0, z],
         ];
         // `TerrainVertex`: the position, the uv, the layer and the light, the colour.
+        // The colour's alpha carries light level 12 and HDR class 1.
         let words: Vec<u32> = (corners.iter())
             .flat_map(|p| {
                 [
@@ -61,7 +73,7 @@ impl Scene {
                     p[2].to_bits(),
                     0,
                     0x8000,
-                    !0,
+                    0x3eff_ffff,
                 ]
             })
             .collect();
@@ -146,15 +158,17 @@ impl Scene {
     }
 
     /// The scene as a frame traces it, the camera at the scene's origin.
-    fn traced(&self) -> Traced<'_> {
+    pub(super) fn traced(&self) -> Traced<'_> {
         Traced {
             tlas: &self.tlas,
             solid_instances: 1,
             store: &self.store,
+            looks: None,
             translucent_instances: 1,
             entities: None,
             generation: self.generation,
             camera: [0.0; 3],
+            nether: false,
             distance: 64.0,
         }
     }
@@ -162,12 +176,24 @@ impl Scene {
 
 /// A pack of `manifest` (with the identity tone curve) and `files`, built by `NativePack::new`
 /// against `scene`'s sprites and installed.
-fn pack(
+pub(super) fn pack(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     scene: &Scene,
     manifest: &str,
     files: &[(&str, &str)],
+) -> NativePack {
+    pack_with(device, queue, scene, manifest, files, Default::default())
+}
+
+/// `pack` with the light sources `sources` (`ray_lights::source`).
+fn pack_with(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &Scene,
+    manifest: &str,
+    files: &[(&str, &str)],
+    sources: crate::gfx::ray_lights::Sources,
 ) -> NativePack {
     let manifest = format!("{HEAD}{manifest}[tonemap]\nfile = \"t.wgsl\"\n");
     let mut all: std::collections::BTreeMap<String, Vec<u8>> = (files.iter())
@@ -181,22 +207,29 @@ fn pack(
         sprite_views: &scene.sprites,
         ..crate::gfx::native_pack::tests::terrain_shape(&globals, &empty)
     };
-    let (mut pack, _) =
-        NativePack::new(device, queue, &terrain, report, &[], Default::default()).unwrap();
+    let (mut pack, _) = NativePack::new(
+        device,
+        queue,
+        &terrain,
+        report,
+        &[],
+        (Default::default(), sources),
+    )
+    .unwrap();
     install(device, Some(&mut pack.post), None, [1, 1]).unwrap();
     pack
 }
 
 /// The renderer's world (colour and depth) and screen, 4×4, kept across frames as the
 /// renderer keeps them: the chain's groups hold the world's views.
-struct World {
-    color: wgpu::TextureView,
-    depth: wgpu::TextureView,
-    screen: wgpu::Texture,
+pub(super) struct World {
+    pub(super) color: wgpu::TextureView,
+    pub(super) depth: wgpu::TextureView,
+    pub(super) screen: wgpu::Texture,
 }
 
 impl World {
-    fn new(device: &wgpu::Device) -> Self {
+    pub(super) fn new(device: &wgpu::Device) -> Self {
         let target = |format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -248,19 +281,12 @@ fn frame(
     );
     let mut encoder = device.create_command_encoder(&Default::default());
     pack.before_world(device, &mut encoder, scene);
+    pack.bind_terrain(device, scene);
     let screen = &world.screen;
     let view = screen.create_view(&Default::default());
     let world = (&world.color, &world.depth, &pack.frame.surface_view);
-    pack.post.run(
-        device,
-        &mut encoder,
-        world,
-        &view,
-        [4, 4],
-        false,
-        None,
-        scene,
-    );
+    pack.post
+        .run(device, &mut encoder, world, &view, [4, 4], None, scene);
     let buffer = crate::gfx::copy_frame(device, &mut encoder, screen, [4, 4]);
     queue.submit([encoder.finish()]);
     (buffer.slice(..)).map_async(wgpu::MapMode::Read, |r| r.unwrap());
@@ -396,8 +422,7 @@ fn a_kept_post_pass_reads_its_previous_and_traces() {
 /// frames: three with a scene, two with another (a TLAS regrown). A `[ray_tracing]` pack without
 /// kept resources makes what it made before them: the frame's layout, the chain's and the one
 /// with the scene; its passes' pipelines twice, the decode's and the tonemap's; its groups (a
-/// pass's and the tonemap's) on the first frame, again on the second, whose history is no longer
-/// blank, and again for the other scene. One that keeps resources and traces from a
+/// pass's and the tonemap's) on the first frame, and again for the other scene. One that keeps resources and traces from a
 /// `[[before_world]]` pass and a compute pass makes a layout a pass, each again with the scene,
 /// and its groups for both parities once, then once for the other scene. Nothing else, ever.
 #[test]
@@ -434,11 +459,7 @@ fn a_traced_pack_makes_its_layouts_and_groups_once() {
                 n as u32 + 1,
                 Some(scene),
             );
-            let chain = pack
-                .post
-                .groups
-                .iter()
-                .flat_map(|(_, _, g)| g.iter().cloned());
+            let chain = pack.post.groups.iter().flat_map(|(_, g)| g.iter().cloned());
             let worlds = pack.post.kept.iter().flat_map(|k| k.worlds.iter().cloned());
             held.extend(chain.chain(worlds));
             counts.push(count()?);
@@ -472,7 +493,7 @@ fn a_traced_pack_makes_its_layouts_and_groups_once() {
         [
             [3, 1, 6, 0],
             [0, 3, 0, 0],
-            [0, 3, 0, 0],
+            [0, 0, 0, 0],
             [0, 0, 0, 0],
             [0, 3, 0, 0],
             [0, 0, 0, 0]
@@ -632,7 +653,7 @@ impl EntityLayer {
 
     /// `scene` as a frame with this layer traces it.
     fn traced<'a>(&'a self, scene: &'a Scene) -> Traced<'a> {
-        use crate::gfx::surface_setup::ray_query::ray_scene::TracedEntities;
+        use crate::gfx::rt::scene::TracedEntities;
         Traced {
             entities: Some(TracedEntities {
                 vertices: self.vertices.as_entire_buffer_binding(),
@@ -650,7 +671,7 @@ impl EntityLayer {
 /// A pack whose `[[before_world]]`, compute and post passes trace with `RAY_ENTITY` in the mask
 /// and read `RayHit::entity`: every pass's layout has the entity layer's bindings beside its kept
 /// ones, compute and fragment alike, and each finds the terrain quad (not an entity), with no
-/// validation error. The layer's own hits are #16254's (`ray_entity_tests`), the same WGSL.
+/// validation error. The layer's own hits are #16254's (`rt/entity_tests.rs`), the same WGSL.
 #[test]
 fn passes_that_name_the_entity_layer_trace_beside_kept_resources() {
     let Some((_, device, queue)) = ray_device() else {
@@ -688,7 +709,10 @@ fn passes_that_name_the_entity_layer_trace_beside_kept_resources() {
     let world = World::new(&device);
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut pack = pack(&device, &queue, &scene, &manifest, &files);
-    assert!(pack.traces_entities(), "the passes read the entity layer");
+    assert!(
+        pack.capabilities().ray_entities,
+        "the passes read the entity layer"
+    );
     let traced = layer.traced(&scene);
     for n in 1..=2 {
         let got = frame((&device, &queue, &world), &mut pack, n, Some(&traced));
@@ -697,4 +721,354 @@ fn passes_that_name_the_entity_layer_trace_beside_kept_resources() {
     }
     let error = pollster::block_on(scope.pop());
     assert!(error.is_none(), "{error:?}");
+}
+
+/// A post pass that reads a hit's looks, built by `NativePack::new`: its group binds the
+/// scene's look store, and a stand-in without one (a frame before the store is there), each
+/// frame as the scene has it. The white quad's tint and shade follow the look store. Its
+/// emission comes from the vertex, and an emission-only pack has no look binding.
+#[test]
+fn a_pack_that_reads_hit_looks_binds_the_scene_s_or_none() {
+    let Some((_, device, queue)) = ray_device() else {
+        return;
+    };
+    let scene = Scene::new(&device, &queue, 4.0, 1);
+    let world = World::new(&device);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let manifest = "[ray_tracing]\n[[post]]\nfile = \"p.wgsl\"\n";
+    let shows_hit = "fn post(input: PostInput) -> vec4<f32> {\n    \
+                     let h = trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0);\n    \
+                     return vec4<f32>(h.tint.r, h.shade, h.emission, 1.0);\n}\n";
+    let mut looking = pack(&device, &queue, &scene, manifest, &[("p.wgsl", shows_hit)]);
+    assert!(looking.traces_looks());
+    let look = crate::mesher::QuadLook([1 << 24 | 0x40, !0]);
+    let looks = wgpu::util::DeviceExt::create_buffer_init(
+        &device,
+        &wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&look),
+            usage: wgpu::BufferUsages::STORAGE,
+        },
+    );
+    let at = |generation, looks| Traced {
+        generation,
+        looks,
+        ..scene.traced()
+    };
+    let none = [1.0, 1.0, 12.0 / 15.0];
+    let decode = |c: f32| c.powf(2.2);
+    let looked = [decode(64.0 / 255.0), decode(0.5), 12.0 / 15.0];
+    for (n, (traced, want)) in [
+        (at(1, None), none),
+        (at(2, Some(&looks)), looked),
+        (at(3, None), none),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let got = frame(
+            (&device, &queue, &world),
+            &mut looking,
+            n as u32 + 1,
+            Some(&traced),
+        );
+        assert!(shows(got, want), "frame {n}: {got:?}, {want:?} expected");
+    }
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+    let plain = shows_hit.replace("h.tint.r, h.shade, h.emission", "vec3<f32>(h.emission)");
+    let mut plain = pack(&device, &queue, &scene, manifest, &[("p.wgsl", &plain)]);
+    assert!(!plain.traces_looks());
+    let got = frame((&device, &queue, &world), &mut plain, 1, Some(&at(1, None)));
+    assert!(shows(got, [12.0 / 15.0; 3]), "{got:?}");
+}
+
+/// A pack whose `[[before_world]]`, compute `[[post]]` and fragment post passes each read a
+/// hit's `tint`, `shade` and `emission`: every pass binds the scene's look store, or the stand-in
+/// without one, beside its kept resources. The first two write theirs into `hit`, the last shows
+/// the three passes' mean, which is the look's only when each read it, with no validation error.
+#[test]
+fn every_kind_of_pass_reads_a_hit_s_looks() {
+    let Some((_, device, queue)) = ray_device() else {
+        return;
+    };
+    let scene = Scene::new(&device, &queue, 4.0, 1);
+    // `hit` of six floats (`buffer` is in bytes): the two writing passes' three each.
+    let manifest = format!(
+        "{}[[before_world]]\nfile = \"w.wgsl\"\ndispatch = [1, 1, 1]\nworkgroup = [1, 1, 1]\n\
+         writes = [\"hit\"]\n[[post]]\nfile = \"c.wgsl\"\ncompute = true\ndispatch = [1, 1, 1]\n\
+         workgroup = [1, 1, 1]\nwrites = [\"hit\"]\n[[post]]\nfile = \"l.wgsl\"\nreads = [\"hit\"]\n",
+        HIT.replace("buffer = 16", "buffer = 24")
+    );
+    let ray = "trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0)";
+    let writes = |at: usize| {
+        format!(
+            "fn compute(input: ComputeInput) {{\n    let h = {ray};\n    \
+             hit[{at}] = h.tint.r;\n    hit[{}] = h.shade;\n    hit[{}] = h.emission;\n}}\n",
+            at + 1,
+            at + 2
+        )
+    };
+    let post = format!(
+        "fn post(input: PostInput) -> vec4<f32> {{\n    let h = {ray};\n    \
+         let mine = vec3<f32>(h.tint.r, h.shade, h.emission);\n    \
+         let theirs = vec3<f32>(hit[0], hit[1], hit[2]) + vec3<f32>(hit[3], hit[4], hit[5]);\n    \
+         return vec4<f32>((mine + theirs) / 3.0, 1.0);\n}}\n"
+    );
+    let files = [
+        ("w.wgsl", writes(0)),
+        ("c.wgsl", writes(3)),
+        ("l.wgsl", post),
+    ];
+    let files = files.each_ref().map(|(n, t)| (*n, t.as_str()));
+    let world = World::new(&device);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut pack = pack(&device, &queue, &scene, &manifest, &files);
+    assert!(pack.traces_looks(), "the passes read hit looks");
+    let look = crate::mesher::QuadLook([1 << 24 | 0x40, !0]);
+    let looks = wgpu::util::DeviceExt::create_buffer_init(
+        &device,
+        &wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&look),
+            usage: wgpu::BufferUsages::STORAGE,
+        },
+    );
+    let at = |generation, looks| Traced {
+        generation,
+        looks,
+        ..scene.traced()
+    };
+    let decode = |c: f32| c.powf(2.2);
+    let (none, looked) = (
+        [1.0, 1.0, 12.0 / 15.0],
+        [decode(64.0 / 255.0), decode(0.5), 12.0 / 15.0],
+    );
+    for (n, (traced, want)) in [
+        (at(1, None), none),
+        (at(2, Some(&looks)), looked),
+        (at(3, None), none),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let got = frame(
+            (&device, &queue, &world),
+            &mut pack,
+            n as u32 + 1,
+            Some(&traced),
+        );
+        assert!(shows(got, want), "frame {n}: {got:?}, {want:?} expected");
+    }
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn a_pass_that_skips_hit_looks_keeps_its_storage_buffer_budget() {
+    let Some((_, device, queue)) = ray_device_with_storage_limit(8) else {
+        return;
+    };
+    let mut manifest = HIT.to_owned();
+    for i in 1..=5 {
+        manifest += &format!(
+            "[[resource]]\nname = \"b{i}\"\nbuffer = 16\nelement = \"f32\"\nkeep = \"view\"\n"
+        );
+    }
+    manifest += "[[before_world]]\nfile = \"w.wgsl\"\ndispatch = [1, 1, 1]\nworkgroup = [1, 1, 1]\n\
+                 reads = [\"b1\", \"b2\", \"b3\", \"b4\", \"b5\"]\nwrites = [\"hit\"]\n\
+                 [[post]]\nfile = \"l.wgsl\"\nreads = [\"hit\"]\n";
+    // The compute stage fills all eight slots with two scene buffers and six kept buffers.
+    // Its unused helper must not request another binding. The fragment stage reads the looks.
+    let writes = "fn unused_look(hit: RayHit) -> f32 { return hit.tint.r; }\n\
+                  fn compute(input: ComputeInput) {\n    \
+                  var seen = trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0);\n    \
+                  seen.ao = 1.0;\n    \
+                  hit[0] = seen.distance + b1[0] + b2[0] + b3[0] + b4[0] + b5[0];\n}\n";
+    let show = SHOW.replace(
+        "0.0, 1.0);",
+        "trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0).tint.r, 1.0);",
+    );
+    let scene = Scene::new(&device, &queue, 4.0, 1);
+    let world = World::new(&device);
+    let mut pack = pack(
+        &device,
+        &queue,
+        &scene,
+        &manifest,
+        &[("w.wgsl", writes), ("l.wgsl", &show)],
+    );
+    let look = crate::mesher::QuadLook([1 << 24 | 0x40, !0]);
+    let looks = wgpu::util::DeviceExt::create_buffer_init(
+        &device,
+        &wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&look),
+            usage: wgpu::BufferUsages::STORAGE,
+        },
+    );
+    let traced = Traced {
+        looks: Some(&looks),
+        ..scene.traced()
+    };
+    let got = frame((&device, &queue, &world), &mut pack, 1, Some(&traced));
+    assert!(
+        shows(got, [0.5, 1.0, (64.0_f32 / 255.0).powf(2.2)]),
+        "{got:?}"
+    );
+}
+
+/// Under `[ray_tracing] lights = true`, a `[[before_world]]` pass and a compute `[[post]]` pass
+/// read a torch through the light functions (its level and material, and its cell's list), and
+/// a fragment post pass of the same pack that names none of them traces with exactly the 8
+/// storage buffers the device takes: it has no binding 80, or its rays would miss.
+#[test]
+fn only_the_passes_that_name_the_light_sources_bind_them() {
+    let Some((_, device, queue)) = ray_device_with_storage_limit(8) else {
+        return;
+    };
+    let mut manifest = HIT.replace("[ray_tracing]\n", "[ray_tracing]\nlights = true\n");
+    for i in 1..=5 {
+        manifest += &format!(
+            "[[resource]]\nname = \"b{i}\"\nbuffer = 16\nelement = \"f32\"\nkeep = \"view\"\n"
+        );
+    }
+    manifest += "[[before_world]]\nfile = \"w.wgsl\"\ndispatch = [1, 1, 1]\nworkgroup = [1, 1, 1]\n\
+                 writes = [\"hit\"]\n[[post]]\nfile = \"c.wgsl\"\ncompute = true\n\
+                 dispatch = [1, 1, 1]\nworkgroup = [1, 1, 1]\nwrites = [\"hit\"]\n[[post]]\n\
+                 file = \"l.wgsl\"\nreads = [\"hit\", \"b1\", \"b2\", \"b3\", \"b4\", \"b5\"]\n";
+    let level = "fn compute(input: ComputeInput) {\n    \
+                 let l = ray_light(0u);\n    \
+                 hit[1] = l.level + f32(l.material) * f32(ray_light_count());\n}\n";
+    let near = "fn compute(input: ComputeInput) {\n    \
+                hit[2] = f32(ray_lights_near(ray_light(0u).position).y);\n}\n";
+    // Red the pass's own hit's distance / 8, green `has_ray_tracing`, blue the light passes'.
+    let show = "fn post(input: PostInput) -> vec4<f32> {\n    \
+                let d = trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0).distance;\n    \
+                let kept = b1[0] + b2[0] + b3[0] + b4[0] + b5[0];\n    \
+                let lights = (hit[1] + hit[2]) / 32.0 + kept;\n    \
+                return vec4<f32>(d / 8.0, f32(frame.has_ray_tracing), lights, 1.0);\n}\n";
+    let mut sources = crate::gfx::ray_lights::Sources::default();
+    let torch = crate::gfx::ray_lights::Source {
+        color: [1.0; 3],
+        level: 14,
+        material: 3,
+    };
+    sources.insert(1, torch);
+    let scene = Scene::new(&device, &queue, 4.0, 1);
+    let world = World::new(&device);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let files = [("w.wgsl", level), ("c.wgsl", near), ("l.wgsl", show)];
+    let mut pack = pack_with(&device, &queue, &scene, &manifest, &files, sources);
+    let camera = glam::DVec3::new(0.5, 64.5, 0.5);
+    let key = (0, (64 - crate::chunk::MIN_Y) / 16, 0);
+    let sections = [(key, vec![([2, 64, 0], 1)].into())].into_iter().collect();
+    let lights = pack.frame.ray_lights.as_mut().expect("the light sources");
+    lights.update(&queue, camera, (&sections, crate::chunk::MIN_Y), 1);
+    lights.settle(&queue);
+    let got = frame(
+        (&device, &queue, &world),
+        &mut pack,
+        1,
+        Some(&scene.traced()),
+    );
+    // Level 14 plus material 3 of the one source, and the one source its cell lists.
+    assert!(shows(got, [0.5, 1.0, 18.0 / 32.0]), "{got:?}");
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+/// Both stages fit with the scene's two storage buffers. Binding terrain hit looks takes a
+/// third slot, which the entity stage cannot use on this device.
+#[test]
+fn refusing_entity_look_bindings_makes_the_post_stage_miss_too() {
+    let _gpu = crate::gfx::test_gpu::lock();
+    let Some((_, device, queue)) = ray_device_with_storage_limit(2) else {
+        return;
+    };
+    let scene = Scene::new(&device, &queue, 4.0, 1);
+    let world = World::new(&device);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let manifest = "[ray_tracing]\n[entity]\nfile = \"e.wgsl\"\n[[post]]\nfile = \"p.wgsl\"\n";
+    let post = "fn post(input: PostInput) -> vec4<f32> {
+        let hit = trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0);
+        return vec4<f32>(select(0.25, hit.distance / 8.0, hit.distance >= 0.0),
+                        f32(frame.has_ray_tracing), 0.0, 1.0);
+    }";
+    let entity = "fn entity(input: EntityInput) -> Surface {
+        let hit = trace(input.position, input.normal, 16.0);
+        return Surface(vec4<f32>(vec3<f32>(hit.distance), 1.0));
+    }";
+    let looks = entity.replace("vec3<f32>(hit.distance)", "hit.tint.rgb");
+    let traced = scene.traced();
+    for (entity, enabled) in [(entity, true), (&looks, false)] {
+        let (mut pack, _) = super::material_tests::built(
+            &device,
+            &queue,
+            Some(&scene),
+            manifest,
+            &[("e.wgsl", entity), ("p.wgsl", post)],
+        )
+        .unwrap();
+        let pixel = frame((&device, &queue, &world), &mut pack, 1, Some(&traced));
+        let expected = hit_shown(enabled.then_some(4.0));
+        assert!(shows(pixel, expected), "{pixel:?}, expected {expected:?}");
+        let stage = pack.entity.as_ref().unwrap();
+        let selected = stage.scene.as_ref().and_then(|trace| trace.drawn(0));
+        assert_eq!(selected.is_some(), enabled);
+    }
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+/// Under `lights = true` an entity stage that names the light sources binds them in its scene
+/// group: a third storage buffer, past a device that takes two, so its scene is refused and
+/// the post stage misses too; on one that takes three it traces with them, and the pack keeps
+/// the list.
+#[test]
+fn the_entity_stage_binds_the_light_sources_it_names() {
+    let _gpu = crate::gfx::test_gpu::lock();
+    let manifest =
+        "[ray_tracing]\nlights = true\n[entity]\nfile = \"e.wgsl\"\n[[post]]\nfile = \"p.wgsl\"\n";
+    let post = "fn post(input: PostInput) -> vec4<f32> {
+        let hit = trace(vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 64.0);
+        return vec4<f32>(select(0.25, hit.distance / 8.0, hit.distance >= 0.0),
+                        f32(frame.has_ray_tracing), 0.0, 1.0);
+    }";
+    let entity = "fn entity(input: EntityInput) -> Surface {
+        let hit = trace(input.position, input.normal, 16.0);
+        let near = ray_lights_near(input.position);
+        return Surface(vec4<f32>(vec3<f32>(hit.distance + f32(near.y)), 1.0));
+    }";
+    for (limit, traces) in [(2, false), (3, true)] {
+        let Some((_, device, queue)) = ray_device_with_storage_limit(limit) else {
+            return;
+        };
+        let scene = Scene::new(&device, &queue, 4.0, 1);
+        let world = World::new(&device);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let files = [("e.wgsl", entity), ("p.wgsl", post)];
+        let built = super::material_tests::built(&device, &queue, Some(&scene), manifest, &files);
+        let (mut pack, _) = built.unwrap();
+        let pixel = frame(
+            (&device, &queue, &world),
+            &mut pack,
+            1,
+            Some(&scene.traced()),
+        );
+        let expected = hit_shown(traces.then_some(4.0));
+        assert!(
+            shows(pixel, expected),
+            "{limit}: {pixel:?}, expected {expected:?}"
+        );
+        let stage = pack.entity.as_ref().unwrap();
+        let lit = stage.scene.as_ref().is_some_and(|t| t.traces_lights());
+        assert_eq!(
+            (lit, pack.frame.ray_lights.is_some()),
+            (traces, traces),
+            "{limit}"
+        );
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "{error:?}");
+    }
 }

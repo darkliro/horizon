@@ -29,6 +29,55 @@ impl Drop for Home {
     }
 }
 
+/// A directory link as the game makes one: a symlink on Unix, a junction on Windows.
+#[cfg(unix)]
+fn link_dir(from: &Path, to: &Path) {
+    std::os::unix::fs::symlink(from, to).unwrap();
+}
+#[cfg(windows)]
+fn link_dir(from: &Path, to: &Path) {
+    // mklink takes plain paths: no forward slash and no verbatim prefix.
+    let plain = |path: &Path| {
+        let path = path.to_string_lossy().replace('/', "\\");
+        path.trim_start_matches(r"\\?\").to_owned()
+    };
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(plain(to))
+        .arg(plain(from))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// #17911: a link the game made in its cache is not followed when the cache is searched for a
+/// running build's locks, so the cache can be removed whole. Where none is expected, a link is
+/// still refused.
+#[test]
+fn a_game_made_link_holds_none_of_the_units_locks() {
+    let home = Home::new();
+    let outside = Home::new();
+    outside.file("version/textures/.cargo-lock");
+    home.file("resourcepacks/0123456789abcdef/pack.json");
+    link_dir(
+        &outside.0.join("version/textures"),
+        &home.0.join("resourcepacks/0123456789abcdef/textures"),
+    );
+
+    assert!(matches!(
+        contains_operational_locks(&home.dir(), Links::Refused),
+        Err(Error::Unsafe(_))
+    ));
+    assert!(!contains_operational_locks(&home.dir(), Links::GameMade).unwrap());
+    home.file("resourcepacks/0123456789abcdef/.cargo-lock");
+    assert!(contains_operational_locks(&home.dir(), Links::GameMade).unwrap());
+    assert!(outside.0.join("version/textures/.cargo-lock").exists());
+}
+
 #[test]
 fn late_cargo_is_refused_before_removal_and_can_start_after_completion() {
     let home = Home::new();
@@ -288,4 +337,34 @@ fn package_cache_leases_refuse_pinning_and_late_clear() {
         assert_eq!(fs::read(output).unwrap(), b"package-cache owner");
         owner.unlock().unwrap();
     }
+}
+
+/// #18669: eviction chose an instance's cache while the instance was idle. A launch that
+/// claimed the instance since keeps the cache, and a launch while a unit of it is being deleted
+/// is refused as busy until the delete ends.
+#[test]
+fn a_launch_and_a_delete_in_one_instance_never_overlap() {
+    let home = Home::new();
+    home.file(".horizon-cache/resourcepacks/0123456789abcdef/pack.json");
+    let cache = home.0.join(".horizon-cache");
+    let launch = || {
+        let mut game = std::process::Command::new("game");
+        game.current_dir(&home.0);
+        crate::run_leases::shared(&game)
+    };
+    // The launch's claims, taken before the game starts and held while it runs.
+    let running = launch().unwrap();
+    assert!(matches!(
+        delete_game_unit_in(&cache, Links::GameMade, Some(&home.0)),
+        Err(Error::Busy)
+    ));
+    assert!(cache
+        .join("resourcepacks/0123456789abcdef/pack.json")
+        .is_file());
+    drop(running);
+    // A delete under way holds the instance: the launch is refused until it ends.
+    let deleting = claim_instance(&home.0).unwrap();
+    assert!(matches!(launch(), Err(Error::Busy)));
+    drop(deleting);
+    drop(launch().unwrap());
 }

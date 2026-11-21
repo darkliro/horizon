@@ -8,12 +8,12 @@
 use std::path::{Path, PathBuf};
 
 /// `Limits::downlevel_defaults().max_inter_stage_shader_variables`, the least a GPU offers.
-const LIMIT: u32 = 15;
+pub(in crate::gfx) const LIMIT: u32 = 15;
 
 /// One entry point's variables: the user-defined `@location`s and the built-ins wgpu counts.
 #[derive(Debug, PartialEq, Eq)]
-struct Interface {
-    entry: String,
+pub(in crate::gfx) struct Interface {
+    pub(in crate::gfx) entry: String,
     /// Vertex outputs or fragment inputs, user-defined.
     user: u32,
     /// The fragment stage's `front_facing`, `sample_index`, `sample_mask` and `primitive_index`
@@ -22,7 +22,7 @@ struct Interface {
 }
 
 impl Interface {
-    fn total(&self) -> u32 {
+    pub(in crate::gfx) fn total(&self) -> u32 {
         self.user + self.built_ins
     }
 }
@@ -49,7 +49,7 @@ fn is_location(binding: &naga::Binding) -> bool {
 }
 
 /// The stage interface of every vertex and fragment entry point of `source`.
-fn interfaces(source: &str) -> Vec<Interface> {
+pub(in crate::gfx) fn interfaces(source: &str) -> Vec<Interface> {
     let module = naga::front::wgsl::parse_str(source).unwrap();
     let mut out = Vec::new();
     for entry in &module.entry_points {
@@ -61,6 +61,14 @@ fn interfaces(source: &str) -> Vec<Interface> {
                     .iter()
                     .flat_map(|r| bindings(&module, &r.binding, r.ty))
                     .collect();
+                (outputs.iter().filter(|b| is_location(b)).count(), 0)
+            }
+            naga::ShaderStage::Mesh => {
+                let outputs = entry
+                    .mesh_info
+                    .as_ref()
+                    .map(|info| bindings(&module, &None, info.vertex_output_type))
+                    .unwrap_or_default();
                 (outputs.iter().filter(|b| is_location(b)).count(), 0)
             }
             naga::ShaderStage::Fragment => {
@@ -159,11 +167,16 @@ fn composed() -> Vec<(&'static str, Vec<&'static str>, String)> {
             vec!["terrain.wgsl", "visbuffer.wgsl"],
             super::terrain_shader() + include_str!("../visbuffer.wgsl"),
         ),
-        // Ray tracing's unpacking of sections into its store (gfx/ray_scene.rs's `Unpacker`).
+        // Ray tracing's unpacking of sections into its store (gfx/rt/scene.rs's `Unpacker`).
         (
             "ray tracing unpack",
             vec!["terrain.wgsl", "rt_unpack.wgsl"],
-            super::surface_setup::ray_query::ray_scene::unpack_shader(),
+            super::rt::scene::unpack_shader(),
+        ),
+        (
+            "terrain mesh shader",
+            vec!["terrain.wgsl", "terrain_mesh.wgsl"],
+            super::surface_setup::mesh_shader::shader(),
         ),
         (
             "world primitives",

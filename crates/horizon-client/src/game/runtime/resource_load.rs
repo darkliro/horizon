@@ -65,6 +65,13 @@ pub(super) fn synchronous_startup(options: &Options) -> bool {
         || std::env::var_os("HORIZON_NET_REPORT").is_some()
 }
 
+/// Whether this run owns the player's device-loss marker (`gfx::safe_start`): a visible client
+/// window an ordinary launch started. Scripted, offscreen, server and split-screen guest runs
+/// sharing the folder neither write it nor take it.
+pub(super) fn owns_device_loss_marker(options: &Options) -> bool {
+    !options.offscreen && !options.split_guest && !synchronous_startup(options)
+}
+
 /// The local world a client's launch opens at once (`--world`,
 /// `--quickPlaySingleplayer`), whose generator data can load with the game's.
 pub(super) fn launch_world(options: &Options) -> Option<&str> {
@@ -258,7 +265,13 @@ pub(super) fn load_core(
             });
             let biomes = Step::spawn(scope, parallel, "biomes", || {
                 let biomes = Arc::new(
-                    startup::time("core.biomes", || Biomes::load(resources))
+                    startup::time("core.biomes", || {
+                        if headless {
+                            Biomes::load_for_server(resources)
+                        } else {
+                            Biomes::load(resources)
+                        }
+                    })
                         .map_err(|e| e.to_string())?,
                 );
                 // A launch that names a world: its data preload needs only the
@@ -558,6 +571,10 @@ pub(super) fn load_resources(
     };
     resolved = client_reload::stage_runtime_sprites(resolved, &runtime_sprites);
     resolved = client_reload::stage_texture_atlases(resolved, &texture_atlases);
+    // Battery Mode is a client's: a dedicated server keeps its pools whole. Fixed
+    // here, before any pool size is read or a pool starts; a later change waits
+    // for the next launch.
+    horizon_threads::sizing::set_battery(settings.horizon.battery && !headless);
     let threads = settings.horizon.worker_threads();
     // One pool of workers for every level's streaming, the client's and the
     // server thread's (horizon_threads::jobs), sized before any world opens.
@@ -747,6 +764,7 @@ pub(super) fn load_resources(
             threads,
         },
         rest: std::sync::OnceLock::new(),
+        block_entity_reach: std::sync::OnceLock::new(),
     };
     let resources = Arc::new(resources);
     if menu {

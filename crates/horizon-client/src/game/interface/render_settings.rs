@@ -55,24 +55,49 @@ impl Game<'_> {
     /// changes"): when HDR or the pick (unless refused) call for another frame than the
     /// renderer's, it is made again before this frame draws.
     pub(super) fn follow_frame(&mut self) {
-        if self.options.paced_by_split || self.options.split_guest {
+        let split = self.options.paced_by_split || self.options.split_guest;
+        // Split-screen's renderer isn't made again here, so the Anti-aliasing button offers
+        // 4x MSAA there only where the renderer already has its pipelines.
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_msaa_rebuildable(!split);
+        }
+        if split {
+            return;
+        }
+        // 4x MSAA's pipelines come with a renderer made while it is on: switched on in one made
+        // without them, the renderer is made again once.
+        if self
+            .renderer
+            .as_mut()
+            .is_some_and(Renderer::take_msaa_rebuild)
+        {
+            if let Err(e) = self.rebuild_renderer() {
+                log::warn!("Horizon: the renderer for 4x MSAA could not be made: {e}");
+            }
             return;
         }
         let picked = shader_packs::picked_pack(&self.settings);
-        let path = self.native_shaders.resolve_path(
-            &Self::shader_packs_dir(),
-            picked,
-            shader_packs::dev_pack().is_some(),
-        );
-        let available = path.exists()
-            && path.file_name().is_none_or(|f| {
-                !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty()
-            });
-        let outcome = if available {
-            native_shaders::outcome(&path)
-        } else {
-            Some(false)
-        };
+        if picked.is_empty() {
+            self.native_shaders.forget_selection();
+        }
+        let (path, outcome) = shader_packs::pick_key(picked, || {
+            let path = self.native_shaders.resolve_path(
+                &Self::shader_packs_dir(),
+                picked,
+                shader_packs::dev_pack().is_some(),
+            );
+            let available = path.exists()
+                && path.file_name().is_none_or(|f| {
+                    !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods)
+                        .is_empty()
+                });
+            let outcome = if available {
+                native_shaders::outcome(&path)
+            } else {
+                Some(false)
+            };
+            (path, outcome)
+        });
         // The renderer's offer can change while the game runs (Vulkan's formats follow desktop
         // HDR and the window's output), and the frame with it.
         let request = shader_packs::picked_pack_shape(&self.settings).frame();
@@ -222,6 +247,17 @@ impl Game<'_> {
         }
     }
 
+    /// `Options.getEffectiveRenderDistance`: the render distance option, capped
+    /// by the server's view distance once a login has reported one
+    /// (`serverRenderDistance > 0`). What the border wall and the entity view
+    /// scale follow; the streaming radius keeps its own one-chunk margin.
+    pub(super) fn effective_render_distance(&self) -> i32 {
+        effective_render_distance(
+            self.settings.render_distance,
+            self.remote.as_ref().map_or(0, |remote| remote.view_distance),
+        )
+    }
+
     /// The renderer for the window, with the current block sprites, GUI
     /// atlas and world border texture.
     /// A new renderer's atlas holds only the pack's sprites: what was drawn into it at run time
@@ -274,7 +310,8 @@ impl Game<'_> {
     /// discarded, then every loaded section is rebuilt.
     pub(super) fn all_sections_changed(&mut self) {
         self.clear_lod();
-        self.pending_uploads.clear();
+        self.streaming
+            .free(std::mem::take(&mut self.pending_uploads));
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.clear_sections(self.world.layout());
         }
@@ -282,9 +319,29 @@ impl Game<'_> {
     }
 }
 
+/// `Options.getEffectiveRenderDistance`: a reported server view distance caps
+/// the option; until one arrives, the option stands.
+fn effective_render_distance(option: i32, server: i32) -> i32 {
+    if server > 0 {
+        option.min(server)
+    } else {
+        option
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FrameAttempt;
+
+    /// The server's view distance caps the option, and only a reported one
+    /// does (`Options.getEffectiveRenderDistance`).
+    #[test]
+    fn the_effective_render_distance_is_vanillas() {
+        assert_eq!(super::effective_render_distance(32, 8), 8);
+        assert_eq!(super::effective_render_distance(8, 32), 8);
+        assert_eq!(super::effective_render_distance(16, 0), 16);
+        assert_eq!(super::effective_render_distance(16, -1), 16);
+    }
 
     #[test]
     fn failed_frame_attempt_waits_for_a_policy_or_setting_change() {

@@ -861,6 +861,11 @@ fn install_from(
     let p = index
         .project(&project.id)
         .ok_or_else(|| format!("{} isn't in Horizon's registry.", project.title))?;
+    // Before the version is picked: by the launcher's own line, a pack made only for the
+    // game's line would look like one for another game.
+    if p.kind == index::Kind::Shader {
+        crate::game_shader_api::said().map_err(|e| format!("{}: {e}.", p.name))?;
+    }
     let v = newest(index, p)?;
     install_version(index, local, p, v, home, progress).map(|e| vec![e])
 }
@@ -954,6 +959,164 @@ fn install_version(
     Ok(entry)
 }
 
+/// An installed entry with nothing behind it that loads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stale {
+    /// Its file isn't there: the install replaces the entry and touches no file.
+    Missing,
+    /// A native mod in the format this Horizon retired (`horizon-native.json`, as `zoom` 2.0.0
+    /// was before the id came back as a wasm mod), where a plain mod now installs. Left in
+    /// `horizon-native-mods/`, it would count as a native mod to build that can't be read.
+    Retired,
+    /// A `.hmod` archive right where the new file goes that this Horizon can't read as a mod
+    /// (as `zoom` 1.0.0 was, made for the earlier mod system): it is moved aside
+    /// ([`displace`]) and the new file takes its place.
+    Outdated,
+}
+
+/// Whether `old`'s file is gone, retired or outdated, where the new file goes to `relative`. Any
+/// other error reading it (a file another program holds, no permission) is none of these: the
+/// install inspects it and refuses.
+fn stale_entry(home: &Path, old: &installed::Entry, native: bool, relative: &str) -> Option<Stale> {
+    let path = home.join(&old.file);
+    let plain = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Stale::Missing),
+        Err(_) => return None,
+        Ok(meta) => meta.file_type().is_file(),
+    };
+    // Only a regular file is opened: a pipe could block here, under the instance's lock.
+    if !plain || native {
+        return None;
+    }
+    let archive = fs::File::open(&path)
+        .ok()
+        .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
+        .and_then(|f| zip::ZipArchive::new(f).ok())?;
+    if Path::new(&old.file).starts_with(crate::native_mods::INSTALLED) {
+        let retired = archive.index_for_name("horizon-native.json").is_some();
+        return retired.then_some(Stale::Retired);
+    }
+    // An archive that opens and still isn't a mod won't be one on a later try.
+    let outdated = old.kind == Kind::Mod
+        && old.file == relative
+        && horizon_platform::mod_package::Package::read(&path).is_err();
+    outdated.then_some(Stale::Outdated)
+}
+
+/// Removes `old`'s retired native file, only when it is a plain file (never a link) right in
+/// the instance's `horizon-native-mods/`, and no other entry of the browser's list names it.
+fn remove_retired<'a>(
+    home: &Path,
+    old: &installed::Entry,
+    mut others: impl Iterator<Item = &'a installed::Entry>,
+) -> Result<(), String> {
+    let path = home.join(&old.file);
+    let plain = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+    let folder = fs::canonicalize(home.join(crate::native_mods::INSTALLED)).ok();
+    let canonical = fs::canonicalize(&path).ok();
+    let inside = canonical.as_deref().and_then(Path::parent) == folder.as_deref();
+    let shared = others.any(|e| e.file == old.file);
+    if !plain || folder.is_none() || !inside || shared {
+        return Err(format!(
+            "{}'s old native file {} wasn't removed: it isn't a file of its own in {}. Remove {}, then install it again.",
+            old.title,
+            old.file,
+            crate::native_mods::INSTALLED,
+            old.title
+        ));
+    }
+    fs::remove_file(&path).map_err(|e| {
+        format!(
+            "{}'s old native file {} wasn't removed: {e}. Remove {}, then install it again.",
+            old.title, old.file, old.title
+        )
+    })
+}
+
+/// A name beside `file` that nothing has yet, made as an empty file so no later call gets it:
+/// `<name>.replaced-<secs>`, then `-1`, `-2`… The game loads only `.hmod` files and mod folders
+/// (`mod_package::find`), so it never reads one.
+fn reserve_backup(file: &Path, secs: u64) -> Result<PathBuf, String> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    for n in 0u32.. {
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
+        let backup = file.with_file_name(format!("{name}.replaced-{secs}{suffix}"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(_) => return Ok(backup),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", backup.display())),
+        }
+    }
+    unreachable!("a free name comes before u32 runs out")
+}
+
+/// Moves `old`'s outdated file at `target` aside, so the new one never overwrites it. Refused
+/// when the instance's mod folder leads somewhere else (a link or junction) or the path is no
+/// longer a plain file. Whatever file is there at the move is the one kept, even if it changed
+/// since it was inspected: where it is now, beside where it was, under a name the game doesn't
+/// load. It stays there for the player: nothing here says it is of no use (an older launcher
+/// may not read a newer mod). `None` when it is gone by now.
+fn displace(home: &Path, old: &installed::Entry, target: &Path) -> Result<Option<PathBuf>, String> {
+    let folder = target.parent().and_then(|dir| fs::canonicalize(dir).ok());
+    let inside = fs::canonicalize(home)
+        .ok()
+        .zip(folder)
+        .is_some_and(|(home, dir)| {
+            let named = |n: &std::ffi::OsStr| n.eq_ignore_ascii_case(java::MODS_DIR);
+            dir.parent() == Some(&home) && dir.file_name().is_some_and(named)
+        });
+    if !inside {
+        return Err(format!(
+            "{}'s old file {} wasn't replaced: {} leads outside the game folder.",
+            old.title,
+            old.file,
+            java::MODS_DIR
+        ));
+    }
+    match fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => {
+            return Err(format!(
+                "{}'s old file {} wasn't replaced: it isn't a plain file any more.",
+                old.title, old.file
+            ));
+        }
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let backup = reserve_backup(target, secs)?;
+    if let Err(e) = fs::rename(target, &backup) {
+        let _ = fs::remove_file(&backup);
+        return match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(None),
+            _ => Err(format!("{}: {e}", target.display())),
+        };
+    }
+    Ok(Some(backup))
+}
+
+/// `error`, once the displaced file is back at `target`, over the new one if that is there. A
+/// failure to do that says where the file is.
+fn put_back(error: String, backup: &Path, target: &Path) -> String {
+    match fs::rename(backup, target) {
+        Ok(()) => error,
+        Err(e) => format!(
+            "{error}; your previous file is kept as {}: {e}",
+            backup.display()
+        ),
+    }
+}
+
 /// [`install_version`], with `guard` asked about the downloaded file once it passed the index's
 /// checks and before it replaces anything: its error leaves everything as it was.
 fn install_version_guarded(
@@ -972,6 +1135,9 @@ fn install_version_guarded(
         return Err(format!("{} was taken down: {}", p.name, r.reason));
     }
     // Every install comes here, a modpack's pinned ones too: refused before the download.
+    if p.kind == index::Kind::Shader {
+        crate::game_shader_api::said().map_err(|e| format!("{}: {e}.", p.name))?;
+    }
     if needs_other_shader_api(p, v) {
         return Err(format!("{} {}.", p.name, other_shader_api(&v.api)));
     }
@@ -983,10 +1149,13 @@ fn install_version_guarded(
     let mut list = installed::Installed::load(home);
     let ours = |e: &installed::Entry| e.source == SourceId::Horizon && e.project == p.id;
     let old = list.entries.iter().find(|e| ours(e)).cloned();
+    let stale = old
+        .as_ref()
+        .and_then(|old| stale_entry(home, old, native, &relative));
     if let Some(old) = &old {
         let mut different = old.kind != project.kind;
-        if !different && project.kind == Kind::Mod {
-            let path = home.join(&old.file);
+        let path = home.join(&old.file);
+        if !different && stale.is_none() && project.kind == Kind::Mod {
             let installed_native = index::native::holds(&path);
             let kind = if installed_native {
                 index::Kind::NativeMod
@@ -1004,7 +1173,7 @@ fn install_version_guarded(
             ));
         }
     }
-    if old.as_ref().is_some_and(|o| o.version == v.version) {
+    if stale.is_none() && old.as_ref().is_some_and(|o| o.version == v.version) {
         return Ok(old.expect("checked"));
     }
     let target = home.join(&relative);
@@ -1051,13 +1220,29 @@ fn install_version_guarded(
         .inspect_err(|_| {
             let _ = fs::remove_file(&path);
         })?;
+    // Before the new file goes in: a removal that fails leaves everything as it was, so the
+    // install can be tried again.
+    if let (Some(Stale::Retired), Some(old)) = (stale, &old) {
+        let others = list.entries.iter().filter(|e| !ours(e));
+        remove_retired(home, old, others).map_err(|e| taken_back(e, &path))?;
+    }
     if let Some(dir) = target.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    fs::rename(&path, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let displaced = match (stale, &old) {
+        (Some(Stale::Outdated), Some(old)) => {
+            displace(home, old, &target).map_err(|e| taken_back(e, &path))?
+        }
+        _ => None,
+    };
+    fs::rename(&path, &target).map_err(|e| {
+        let e = format!("{}: {e}", target.display());
+        let e = displaced.iter().fold(e, |e, d| put_back(e, d, &target));
+        taken_back(e, &path)
+    })?;
     if let Some(old) = old
         .as_ref()
-        .filter(|o| o.file != relative)
+        .filter(|o| stale.is_none() && o.file != relative)
         .and_then(|o| o.path(home))
     {
         let _ = fs::remove_file(old);
@@ -1080,8 +1265,35 @@ fn install_version_guarded(
     };
     list.entries.retain(|e| !ours(e));
     list.entries.push(entry.clone());
-    list.save(home)?;
+    // A stale entry stays listed: without the file the new one would be in its way on a retry.
+    // A displaced file comes back instead: the player keeps the old mod with its old entry.
+    list.save(home).map_err(|e| match (&displaced, stale) {
+        (Some(d), _) => put_back(e, d, &target),
+        (None, Some(_)) => taken_back(e, &target),
+        (None, None) => e,
+    })?;
+    if let Some(backup) = displaced {
+        eprintln!(
+            "{}: kept your previous {} as {}",
+            p.name,
+            entry.file,
+            backup.display()
+        );
+    }
     Ok(entry)
+}
+
+/// `error`, once the new file at `file` is taken back out: a failure to do that is said too,
+/// never swallowed.
+fn taken_back(error: String, file: &Path) -> String {
+    match fs::remove_file(file) {
+        Ok(()) => error,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => error,
+        Err(e) => format!(
+            "{error}; taking {} back out failed too: {e}",
+            file.display()
+        ),
+    }
 }
 
 /// The mod id of an installed mod (`horizon-mods/<id>`, `horizon-mods/<id>.hmod` or

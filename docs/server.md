@@ -89,6 +89,8 @@ clock `/tick query` uses), players (name, UUID, address, ping, position), loaded
 inventory on this same server thread and answers `{"mods":[{"id":"example","version":"1"}]}`.
 It includes native, wasm and content packages installed in that inventory, in inventory order; an empty
 inventory is `{"mods":[]}`. The supervisor's `GET /api/v1/mods` uses this query, never a build-record fallback.
+`memory` answers what `horizon-ctl memory` shows for a game with a window: the resident set, the allocator's
+committed bytes, and the server's parts (chunks, entities, players, chunk send caches, generation).
 
 **A proxy moving a player between two servers** uses more requests on this endpoint (`lan/arrivals.rs`,
 `game/interface/dedicated/transfer.rs`). They are a built-in module, **off by default**, that the owner turns on in
@@ -912,6 +914,9 @@ reproducible by anyone, and show the same gameplay on both sides.
   machine, commit, Java version, settings and every run) and prints a comparison table. Results are
   published like the client benchmark, with the machine, the versions and the exact commands. TPS is derived
   from `/tick query`'s average (20 while it fits in 50 ms), since the command reports times, not the rate.
+- **Published four-way results.** The comparison against vanilla, Paper and Fabric + Lithium is
+  [performance/server-vs-vanilla.md](performance/server-vs-vanilla.md); the newer Horizon-versus-Pumpkin run is in
+  [performance/server-vs-pumpkin.md](performance/server-vs-pumpkin.md). `tools/server_bench.py` reruns both.
 - **First run (PR 5,** on a busy shared Mac mini, so the numbers are noisy). With 1 bot Horizon ticks in
   3.5 ms against vanilla's 11.2 ms and uses 1.6 GB against 3.6 GB. At 10 and 25 `mixed` bots Horizon falls
   to about 10 TPS where vanilla keeps 20, and at 50 both land at about 15 TPS. The work isn't equal yet:

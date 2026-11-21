@@ -2172,7 +2172,7 @@ impl Game<'_> {
     /// Whether a box in `corner` shows: F3's debug screen takes both top
     /// corners (its left and right columns), and a bottom corner while one
     /// of its charts is drawn there.
-    pub(super) fn native_corner_shown(&self, corner: Corner) -> bool {
+    pub(in crate::game) fn native_corner_shown(&self, corner: Corner) -> bool {
         let charts = self.debug_charts.corners(!self.has_singleplayer_server());
         !debug_takes(corner, self.debug, charts)
     }
@@ -2661,6 +2661,20 @@ impl Game<'_> {
             return;
         }
         let dimension = self.dim.id();
+        if let Some(host) = self.lan.as_mut() {
+            host.hub
+                .terrain_residency_changed(loaded.iter().map(|&(x, z, _)| (x, z)));
+            let lit = self
+                .world
+                .light_log
+                .iter()
+                .flat_map(|log| log.keys().copied());
+            host.hub.warm_admitted_terrain(
+                &self.world,
+                &self.streaming,
+                loaded.iter().map(|&(x, z, _)| (x, z)).chain(lit),
+            );
+        }
         for (x, z, new) in loaded {
             self.native_chunk_load(dimension, [x, z], new);
         }
@@ -2674,6 +2688,10 @@ impl Game<'_> {
             return;
         }
         let dimension = self.dim.id();
+        if let Some(host) = self.lan.as_mut() {
+            host.hub
+                .terrain_residency_changed(unloaded.iter().map(|chunk| (chunk.x, chunk.z)));
+        }
         for chunk in unloaded {
             self.native_chunk_and_block_entities_unload(dimension, [chunk.x, chunk.z]);
         }
@@ -2687,14 +2705,32 @@ impl Game<'_> {
         if std::mem::replace(&mut host.players_told_left, true) {
             return;
         }
-        let players: Vec<(u128, String)> = host
+        let players: Vec<(u32, u128, String, crate::game::Dim)> = host
             .hub
             .guests
             .iter()
             .filter(|g| g.placed && g.participates_online())
-            .map(|g| (g.uuid, g.name.clone()))
+            .map(|g| {
+                (
+                    g.conn,
+                    g.uuid,
+                    g.name.clone(),
+                    crate::game::Dim::from_id(&g.dimension),
+                )
+            })
             .collect();
-        for (player, name) in players {
+        // They are all still here: each hears of its leave first, then of its logout, in the
+        // level they are in.
+        let back = self.dim;
+        for (conn, player, name, level) in &players {
+            if self.enter_level(*level).is_ok() {
+                self.announce_player_leaving(*conn, *player, name, "Server closed");
+            }
+        }
+        if let Err(e) = self.enter_level(back) {
+            log::error!("could not reopen {}: {e}", back.id());
+        }
+        for (_, player, name, _) in players {
             self.native_player_logged_out(player, &name);
         }
     }
@@ -5439,6 +5475,11 @@ pub(super) mod particle_count_tests {
         {
             use winit::platform::x11::EventLoopBuilderExtX11;
             builder.with_x11().with_any_thread(true);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
         }
         let event_loop = builder.build().unwrap();
         #[allow(deprecated)]

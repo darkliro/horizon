@@ -244,6 +244,11 @@ pub struct Native {
     /// Slots of published game loops, native only (`mod_api::loops`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub r#loop: Vec<loops::Loop>,
+    /// Lets the mod ask the player to open an existing save from the title screen (`request_world`); the
+    /// question names the mod. Off unless declared. Only this mod's own declaration grants it: a request whose
+    /// caller is unidentified is refused with `NotPermitted`, whatever other mods declare.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub world_control: bool,
 }
 
 /// One declared game internal, as listed in the pinned game's `internals.json`.
@@ -438,6 +443,13 @@ impl Manifest {
         if !valid_mod_id(&m.id) {
             return Err(format!(
                 "{MANIFEST}: id {:?} is not [a-z0-9_]{{1,64}}",
+                m.id
+            ));
+        }
+        // The id is the mod's first owned namespace, so the reserved ones are refused here too.
+        if RESERVED_NAMESPACES.contains(&m.id.as_str()) {
+            return Err(format!(
+                "{MANIFEST}: id {} is a namespace no mod may claim",
                 m.id
             ));
         }
@@ -647,6 +659,13 @@ impl Manifest {
                     "{MANIFEST}: namespace {ns:?} is not [a-z0-9_.-]{{1,64}}"
                 ));
             }
+            // Windows drops a folder name's trailing dot, so `horizon.` would write into
+            // `horizon`; a leading one is refused alike.
+            if ns.starts_with('.') || ns.ends_with('.') {
+                return Err(format!(
+                    "{MANIFEST}: namespace {ns:?} starts or ends with a dot"
+                ));
+            }
             if RESERVED_NAMESPACES.contains(&ns.as_str()) {
                 return Err(format!(
                     "{MANIFEST}: namespace {ns} is not a mod's to claim (only to add to its tags)"
@@ -684,6 +703,20 @@ impl Manifest {
     }
 }
 
+/// Top-level paths of the native mod format from before the `.hmod` SDK. A package holding one is
+/// refused: it has to be made again for the new SDK.
+pub const LEGACY_PATHS: [&str; 4] = [
+    "horizon-native.json",
+    "horizon-mixin.toml",
+    "native",
+    "rust",
+];
+
+/// Whether archive path `name` belongs to the native format from before the `.hmod` SDK.
+pub fn legacy_path(name: &str) -> bool {
+    LEGACY_PATHS.contains(&name.split('/').next().unwrap_or(""))
+}
+
 /// Folders of a mod's project that are never part of its package: Git's, Cargo's build output
 /// and the pinned SDK the mod tool fetches into `.horizon/`.
 pub const NOT_PACKAGED: [&str; 3] = [".git", "target", ".horizon"];
@@ -703,12 +736,51 @@ pub fn source_file(name: &str) -> bool {
                 .any(|prefix| name.starts_with(prefix)))
 }
 
-fn plain_path(name: &str) -> bool {
-    !name.starts_with('/')
-        && !name.contains(['\\', ':'])
-        && !name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+pub(crate) fn plain_path(name: &str) -> bool {
+    path_problem(name).is_none()
+}
+
+/// Why `name` is no plain relative path every platform writes as the file it names. ASCII only,
+/// so the case-folded names the package checks compare are the file system's: no normalisation
+/// tells a composed `é` from `e` and a combining accent, which macOS stores as one.
+pub(crate) fn path_problem(name: &str) -> Option<&'static str> {
+    if !name.is_ascii() {
+        return Some("entry names must be ASCII");
+    }
+    if name.starts_with('/') || name.contains(['\\', ':']) {
+        return Some("entry names are relative and separated by `/`");
+    }
+    name.split('/').find_map(|part| {
+        if part.is_empty() || part == "." || part == ".." {
+            Some("entry names have no empty, `.` or `..` parts")
+        } else {
+            part_problem(part)
+        }
+    })
+}
+
+/// Why a path part names another file, or none, on some platform: a trailing dot or space
+/// (Windows drops them, so `a.` and `a ` are `a`), a `~` (NTFS short names such as `resour~1.rs`
+/// alias long ones), a Windows device name whatever its case, extension or trailing spaces
+/// (`COM¹`-`COM³` and `LPT¹`-`LPT³` too), or more than the 255 bytes file systems take.
+pub(crate) fn part_problem(part: &str) -> Option<&'static str> {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = stem.to_ascii_lowercase();
+    let superscript = ["com", "lpt"].iter().any(|device| {
+        stem.strip_prefix(device)
+            .is_some_and(|n| ["¹", "²", "³"].contains(&n))
+    });
+    if part.ends_with(['.', ' ']) {
+        Some("no part of an entry name may end in a dot or space, which Windows drops")
+    } else if part.contains('~') {
+        Some("entry names may not hold `~`, which Windows short names use")
+    } else if reserved_mod_id(&stem) || superscript {
+        Some("no part of an entry name may be a Windows device name")
+    } else if part.len() > 255 {
+        Some("no part of an entry name may be longer than 255 bytes")
+    } else {
+        None
+    }
 }
 
 /// A mod as found on disk.
@@ -778,12 +850,7 @@ impl Package {
         let mut has_source = false;
         let has_wasm;
         let toml = if metadata.is_dir() {
-            for old in [
-                "horizon-native.json",
-                "horizon-mixin.toml",
-                "native",
-                "rust",
-            ] {
+            for old in LEGACY_PATHS {
                 if std::fs::symlink_metadata(path.join(old)).is_ok() {
                     return Err(format!("{old}: unsupported package path"));
                 }
@@ -873,16 +940,23 @@ impl Package {
         let mut entries = Vec::new();
         let mut layouts = None;
         let mut uses = false;
+        let mut folded = std::collections::HashSet::new();
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
             let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             let mode = entry.unix_mode().unwrap_or_default();
             entries.push((name.clone(), entry.size(), entry.is_dir()));
+            // Every entry, a content-only package's too: a reader that takes `\` for `/` (the
+            // resource loader does) must see the same names the checks below saw.
+            if let Some(why) = path_problem(name.strip_suffix('/').unwrap_or(&name)) {
+                return Err(format!("invalid package path: {name:?}: {why}; rename it"));
+            }
+            // One file where case is ignored (Windows, macOS): staging writes one over the other.
+            if !folded.insert(name.strip_suffix('/').unwrap_or(&name).to_ascii_lowercase()) {
+                return Err(format!("duplicate package path, ignoring case: {name}"));
+            }
             let first = name.split('/').next().unwrap_or("");
-            if matches!(
-                first,
-                "horizon-native.json" | "horizon-mixin.toml" | "native" | "rust"
-            ) {
+            if legacy_path(&name) {
                 return Err(format!("{name}: unsupported package path"));
             }
             has_source |= first == "src";
@@ -1190,7 +1264,10 @@ impl Package {
         put(MANIFEST, manifest_text.as_bytes())?;
         for (name, bytes) in files {
             let code = manifest.native.is_some() || manifest.wasm.is_some();
-            let source = code && source_file(name) && plain_path(name);
+            let source = code && source_file(name);
+            if let Some(why) = path_problem(name).filter(|_| source) {
+                return Err(format!("{name:?}: {why}; rename it"));
+            }
             if *name == crate::layouts::FILE {
                 crate::layouts::Layouts::read(*bytes)?;
                 put(name, bytes)?;
@@ -1725,6 +1802,18 @@ capabilities = ["registries"]
             Package::write_files(&manifest, &[("Cargo.toml", b""), ("src/../bad.rs", b"")])
                 .is_err()
         );
+        // A source or documentation name says why it is refused.
+        let error = Package::write_files(
+            &manifest,
+            &[("Cargo.toml", b""), ("README.fran\u{e7}ais.md", b"")],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("README.fran\u{e7}ais.md")
+                && error.contains("must be ASCII")
+                && error.contains("rename it"),
+            "{error}"
+        );
         assert!(
             Package::write_files(
                 &manifest,
@@ -1834,8 +1923,22 @@ capabilities = ["registries"]
             assert!(e.contains("not a mod's to claim"), "{e}");
         }
         assert!(with("\"ruby\"").unwrap_err().contains("twice"));
+        for reserved in ["minecraft", "c", "horizon"] {
+            let e = Manifest::parse(&EXAMPLE.replacen(
+                "id = \"ruby\"",
+                &format!("id = \"{reserved}\""),
+                1,
+            ))
+            .unwrap_err();
+            assert!(e.contains("no mod may claim"), "{e}");
+        }
         assert!(with("\"a\", \"a\"").unwrap_err().contains("twice"));
         assert!(with("\"Kaisyn\"").unwrap_err().contains("is not"));
+        for dotted in ["horizon.", ".kaisyn"] {
+            let e = with(&format!("\"{dotted}\"")).unwrap_err();
+            assert!(e.contains("with a dot"), "{e}");
+        }
+        assert!(with("\"kai.syn\"").is_ok(), "a dot inside stays allowed");
         assert!(with("\"\"").unwrap_err().contains("is not"));
     }
 
@@ -1970,9 +2073,12 @@ issues = \"http://example.org/issues\"
             zip.write_all(bytes).unwrap();
             zip.finish().unwrap();
             let error = Package::read(&archive).err().unwrap();
-            // The one place a module may sit is refused for want of `[wasm]`.
+            // The one place a module may sit is refused for want of `[wasm]`; a name that
+            // isn't plain is refused before its bytes are looked at.
             let expected = if *name == WASM {
                 WasmError::Undeclared.to_string()
+            } else if name.starts_with("./") {
+                "invalid package path".to_string()
             } else {
                 "unsupported executable file".to_string()
             };
@@ -2007,6 +2113,58 @@ issues = \"http://example.org/issues\"
             .is_ok()
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Entry names a platform writes as another file, or as none: native staging puts them on
+    /// disk, and one would overwrite another or go to a device.
+    #[test]
+    fn platform_special_entry_names_are_refused() {
+        use std::io::Write;
+        let read = |names: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file(MANIFEST, options).unwrap();
+            zip.write_all(EXAMPLE.as_bytes()).unwrap();
+            for name in names {
+                if name.ends_with('/') {
+                    zip.add_directory(*name, options).unwrap();
+                } else {
+                    zip.start_file(*name, options).unwrap();
+                    zip.write_all(b"text").unwrap();
+                }
+            }
+            Package::read_zip(&mut zip::ZipArchive::new(zip.finish().unwrap()).unwrap())
+        };
+        assert!(read(&["README", "README.md", "NOTICE"]).is_ok());
+        let long = "a".repeat(256);
+        for (names, expected) in [
+            (&["README", "readme"][..], "ignoring case"),
+            (&["NOTICE", "notice/"][..], "ignoring case"),
+            (&["NUL.txt"][..], "Windows device name"),
+            (&["nul .txt"][..], "Windows device name"),
+            (&["README", "README."][..], "end in a dot or space"),
+            (&["README", "README "][..], "end in a dot or space"),
+            (&["docs/cafe\u{301}.txt"][..], "must be ASCII"),
+            (&["README.fran\u{e7}ais.md"][..], "must be ASCII"),
+            (&["docs/COM\u{b9}.txt"][..], "must be ASCII"),
+            (&["docs/com9"][..], "Windows device name"),
+            // An NTFS short name: on a volume that makes them, it is `resource_source.rs`.
+            (&["src/resource_source.rs", "src/resour~1.rs"][..], "`~`"),
+            (&[long.as_str()][..], "255 bytes"),
+        ] {
+            let error = read(names).err().unwrap_or_default();
+            assert!(
+                error.contains(expected)
+                    && (expected == "ignoring case" || error.contains("rename it")),
+                "{names:?}: {error}"
+            );
+        }
+        for device in ["COM\u{b9}.rs", "lpt\u{b3}", "aux .rs"] {
+            assert!(part_problem(device).is_some(), "{device}");
+        }
+        for part in ["com0.rs", "com10", "lpt\u{b9}0", "auxiliary.rs", "a.b"] {
+            assert_eq!(part_problem(part), None, "{part}");
+        }
     }
 
     #[test]

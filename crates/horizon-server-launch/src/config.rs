@@ -214,6 +214,9 @@ pub struct Config {
     /// The game reads this section itself (docs/chat-filter.md); written only when it isn't the default.
     #[serde(default, skip_serializing_if = "chat_filter_default")]
     pub chat_filter: horizon_chat_filter::Config,
+    /// The game reads this section itself (docs/hosting.md); written only when it allows a start.
+    #[serde(default, skip_serializing_if = "MissingMods::is_default")]
+    pub missing_mods: MissingMods,
     /// A one-time prune of barely visited chunks before a start (prune.rs); written only when set.
     #[serde(default, skip_serializing_if = "crate::prune::Settings::is_default")]
     pub prune_chunks: crate::prune::Settings,
@@ -285,6 +288,20 @@ pub struct Combat {
     pub legacy: bool,
 }
 impl Combat {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `[missing_mods]`: `allow = true` opens a world saved with mods that are not loaded now instead of refusing
+/// it (docs/hosting.md). The game reads it from the same file (game/interface/dedicated/missing_mods.rs), so the
+/// supervisor only has to keep it; without this section it would refuse a file that has one as unknown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MissingMods {
+    pub allow: bool,
+}
+impl MissingMods {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -804,10 +821,39 @@ impl Config {
     }
 
     /// Writes this configuration into `server.properties`, keeping the keys it doesn't set. Returns what it
-    /// wrote, for [`sync_back`].
+    /// wrote, for [`sync_back`]. A file (or link) that exists but can't be read or parsed is left as it is
+    /// and is an error: writing over it would lose the owner's other keys. (The game refuses an unparsable
+    /// file too.)
     pub fn write_properties(&self, dir: &Path) -> std::io::Result<Vec<(String, String)>> {
         let path = dir.join(PROPERTIES);
-        let mut properties = read_properties(&path).unwrap_or_default();
+        let mut properties = match std::fs::read(&path) {
+            Ok(bytes) => load_properties(&path, &bytes).map_err(|why| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{why} (left as it is)"),
+                )
+            })?,
+            // Only a file that isn't there at all: a link to a volume that is away reads as missing too,
+            // and the rename would replace the link.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&path)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Properties::default()
+            }
+            Err(e) => {
+                let why = if e.kind() == std::io::ErrorKind::NotFound {
+                    "it links to a file that isn't there".to_owned()
+                } else {
+                    e.to_string()
+                };
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {why} (left as it is)", path.display()),
+                ));
+            }
+        };
         let written = self.vanilla();
         for (key, value) in &written {
             properties.put(key, value.clone());
@@ -908,6 +954,7 @@ pub fn render(config: &Config) -> String {
     for section in [
         "anticheat",
         "chat_filter",
+        "missing_mods",
         "prune_chunks",
         "combat",
         "biome_regions",
@@ -1018,7 +1065,14 @@ pub fn update_all(dir: &Path, changes: &[(String, String, toml::Value)]) -> Resu
 
 pub fn read_properties(path: &Path) -> Result<Properties, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    Properties::load_file(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    load_properties(path, &bytes)
+}
+
+/// The properties file at `path`, read as `bytes`; when they don't load, an error naming the file and the
+/// line of the entry that breaks it.
+fn load_properties(path: &Path, bytes: &[u8]) -> Result<Properties, String> {
+    Properties::load_file_locating(bytes)
+        .map_err(|(e, line)| format!("{}, line {line}: {e}", path.display()))
 }
 
 /// Sets one value in a TOML document, keeping the comment after the old value.
@@ -1138,6 +1192,23 @@ keep = {keep}
         assert_eq!(render(&Config::default()), TEMPLATE);
     }
 
+    /// docs/hosting.md shows `server.toml` with its defaults in the `toml` block that starts with `[server]`:
+    /// that block loads, and loads as the defaults.
+    #[test]
+    fn the_hosting_guides_server_toml_block_is_the_default() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs/hosting.md");
+        let docs = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        let block = docs
+            .split("```toml\n[server]\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("hosting.md has a toml block that starts with [server]");
+        let shown = Config::parse(&format!("[server]\n{block}")).unwrap();
+        assert_eq!(shown, Config::default());
+    }
+
     /// `[transfer]` is off by default, passes nothing to the game then, and is checked when it is read.
     #[test]
     fn transfers_are_off_by_default_and_checked() {
@@ -1250,6 +1321,26 @@ keep = {keep}
         assert!(!off.lines().any(|l| l.trim() == "[combat]"), "{off}");
         assert!(Config::parse("[combat]\nlegacy = 1\n").is_err());
         assert!(Config::parse("[combat]\nlegcy = true\n").is_err());
+    }
+
+    #[test]
+    fn a_world_opens_without_its_mods_only_when_the_section_says_so() {
+        // docs/hosting.md: the switch that lets a server open a world whose mods are gone, as the game
+        // reads it. The supervisor keeps the section rather than refusing the file as unknown.
+        assert!(!Config::default().missing_mods.allow);
+        let set = Config::parse(&format!("{TEMPLATE}\n[missing_mods]\nallow = true\n")).unwrap();
+        assert!(set.missing_mods.allow);
+        // Kept when the file is written again, and left out while default.
+        assert_eq!(Config::parse(&render(&set)).unwrap(), set);
+        assert_eq!(
+            Config::parse(&format!("{TEMPLATE}\n[missing_mods]\nallow = false\n"))
+                .unwrap()
+                .missing_mods,
+            Config::default().missing_mods
+        );
+        let off = render(&Config::default());
+        assert!(!off.lines().any(|l| l.trim() == "[missing_mods]"), "{off}");
+        assert!(Config::parse("[missing_mods]\nalow = true\n").is_err());
     }
 
     #[test]
@@ -1469,6 +1560,86 @@ keep = {keep}
         assert_eq!(back.properties["spawn-protection"], toml::Value::Integer(4));
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// One bad escape in an owner's server.properties: the start refuses with the file and line instead of
+    /// writing server.toml's keys over a file that lost every other key (the game refuses the file too).
+    #[test]
+    fn a_malformed_server_properties_is_left_as_it_is() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-config-malformed-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let owner = "#Minecraft server properties\nrcon.port=25576\nlevel-name=castle\nmotd=caf\\uZZZZ\nview-distance=16\n";
+        std::fs::write(dir.join(PROPERTIES), owner).unwrap();
+        let e = Config::default().write_properties(&dir).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        let e = e.to_string();
+        assert!(e.contains(PROPERTIES) && e.contains("line 4"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PROPERTIES)).unwrap(),
+            owner
+        );
+        // The line is counted as the properties reader counts lines.
+        for (text, line) in [
+            ("motd=ok\rbad=\\uZZZZ\r", 2),
+            ("motd=ok\r\nbad=\\uZZZZ\r\n", 2),
+            ("motd=\\u12\\\n34\nbad=\\uZZZZ\n", 3),
+        ] {
+            std::fs::write(dir.join(PROPERTIES), text).unwrap();
+            let e = Config::default().write_properties(&dir).unwrap_err();
+            assert!(
+                e.to_string().contains(&format!("line {line}:")),
+                "{text:?}: {e}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server.properties that exists but can't be read is not replaced either; only a missing one is
+    /// written from server.toml alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_server_properties_is_left_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-config-unreadable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PROPERTIES);
+        let owner = "rcon.port=25576\nlevel-name=castle\n";
+        std::fs::write(&path, owner).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads it anyway: nothing to check there.
+        if std::fs::read(&path).is_err() {
+            let e = Config::default().write_properties(&dir).unwrap_err();
+            assert!(e.to_string().contains(PROPERTIES), "{e}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), owner);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server.properties linked to a volume that isn't mounted reads as missing, but it is the owner's
+    /// file: the link is kept, not replaced by a file of server.toml's keys.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_properties_link_to_a_missing_file_is_left_as_it_is() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-config-dangling-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(PROPERTIES);
+        let target = dir.join("away").join(PROPERTIES);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let e = Config::default().write_properties(&dir).unwrap_err();
+        assert!(e.to_string().contains(PROPERTIES), "{e}");
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn written_files_stay_in_the_server_folder() {
         for bad in [

@@ -2,7 +2,7 @@
 //! level events, animations and block containers with their clicks.
 use super::{
     hub::Hub,
-    menu::{self, Menu, NativeMenuEvent, Rules, Slots, View},
+    menu::{self, Menu, NativeMenuEvent, Rules, SlotRef, Slots, View},
 };
 use crate::{containers::BlockEntity, items::ItemStack, world::World};
 use horizon_core::nbt::Tag;
@@ -240,7 +240,7 @@ impl Hub {
 
     /// ClientboundBlockEventPacket (`PlayerList.broadcast` within 64 blocks); wrapped, to the
     /// clients that view the level and hold its chunk.
-    pub fn block_event(&self, pos: [i32; 3], b0: i32, b1: i32, state: u32) {
+    pub fn block_event(&self, world: &World, pos: [i32; 3], b0: i32, b1: i32, state: u32) {
         let block = self
             .encoder
             .block_ids
@@ -254,8 +254,26 @@ impl Hub {
             b1: b1 as u8,
             block,
         });
-        self.broadcast_near(at, 64.0, &packet, None);
-        self.send_viewers_of((pos[0] >> 4, pos[2] >> 4), &packet);
+        let key = (pos[0] >> 4, pos[2] >> 4);
+        if !self.has_terrain_views() {
+            self.broadcast_near(at, 64.0, &packet, None);
+            self.send_viewers_of(key, &packet);
+            return;
+        }
+        let body = packet.encode();
+        for g in self
+            .guests
+            .iter()
+            .filter(|g| self.terrain_state(g.conn, world, (pos[0], pos[1], pos[2]), state) == state)
+        {
+            if self.here(g) && within_range(at, g.position, 64.0) {
+                g.sender.send(body.clone());
+            } else if let Some(view) = self.view_here(g).filter(|v| v.sent.contains(&key)) {
+                let mut runs = super::viewed_levels::send::Runs::new(view.level);
+                runs.push(&body);
+                g.sender.send_many(runs.finish());
+            }
+        }
     }
 
     /// `ServerLevel.broadcastEntityEvent`: send to the players tracking the
@@ -658,17 +676,23 @@ impl Hub {
         }
     }
 
-    fn view_slot(&self, i: usize, world: &World, slot: usize) -> Option<ItemStack> {
+    /// The slot's stack as the menu holds it: borrowed where its storage can
+    /// lend it, so a tick's comparison copies nothing.
+    fn view_slot_ref<'a>(&'a self, i: usize, world: &'a World, slot: usize) -> SlotRef<'a> {
         let g = &self.guests[i];
         match &g.menu {
-            Some(m) if slot < m.size => m.slots.get(world, g, slot),
-            Some(m) => g
-                .inventory
-                .get(player_slot(slot - m.size))
-                .cloned()
-                .flatten(),
-            None => g.menu_slot(slot),
+            Some(m) if slot < m.size => m.slots.get_ref(world, g, slot),
+            Some(m) => SlotRef::Borrowed(
+                g.inventory
+                    .get(player_slot(slot - m.size))
+                    .and_then(|s| s.as_ref()),
+            ),
+            None => SlotRef::Borrowed(g.menu_slot_ref(slot)),
         }
+    }
+
+    fn view_slot(&self, i: usize, world: &World, slot: usize) -> Option<ItemStack> {
+        self.view_slot_ref(i, world, slot).into_stack()
     }
 
     /// ServerGamePacketListenerImpl.handleContainerClick. Returns the stacks
@@ -1120,14 +1144,12 @@ impl Hub {
                 continue;
             }
             for slot in 0..size + 36 {
-                let now = self.view_slot(i, world, slot);
-                let sent = self.guests[i]
-                    .menu
-                    .as_ref()
-                    .and_then(|m| m.sent.get(slot).cloned());
-                if sent.as_ref() == Some(&now) {
+                let now = self.view_slot_ref(i, world, slot);
+                let sent = self.guests[i].menu.as_ref().and_then(|m| m.sent.get(slot));
+                if now.matches_sent(sent) {
                     continue;
                 }
+                let now = now.into_stack();
                 let net = self.stack(&now);
                 self.guests.update(i, |g| {
                     if let Some(m) = g.menu.as_mut() {

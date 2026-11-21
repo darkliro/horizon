@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The crates a pull request's `cargo test` must cover, for GITHUB_OUTPUT.
+"""The crates a branch's `cargo test` must cover (tools/check_changed.py; CI's verify tests the whole workspace).
 
 Prints `packages=-p a -p b ...`, or `packages=` when the whole workspace must run (main and nightly never call this).
 A package is selected when a changed file is in its directory, when it depends (normal, dev or build) on a selected one,
@@ -34,13 +34,15 @@ HORIZON_CLIENT = [
     "research-lock.json", "tests/fixture_support/item_resource_properties.rs", "tests/fixtures",
     # shader_packs.rs tests load the sample pack.
     "crates/horizon-shader-api/packs/traced_shadows",
+    # The registered slot-source test loads its pack and program.
+    "tools/fixtures/registered_slot_sources",
 ]
 # The generator scans these to write the mod API, the points and the host boundary: its own sources, the vocabulary, the
 # engine crates holding hook targets and their manifests.
 MOD_API_GEN = [
     "Cargo.lock", "crates/horizon-assets/src", "crates/horizon-client", "crates/horizon-client-core/src",
     "crates/horizon-client-render", "crates/horizon-core/src", "crates/horizon-engine-slots", "crates/horizon-items",
-    "crates/horizon-mod-api", "crates/horizon-mod-api-macros/src/lib.rs", "crates/horizon-mod-package/src",
+    "crates/horizon-mod-api", "crates/horizon-mod-api-macros", "crates/horizon-mod-package/src",
     "crates/horizon-mod-render", "crates/horizon-mod-runtime/src", "crates/horizon-mod-vocab/behaviours",
     "crates/horizon-mod-vocab/src", "crates/horizon-world", "packaging/executable_link.rs",
     "tools/layering/mod_vocab_state.json",
@@ -55,8 +57,10 @@ READERS = {
     "horizon-client-lib": HORIZON_CLIENT,
     # lang.rs embeds the bundled language files.
     "horizon-client-core": ["crates/horizon-client/assets/horizon/lang"],
+    # The world's shaders include the HDR look from its pack, and the look pack's tests load the pack.
     "horizon-client-render": [
         "crates/horizon-client/assets/horizon/lang", "crates/horizon-client/assets/horizon/textures/gui",
+        "crates/horizon-shader-api/packs/horizon_hdr",
     ],
     # The daily Character comparator reads the original public-JDK API helper.
     "horizon-core": ["tools/JavaCharacterTables.java"],
@@ -92,13 +96,14 @@ READERS = {
         "crates/horizon-theme/fonts", "crates/horizon-theme/icons", "docs/api/server-reference.md",
         "packaging/executable_link.rs",
     ],
-    "horizon-shader-api": ["docs/api/shaders-reference-0.2.md"],
+    "horizon-server-launch": ["docs/hosting.md"],
+    "horizon-shader-api": ["docs/api/shaders-reference-0.2.md", "tools/fixtures/shaderpacks"],
     "horizon-world": ["crates/horizon-core", "Cargo.lock"],
     # Commands (tokens, icons, package), not tests: listed so the scan finds nothing unexplained.
     "xtask": [
-        "crates/horizon-client/src", "crates/horizon-mod-vocab/src/hooks", "crates/horizon-perf/web",
-        "crates/horizon-prepare", "crates/horizon-theme", "docs/media/brand", "mods/horizon/src/test/java", "packaging",
-        "research-lock.json", "tools",
+        "LICENSES/GPL-3.0.txt", "crates/horizon-client/src", "crates/horizon-mod-vocab/src/hooks",
+        "crates/horizon-perf/web", "crates/horizon-prepare", "crates/horizon-theme", "docs/media/brand",
+        "mods/horizon/src/test/java", "packaging", "research-lock.json", "tools",
     ],
 }
 # What a package's tests only read at run time and nothing else uses: the package is selected, its dependents are not.
@@ -109,6 +114,7 @@ SCANNED = {"horizon-client-core": ["crates"]}
 NOT_READS = {
     "horizon-client": {"crates"}, "horizon-client-lib": {"crates"}, "horizon-mod-package": {"crates"},
     "horizon-mod-vocab": {"."}, "horizon-port-pack": {"mods"}, "horizon-prepare": {"crates"},
+    "horizon-server-launch": {"crates"},
 }
 
 

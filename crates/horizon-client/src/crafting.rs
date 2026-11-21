@@ -1616,8 +1616,9 @@ impl Recipes {
             &ResolvedSources::resolve(sources, context)?,
         )
     }
-    /// The tables from the condition-selected recipes of one owning load. Unknown serializers
-    /// refuse the generation; malformed known recipes keep the skip-one-file policy.
+    /// The tables from the condition-selected recipes of one owning load. An unknown serializer
+    /// vanilla's or an installed code mod's namespace claims refuses the generation, as that code
+    /// was to register it; a carried content mod's own type is skipped with the malformed files.
     /// root and overlay give the enchantment tags the tables keep.
     pub fn from_resolved(
         root: &Path,
@@ -1645,17 +1646,25 @@ impl Recipes {
         ) in sources.recipes.iter().zip(sources.station_recipes(items))
         {
             let mut entry = None;
-            if let Some(kind) = json["type"].as_str() {
+            if let Some(serializer) = json["type"].as_str() {
                 let id = if name.contains(':') {
                     name.clone()
                 } else {
                     format!("minecraft:{name}")
                 };
-                entry = Some(crate::crafting::RecipeSnapshot::new(
-                    id,
-                    mod_kinds::recipe_type(name, kind)?,
-                    json.clone(),
-                ));
+                match mod_kinds::recipe_type(name, serializer)? {
+                    mod_kinds::Reading::Type(kind) => {
+                        entry = Some(crate::crafting::RecipeSnapshot::new(id, kind, json.clone()));
+                    }
+                    mod_kinds::Reading::Unread => {
+                        // A carried content mod's own type: no mod here reads
+                        // it, so the file is skipped whole.
+                        log::error!(
+                            "recipes: {id} skipped: recipe serializer {serializer} is not registered by any mod"
+                        );
+                        continue;
+                    }
+                }
             }
             if custom_type(json).is_some() {
                 if let Some(recipe) = mod_kinds::decode(name, json)
@@ -2148,6 +2157,32 @@ mod tests {
     use super::*;
     use crate::banner::BannerLayer;
     use std::fs;
+
+    /// A recipe type without a namespace, or with an empty one, is vanilla's, as
+    /// `Identifier.parse` reads it: `crafting_shapeless` and `:crafting_shapeless` are
+    /// `minecraft:crafting_shapeless`.
+    #[test]
+    fn a_recipe_type_without_a_namespace_is_vanillas() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("data/minecraft/recipe");
+        fs::create_dir_all(&folder).unwrap();
+        let recipe = |kind: &str| {
+            format!(
+                r#"{{"type":"{kind}","ingredients":["minecraft:stone"],"result":{{"id":"minecraft:stick","count":3}}}}"#
+            )
+        };
+        fs::write(folder.join("bare.json"), recipe("crafting_shapeless")).unwrap();
+        fs::write(folder.join("empty.json"), recipe(":crafting_shapeless")).unwrap();
+        let items = Items::for_tests(Default::default());
+        let load = crate::test_resources::server_load();
+        let recipes = Recipes::load(root.path(), &items, &PackOverlay::NONE, &load).unwrap();
+        assert_eq!(recipes.crafting.len(), 2);
+        let ids: Vec<&str> = recipes.by_type["minecraft:crafting"]
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["minecraft:bare", "minecraft:empty"]);
+    }
 
     /// ItemStackTemplate.apply applies the result patch after the input patch.
     #[test]

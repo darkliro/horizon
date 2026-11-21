@@ -6,6 +6,7 @@ generated files stay in .local/. Also the small helpers the harnesses share
 
 import argparse
 import atexit
+import contextlib
 from collections import Counter
 import hashlib
 import json
@@ -19,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 import zipfile
@@ -70,6 +72,27 @@ def _scratch_dir(prefix):
     path = tempfile.mkdtemp(prefix=prefix)
     _SCRATCH_DIRS.append(path)
     return path
+
+
+@contextlib.contextmanager
+def temp_folder(prefix):
+    """`tempfile.TemporaryDirectory` for a folder a server ran in: on Windows the folder can stay locked for a
+    second or two after the server exits, so removing it is retried instead of failing a run that passed."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        for attempt in range(10):
+            try:
+                shutil.rmtree(path)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                if attempt == 9:
+                    print(f"Could not remove scratch folder {path}: {error}", file=sys.stderr)
+                else:
+                    time.sleep(0.5)
 
 
 @atexit.register
@@ -176,13 +199,14 @@ def varint(value):
 def parse_varint(data, pos):
     """The VarInt at data[pos]: (the position after it, its unsigned value)."""
     value = shift = 0
-    while True:
+    for _ in range(5):
         b = data[pos]
         pos += 1
         value |= (b & 0x7F) << shift
         shift += 7
         if not b & 0x80:
             return pos, value
+    raise ValueError("VarInt too big")
 
 
 def fbits(value):

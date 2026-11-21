@@ -7,8 +7,21 @@ pub struct PendingScreenshot {
     pub path: PathBuf,
     /// F2 and world-icon requests finish asynchronously; control captures do not.
     pub background: bool,
+    /// A mod's capture: each file is written to a temporary file and published only
+    /// under a name no file has (`publish_new`), never replacing one.
+    pub no_replace: bool,
     pub(super) image: mod_api::ScreenshotImage,
     pub(super) hdr: Option<HdrScreenshot>,
+}
+
+impl super::Renderer {
+    /// A capture is queued for the next frame, being read back, or read back and not
+    /// yet taken. All of it lives in this renderer, so a replaced renderer drops it.
+    pub fn screenshot_in_flight(&self) -> bool {
+        self.screenshot.is_some()
+            || self.screenshot_result.is_some()
+            || !self.screenshot_readbacks.is_empty()
+    }
 }
 
 pub(super) struct HdrScreenshot {
@@ -17,12 +30,13 @@ pub(super) struct HdrScreenshot {
 }
 
 /// Files successfully written for a requested screenshot.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SavedScreenshot {
     pub size: [u32; 2],
     pub hdr_path: Option<PathBuf>,
 }
 
-type SaveOutcome = (PathBuf, std::result::Result<[u32; 2], String>);
+type SaveOutcome = (PathBuf, std::result::Result<SavedScreenshot, String>);
 
 /// A screenshot being encoded after the owning-thread hook has returned.
 pub struct ScreenshotSave {
@@ -63,7 +77,7 @@ impl PendingScreenshot {
         ScreenshotSave::spawn(self.path.clone(), move || {
             let result = match destination {
                 Some((root, name)) => self.save_in(&root, &name),
-                None => self.save(),
+                None => self.save_with_details(),
             }
             .map_err(|e| e.to_string());
             (self.path, result)
@@ -94,9 +108,35 @@ impl PendingScreenshot {
         self.save_with_details().map(|saved| saved.size)
     }
 
+    /// The bytes of its pixels before encoding: the RGBA frame and any HDR copy.
+    pub fn raw_bytes(&self) -> u64 {
+        let hdr = self.hdr.as_ref().map_or(0, |hdr| hdr.pixels.len());
+        (self.image.rgba.len() + hdr) as u64
+    }
+
     /// Save a capture and report the HDR sibling only when its write succeeds.
     pub fn save_with_details(&self) -> Result<SavedScreenshot> {
         let image = self.rgba()?;
+        if self.no_replace {
+            publish_new(&self.path, |temp| write_png(image, temp))?;
+            let hdr_path = self.hdr.as_ref().and_then(|hdr| {
+                let path = hdr_screenshot_path(&self.path);
+                match publish_new(&path, |temp| hdr.save(temp)) {
+                    Ok(()) => {
+                        log::info!("Saved HDR screenshot to {}", path.display());
+                        Some(path)
+                    }
+                    Err(e) => {
+                        log::warn!("Horizon renderer: HDR screenshot {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
+            return Ok(SavedScreenshot {
+                size: [image.width, image.height],
+                hdr_path,
+            });
+        }
         let mut hdr_path = None;
         if let Some(hdr) = &self.hdr {
             let path = hdr_screenshot_path(&self.path);
@@ -108,14 +148,7 @@ impl PendingScreenshot {
                 Err(e) => log::warn!("Horizon renderer: HDR screenshot {}: {e}", path.display()),
             }
         }
-        let mut encoder = png::Encoder::new(
-            std::io::BufWriter::new(std::fs::File::create(&self.path)?),
-            image.width,
-            image.height,
-        );
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&image.rgba)?;
+        write_png(image, &self.path)?;
         Ok(SavedScreenshot {
             size: [image.width, image.height],
             hdr_path,
@@ -124,7 +157,7 @@ impl PendingScreenshot {
 
     /// Validate a mod's relative file name at the write boundary, then save
     /// both copies inside `root`. No destination may traverse a symbolic link.
-    pub fn save_in(&mut self, root: &Path, file_name: &str) -> Result<[u32; 2]> {
+    pub fn save_in(&mut self, root: &Path, file_name: &str) -> Result<SavedScreenshot> {
         let path = screenshot_destination(root, file_name)?;
         if self.hdr.is_some() {
             // A `Path` puts the sibling's name after the OS's separator; the name stays portable.
@@ -135,10 +168,75 @@ impl PendingScreenshot {
             screenshot_destination(root, &hdr_name)?;
         }
         self.rgba()?;
-        std::fs::create_dir_all(path.parent().expect("destination has a parent"))?;
+        let parent = path.parent().expect("destination has a parent");
+        // A mod's capture creates at most one new folder, so a hook that renames every
+        // capture into a fresh nested path makes no more folders than captures.
+        if self.no_replace
+            && !parent.is_dir()
+            && !parent.parent().is_some_and(|grand| grand.is_dir())
+        {
+            return Err("a mod's screenshot may create at most one new folder".into());
+        }
+        std::fs::create_dir_all(parent)?;
         self.path = path;
-        self.save()
+        self.save_with_details()
     }
+}
+
+/// The RGBA8 frame as a PNG at `path`, replacing any file there.
+fn write_png(image: &mod_api::ScreenshotImage, path: &Path) -> Result<()> {
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(path)?),
+        image.width,
+        image.height,
+    );
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&image.rgba)?;
+    // As the HDR copy's: dropping the writer would end the file and flush it but swallow
+    // either's error, and a mod's capture would then publish a PNG that isn't whole.
+    writer.finish()?;
+    Ok(())
+}
+
+/// Write a file through `write` into a new temporary file beside `path`, then publish
+/// it as `path` only if no file has that name. A hard link never replaces its target,
+/// unlike a rename on Windows, so the publish is atomic and an existing file is kept.
+/// The temporary file is removed in every case: nothing partial is left behind.
+fn publish_new(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = path.parent().ok_or("screenshot path has no folder")?;
+    let temp = loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = dir.join(format!(
+            ".horizon-screenshot-{}-{n}.tmp",
+            std::process::id()
+        ));
+        match std::fs::File::create_new(&temp) {
+            Ok(_) => break temp,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let published = write(&temp).and_then(|()| match std::fs::hard_link(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            log::warn!(
+                "Horizon renderer: a mod's screenshot was not saved: {} already exists and was kept",
+                path.display()
+            );
+            Err(format!("{} already exists", path.display()).into())
+        }
+        Err(e) => Err(e.into()),
+    });
+    if let Err(e) = std::fs::remove_file(&temp) {
+        log::warn!(
+            "Horizon renderer: couldn't remove the temporary screenshot {}: {e}",
+            temp.display()
+        );
+    }
+    published
 }
 
 /// A relative, portable path. Refuse Windows separators/prefixes on every OS,
@@ -214,6 +312,9 @@ impl HdrScreenshot {
             &hdr_icc::content_light_levels(&self.pixels),
         )?;
         writer.write_image_data(&self.pixels)?;
+        // Dropping the writer would end the file and flush it, but swallow either's error: the
+        // chat line then links an HDR copy that isn't whole.
+        writer.finish()?;
         Ok(())
     }
 }
@@ -226,6 +327,7 @@ mod tests {
         PendingScreenshot {
             path,
             background: true,
+            no_replace: false,
             image: mod_api::ScreenshotImage::new(1, 1, vec![12, 34, 56, 255]),
             hdr: hdr.then(|| HdrScreenshot {
                 size: [1, 1],
@@ -245,7 +347,13 @@ mod tests {
             let save = ScreenshotSave::spawn(path.clone(), move || {
                 entered.send(std::thread::current().id()).unwrap();
                 blocked.recv().unwrap();
-                (path, Ok([1, 1]))
+                (
+                    path,
+                    Ok(SavedScreenshot {
+                        size: [1, 1],
+                        hdr_path: None,
+                    }),
+                )
             });
             assert!(queued.send((owner, save)).is_ok());
         });
@@ -265,7 +373,8 @@ mod tests {
             save.receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap()
-                .1,
+                .1
+                .map(|saved| saved.size),
             Ok([1, 1])
         );
     }
@@ -280,8 +389,10 @@ mod tests {
             .receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
-        assert_eq!(result, Ok([1, 1]));
+        let saved = result.unwrap();
+        assert_eq!(saved.size, [1, 1]);
         assert_eq!(path, root.path().join("changed.png"));
+        assert_eq!(saved.hdr_path, Some(root.path().join("changed-hdr.png")));
         assert!(root.path().join("changed-hdr.png").exists());
         assert!(!root.path().join("unused.png").exists());
         let mut reader =
@@ -300,7 +411,10 @@ mod tests {
         let mut pending = frame(original.clone(), true);
         assert!(!original.exists());
         assert_eq!(
-            pending.save_in(root.path(), "album/changed.png").unwrap(),
+            pending
+                .save_in(root.path(), "album/changed.png")
+                .unwrap()
+                .size,
             [1, 1]
         );
         assert!(!original.exists());
@@ -324,7 +438,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut pending = frame(root.path().join("unused.png"), false);
         pending.image_mut().rgba = vec![9, 8, 7, 255];
-        assert_eq!(pending.save_in(root.path(), "changed.png").unwrap(), [1, 1]);
+        let saved = pending.save_in(root.path(), "changed.png").unwrap();
+        assert_eq!(saved.size, [1, 1]);
+        assert_eq!(saved.hdr_path, None, "no HDR copy, none named");
         let file = std::fs::File::open(root.path().join("changed.png")).unwrap();
         let mut reader = png::Decoder::new(std::io::BufReader::new(file))
             .read_info()
@@ -359,6 +475,56 @@ mod tests {
             assert!(pending.save_in(root.path(), "new/invalid.png").is_err());
             assert!(!root.path().join("new").exists());
         }
+    }
+
+    #[test]
+    fn a_mods_capture_never_replaces_a_file_and_leaves_no_temporary_one() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("existing.png");
+        let hdr_path = root.path().join("existing-hdr.png");
+        std::fs::write(&path, b"original SDR").unwrap();
+        std::fs::write(&hdr_path, b"original HDR").unwrap();
+        let mut pending = frame(root.path().join("unused.png"), true);
+        pending.no_replace = true;
+        assert!(pending.save_in(root.path(), "existing.png").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original SDR");
+        assert_eq!(std::fs::read(&hdr_path).unwrap(), b"original HDR");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        // A free name is published whole, with its HDR copy.
+        let saved = pending.save_in(root.path(), "fresh.png").unwrap();
+        assert_eq!(saved.hdr_path, Some(root.path().join("fresh-hdr.png")));
+        let file = std::fs::File::open(root.path().join("fresh.png")).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .unwrap();
+        let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut bytes).unwrap();
+        assert_eq!(&bytes[..info.buffer_size()], &[12, 34, 56, 255]);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn a_mods_capture_creates_at_most_one_new_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let mut pending = frame(root.path().join("unused.png"), false);
+        pending.no_replace = true;
+        assert!(pending.save_in(root.path(), "a/b/shot.png").is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        pending.save_in(root.path(), "a/shot.png").unwrap();
+        pending.save_in(root.path(), "a/b/shot.png").unwrap();
+        assert!(root.path().join("a/b/shot.png").is_file());
+    }
+
+    #[test]
+    fn a_failed_write_publishes_nothing_and_removes_its_temporary_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shot.png");
+        let failed = publish_new(&path, |temp| {
+            std::fs::write(temp, b"half a PNG")?;
+            Err("the disk is full".into())
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]

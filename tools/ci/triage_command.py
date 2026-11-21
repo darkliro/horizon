@@ -61,6 +61,8 @@ def safe(text: str) -> str:
 def parse(body: str) -> Command | None:
     """The command on a comment's first line; None when it isn't one. Raises Refused when it is one, but wrong."""
     line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    # Agents start every comment with "🤖 Agent:" (AGENTS.md), so their `/close` follows it, as in claim_command.
+    line = re.sub(r"^🤖\s*Agent:\s*", "", line)
     m = re.match(r"^/(\w+)(?:\s+(.*))?$", line)
     if not m or m.group(1).lower() not in COMMANDS:
         return None
@@ -138,6 +140,11 @@ def gh(*args: str, check: bool = True) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def encode_label(name: str) -> str:
+    """One URL path segment: `/` would otherwise become a path segment of its own."""
+    return name.replace("/", "%2F").replace(" ", "%20")
+
+
 class Api:
     """The few GitHub calls this needs; tests replace it."""
 
@@ -150,7 +157,7 @@ class Api:
 
     def label(self, name: str) -> str | None:
         """The label's real name, or None when the repository has no such label."""
-        raw = gh("api", f"repos/{self.repo}/labels/{name.replace('/', '%2F').replace(' ', '%20')}", check=False)
+        raw = gh("api", f"repos/{self.repo}/labels/{encode_label(name)}", check=False)
         return json.loads(raw)["name"] if raw else None
 
     def add_labels(self, n: int, names: list[str]) -> None:
@@ -160,7 +167,7 @@ class Api:
         gh(*args)
 
     def remove_label(self, n: int, name: str) -> None:
-        gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{n}/labels/{name.replace(' ', '%20')}")
+        gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{n}/labels/{encode_label(name)}")
 
     def close(self, n: int, reason: str | None) -> None:
         args = ["api", "-X", "PATCH", f"repos/{self.repo}/issues/{n}", "-f", "state=closed"]
@@ -184,10 +191,10 @@ class Api:
 def actions_by(api, login: str, now: datetime) -> int:
     """Actions this workflow answered for `login` in the last 24 h, counted from its own comments."""
     since = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    tag = f"on behalf of @{login.lower()}"
+    tag = re.compile(rf"on behalf of @{re.escape(login.lower())}(?![a-z0-9-])")
     return sum(1 for c in api.recent_comments(since)
                if c["user"] == "github-actions[bot]" and c["body"].startswith(PREFIX)
-               and c["body"].split("\n", 1)[0].lower().count(tag))
+               and tag.search(c["body"].split("\n", 1)[0].lower()))
 
 
 def say(action: str, login: str, url: str) -> str:

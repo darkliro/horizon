@@ -25,6 +25,15 @@ pub trait Rules {
     /// The enchantment definitions: what keeps worn armour on (`PREVENT_ARMOR_CHANGE`).
     fn enchantments(&self) -> &Enchantments;
     fn max_stack(&self, item: &str) -> u32;
+    /// `ItemStack.getMaxStackSize`: the stack's own `max_stack_size`
+    /// component, or vanilla's `getOrDefault` default of 1 when it is removed
+    /// (`!minecraft:max_stack_size`), else `max_stack`'s item size.
+    fn max_stack_of(&self, stack: &ItemStack) -> u32 {
+        stack
+            .own_max_stack_size()
+            .unwrap_or_else(|| self.max_stack(&stack.item))
+            .max(1)
+    }
     /// `Slot.mayPickup`: whether the stack in menu slot `slot` may be taken
     /// out. A block container's slots and the player's own allow it; a mod's
     /// menu can refuse.
@@ -213,6 +222,40 @@ pub enum SlotBacking {
     Native(usize),
 }
 
+/// A container slot's stack as the menu holds it, so a tick can compare it
+/// with the copy the client was last sent without copying it first.
+#[derive(Debug)]
+pub(super) enum SlotRef<'a> {
+    /// The slot of the menu's own storage (a block entity's, the ender
+    /// chest's, a mod's menu, the player's inventory): the stack where it
+    /// lies, `None` for an empty slot and for one the menu does not have.
+    Borrowed(Option<&'a ItemStack>),
+    /// A slot no storage holds as a list (`Menu::craft_result`, a mod menu
+    /// type's linked containers), read out and copied to be looked at.
+    Owned(Option<ItemStack>),
+}
+
+impl SlotRef<'_> {
+    /// Whether `sent` (the copy the menu keeps of what the client was last
+    /// told, none for a slot it never got) already holds this stack. Both
+    /// sides are compared by value: storages hand out a fresh `ItemStack`
+    /// every read, its `Box<StackData>` included, so the nested contents of
+    /// a shulker or a book are compared too.
+    pub(super) fn matches_sent(&self, sent: Option<&Option<ItemStack>>) -> bool {
+        match self {
+            SlotRef::Borrowed(now) => sent.is_some_and(|sent| sent.as_ref() == *now),
+            SlotRef::Owned(now) => sent == Some(now),
+        }
+    }
+    /// The slot's stack, copied if the menu lent it.
+    pub(super) fn into_stack(self) -> Option<ItemStack> {
+        match self {
+            SlotRef::Borrowed(now) => now.cloned(),
+            SlotRef::Owned(now) => now,
+        }
+    }
+}
+
 impl Slots {
     /// Optional persisted limits in the container's menu order.
     pub fn stack_limits(self, world: &World, size: usize) -> Vec<Option<u32>> {
@@ -308,35 +351,52 @@ impl Slots {
             .iter()
             .all(|k| k.1 == VEHICLE_KEY_Y || guest.within_block_range([k.0, k.1, k.2], 4.0))
     }
-    /// Container slot `n`.
-    pub fn get(self, world: &World, guest: &Guest, mut n: usize) -> Option<ItemStack> {
+    /// Container slot `n`, borrowed where the menu's storage can lend it: the
+    /// ender chest, a mod's menu and the block entities are, a crafting result
+    /// and the linked containers read out and copied. An empty slot and one
+    /// the menu does not have are both `Borrowed(None)`, as both are `None`
+    /// for [`Self::get`].
+    pub(super) fn get_ref<'a>(
+        self,
+        world: &'a World,
+        guest: &'a Guest,
+        mut n: usize,
+    ) -> SlotRef<'a> {
         if self == Slots::Ender {
-            return guest.ender_items.get(n).cloned().flatten();
+            return SlotRef::Borrowed(guest.ender_items.get(n).and_then(|s| s.as_ref()));
         }
         if self == Slots::Native {
-            return guest.native_menu.get(n).cloned().flatten();
+            return SlotRef::Borrowed(guest.native_menu.get(n).and_then(|s| s.as_ref()));
         }
         if let Some((slot, result)) = guest.menu.as_ref().and_then(Menu::craft_result)
             && slot == n
         {
-            return result;
+            return SlotRef::Owned(result);
         }
         if let Some((range, links)) = self.links_of(guest)
             && range.contains(&n)
         {
-            return read_links(world, links, range.len())
-                .into_iter()
-                .nth(n - range.start)
-                .flatten();
+            return SlotRef::Owned(
+                read_links(world, links, range.len())
+                    .into_iter()
+                    .nth(n - range.start)
+                    .flatten(),
+            );
         }
         for k in self.halves() {
-            let slots = shown(world, k)?;
+            let Some(slots) = shown(world, k) else {
+                return SlotRef::Borrowed(None);
+            };
             if n < slots.len() {
-                return slots[n].clone();
+                return SlotRef::Borrowed(slots[n].as_ref());
             }
             n -= slots.len();
         }
-        None
+        SlotRef::Borrowed(None)
+    }
+    /// Container slot `n`.
+    pub fn get(self, world: &World, guest: &Guest, n: usize) -> Option<ItemStack> {
+        self.get_ref(world, guest, n).into_stack()
     }
     /// Every container slot, in menu order.
     pub fn read(self, world: &World, guest: &Guest) -> Option<Vec<Option<ItemStack>>> {
@@ -584,7 +644,7 @@ impl View<'_> {
         } else {
             u32::MAX
         };
-        let item_max = rules.max_stack(&stack.item).max(1);
+        let item_max = rules.max_stack_of(stack);
         let Some(menu) = self
             .guest
             .menu
@@ -792,7 +852,7 @@ fn move_to(
                     context,
                     true,
                     u32::MAX,
-                    rules.max_stack(&stack.item).max(1),
+                    rules.max_stack_of(&stack),
                 )
                 .0
                 {
@@ -973,7 +1033,7 @@ pub fn click(
                     && let Ok(i) = usize::try_from(slot)
                     && let Some(stack) = view.get(i)
                 {
-                    let max = rules.max_stack(&stack.item).max(1);
+                    let max = rules.max_stack_of(&stack);
                     view.guest.carried = Some(ItemStack {
                         count: max,
                         ..stack
@@ -1123,7 +1183,7 @@ fn pickup(view: &mut View, slot: i32, button: i32, rules: &dyn Rules) {
                 // A slot that takes nothing gives onto the same carried item,
                 // as far as the hand holds (`tryRemove`).
                 if s.same_item_same_components(&c) {
-                    let max = rules.max_stack(&c.item).max(1).saturating_sub(c.count);
+                    let max = rules.max_stack_of(&c).saturating_sub(c.count);
                     let mut slot = HostedSlotView {
                         view,
                         slot: i,
@@ -1370,7 +1430,7 @@ fn pickup_all(view: &mut View, slot: i32, button: i32, rules: &dyn Rules) {
     if view.get(i).is_some() && view.may_pickup(i, rules) {
         return;
     }
-    let max = rules.max_stack(&carried.item).max(1);
+    let max = rules.max_stack_of(&carried);
     // Button 0 walks the slots from the first, button 1 from the last.
     let order: Vec<usize> = if button == 0 {
         (0..view.len()).collect()
@@ -1466,7 +1526,7 @@ fn quick_craft(
                 return;
             }
             let mut remaining = i64::from(carried.count);
-            let item_max = rules.max_stack(&carried.item).max(1);
+            let item_max = rules.max_stack_of(&carried);
             let count = slots.len();
             for i in slots {
                 if !view.enabled(i)
@@ -1693,6 +1753,61 @@ pub(crate) mod tests {
         assert_eq!(view.get(0).map(|s| s.count), Some(4));
         assert_eq!(view.get(1).map(|s| s.count), Some(4));
         assert_eq!(view.guest.carried.as_ref().map(|s| s.count), Some(64));
+    }
+
+    /// Stone with its own `max_stack_size`, or with the component removed
+    /// (`!minecraft:max_stack_size`, which vanilla reads as `getOrDefault`'s
+    /// default of one).
+    fn stone(size: Option<i32>, count: u32) -> ItemStack {
+        let mut stack = ItemStack::new("minecraft:stone", count);
+        let data = stack.data_mut();
+        match size {
+            Some(n) => data.set_other(
+                "minecraft:max_stack_size",
+                Some(horizon_core::nbt::Tag::Int(n)),
+            ),
+            None => data.set_other(
+                "!minecraft:max_stack_size",
+                Some(horizon_core::nbt::Tag::Compound(Default::default())),
+            ),
+        };
+        stack.tidy();
+        stack
+    }
+
+    /// `Slot.getMaxStackSize(stack)` in a guest's window is
+    /// `min(container, ItemStack.getMaxStackSize)`: a stack's own
+    /// `max_stack_size` caps the merge, and a removed one leaves one per slot.
+    #[test]
+    fn guest_slot_merges_stop_at_the_stacks_own_size() {
+        let Some(rules) = rules() else {
+            return;
+        };
+        let mut g = guest();
+        let mut chest = vec![Some(stone(Some(4), 2)), Some(stone(None, 1))];
+        let mut drag = None;
+        let mut view = View {
+            guest: &mut g,
+            container: Some(&mut chest),
+            shulker: false,
+            container_limits: Vec::new(),
+            hidden: &[],
+            sounds: Vec::new(),
+            slot_snapshot: Default::default(),
+            loop_context: &crate::test_resources::loop_context(
+                horizon_world::native_load_context::LoopSide::Server,
+            ),
+        };
+        // The slot takes four, two are there: two of the five in hand go in.
+        view.guest.carried = Some(stone(Some(4), 5));
+        click(&mut view, &mut drag, 0, 0, input::PICKUP, &rules);
+        assert_eq!(view.get(0).map(|s| s.count), Some(4));
+        assert_eq!(view.guest.carried.as_ref().map(|s| s.count), Some(3));
+        // A removed component holds one, so nothing merges into it.
+        view.guest.carried = Some(stone(None, 1));
+        click(&mut view, &mut drag, 1, 0, input::PICKUP, &rules);
+        assert_eq!(view.get(1).map(|s| s.count), Some(1));
+        assert_eq!(view.guest.carried.as_ref().map(|s| s.count), Some(1));
     }
 
     /// A guest's chest clicks run `BundleItem`'s overrides: a carried

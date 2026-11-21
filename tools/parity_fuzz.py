@@ -37,11 +37,32 @@ RELOAD_TICKS = 60  # enough for both engines to save and drop a chunk whose forc
 # saved and loaded to compare. A Horizon result that differs from vanilla's is a divergence.
 GUARDS = {'chunk': [[True, 1]], 'entity': [[False, 0]]}
 
-# Differences that are not parity bugs, by field path (a regular expression on the normalised path).
+
+def set_alike(vanilla, horizon):
+    """Absolute game times differ by the engines' clocks: only whether each is set (not 0 or -1) is compared."""
+    unset = lambda v: v is None or str(v).rstrip('L') in ('0', '-1')  # noqa: E731
+    return vanilla is not None and horizon is not None and unset(vanilla) == unset(horizon)
+
+
+# Differences that are not parity bugs: (regular expression on the normalised path, reason, test on the two values).
+# The two engines' worlds start the script at different game times (they settle in a different number of ticks).
 ALLOWED = [
-    # CopperGolem.nextWeatheringTick is an absolute game time, and the two engines' worlds start the script at
-    # different game times (they settle in a different number of ticks).
-    (r'next_weather_age', 'absolute game time'),
+    (r'next_weather_age', 'absolute game time (CopperGolem.nextWeatheringTick)', set_alike),
+    (r'server_data\.state_updating_resumes_at', 'absolute game time (VaultServerData.pauseStateUpdatingUntil)',
+     set_alike),
+    (r'LastGossipDecay', 'absolute game time (Villager.maybeDecayGossip)', set_alike),
+]
+
+# Differences already filed, by signature (family|subject|live/reloaded|first field). A pattern matches
+# the whole signature; the report lists a match under its issue, and only the rest as new. An entry that
+# matches nothing in a round is reported as "not observed" (not evidence of a fix), so the table can be
+# revisited without pretending a bug was fixed.
+KNOWN = [
+    # The issue's own example, and the shape a table entry takes. Add the other filed groups
+    # (#16100 freezing twice, #16128 crystal Rotation, the reload timing family) from a report's
+    # signatures; each entry is a whole-signature regex, and an entry that matches nothing is
+    # reported as "not observed", not as fixed.
+    (r'persist\|trident\|live\|damage', 14823),
 ]
 
 
@@ -129,8 +150,8 @@ def normalise(path):
     return re.sub(r'\[\d+\]', '[]', path)
 
 
-def allowed(path):
-    return any(re.fullmatch(pattern, normalise(path)) for pattern, _ in ALLOWED)
+def allowed(path, vanilla, horizon):
+    return any(re.fullmatch(pattern, normalise(path)) and test(vanilla, horizon) for pattern, _, test in ALLOWED)
 
 
 def compare(vanilla, rust):
@@ -142,7 +163,7 @@ def compare(vanilla, rust):
                 return [('<result>', harness.render(vanilla)[:300], harness.render(rust)[:300])]
             return []
         found = ([('<name>', left[0], right[0])] if left[0] != right[0] else []) + diff(left[1], right[1])
-        return [d for d in found if not allowed(d[0])]
+        return [d for d in found if not allowed(*d)]
     kind = harness.compare(vanilla, rust)
     return [(f'<{kind}>', harness.render(vanilla)[:300], harness.render(rust)[:300])] if kind else []
 
@@ -190,15 +211,29 @@ def render(scenario, slot):
     ops = [cmd(f'/forceload add {x0} {z0}', -1, False), {'op': 'wait_chunks', 'chunks': chunk},
            cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} minecraft:stone', -1, False),
            sync_op(seed, slot)]
+    player_at = scenario.get('player_at')
+    if player_at is not None:
+        # A survival player can be targeted. Resistance keeps repeated scenarios from depleting their health.
+        ops += [cmd('/gamemode survival @a', -1, False),
+                cmd('/effect give @a minecraft:resistance 10 4 true', -1, False),
+                cmd(f'/tp @a {at(player_at)}', -1, False)]
     for i, step in enumerate(scenario['steps']):
         kind = step['k']
         if kind == 'summon':
             nbt = {'UUID': '[I;' + ','.join(map(str, uuid_words(slot, step['n']))) + ']', **step['nbt']}
-            ops.append(cmd(f'/summon {step["type"]} {at(step["at"])} {snbt(nbt)}', i))
+            text = snbt(nbt)  # `{iuN}`: the UUID of the entity summoned as n=N, as an int array
+            text = re.sub(r'\{iu(\d+)\}', lambda m: '[I;' + ','.join(map(str, uuid_words(slot, int(m.group(1))))) + ']', text)
+            ops.append(cmd(f'/summon {step["type"]} {at(step["at"])} {text}', i))
         elif kind == 'block':
             ops.append(cmd(f'/setblock {at(step["at"])} {step["block"]}{snbt(step.get("nbt") or {}) if step.get("nbt") else ""}', i))
         elif kind == 'cmd':
-            ops.append(cmd(step['cmd'].format(*[at(o) for o in step.get('at', [])]), i))
+            text = step['cmd']
+            if step.get('uuids'):  # `{uN}`: the UUID of the entity summoned as n=N
+                text = re.sub(r'\{u(\d+)\}', lambda m: uuid_text(uuid_words(slot, int(m.group(1)))), text)
+            op = cmd(text.format(*[at(o) for o in step.get('at', [])]), i)
+            if 'guard' in step:
+                op['guard'] = step['guard']
+            ops.append(op)
         elif kind == 'tick':
             ops.append({'op': 'tick', 'n': step['n']})
         elif kind == 'dispense':
@@ -209,7 +244,10 @@ def render(scenario, slot):
             ops.append(sync_op(seed, slot))
         elif kind == 'reload':
             summoned = [uuid_text(uuid_words(slot, s['n'])) for s in scenario['steps'][:i] if s['k'] == 'summon']
-            ops += [cmd(f'/forceload remove {x0} {z0}', i, False), {'op': 'tick', 'n': RELOAD_TICKS},
+            # `allow_chunk_io`: the oracle's ticks have no spare time by default, so `ChunkMap.processUnloads` would
+            # leave the chunk in memory, unsaved, with its scheduled ticks still counting.
+            ops += [cmd(f'/forceload remove {x0} {z0}', i, False),
+                    {'op': 'tick', 'n': RELOAD_TICKS, 'allow_chunk_io': True},
                     {**cmd(f'/execute unless loaded {x0} {y0} {z0}', i), 'guard': 'chunk'},
                     *({**cmd(f'/execute if entity {uuid}', i), 'guard': 'entity'} for uuid in summoned),
                     cmd(f'/forceload add {x0} {z0}', i, False), {'op': 'wait_chunks', 'chunks': chunk}]
@@ -225,6 +263,12 @@ def render(scenario, slot):
             ops.append({**cmd(f'/data get block {at(step["at"])}', i), 'read': True})
         else:
             raise ValueError(kind)
+    if player_at is not None:
+        ops += [cmd('/gamemode creative @a', -1, False),
+                cmd('/effect clear @a minecraft:resistance', -1, False),
+                cmd('/effect clear @a minecraft:levitation', -1, False)]
+    if player_at is not None or any('/tp @a' in s.get('cmd', '') for s in scenario['steps']):
+        ops.append(cmd('/tp @a 8.5 230 8.5', -1, False))
     ops += [cmd(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=48,dz=16]', -1, False),
             cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 12} {z0 + 15} minecraft:air', -1, False),
             cmd(f'/forceload remove {x0} {z0}', -1, False)]
@@ -247,14 +291,14 @@ def subject(scenario, step):
 # Running batches through the command-exec harness.
 
 def witness(family, op, vanilla, rust):
-    """A reload witness's outcome: (why the scenario is invalid, the divergence), either or both None.
-
-    Vanilla keeping what a reload should have unloaded means the scenario saved nothing and loaded it back, so
-    it is invalid rather than a divergence; a Horizon result that differs from vanilla's is a divergence (#16772).
-    """
-    invalid = (f'vanilla kept the {op["guard"]} loaded: {vanilla["results"]}'
-               if vanilla['results'] != GUARDS[op['guard']] else None)
-    failure = ((f'{family}|chunk|<unload>', op['cmd'], [('<unload>', vanilla['results'], rust['results'])])
+    """Require the scenario's precondition in vanilla and compare the corresponding Horizon result."""
+    guard = op['guard']
+    if guard == 'shulker_hit':
+        field, expected, reason = '<hit>', [[True, 26]], 'vanilla bullet did not deal four damage'
+    else:
+        field, expected, reason = '<unload>', GUARDS[guard], f'vanilla kept the {guard} loaded'
+    invalid = f'{reason}: {vanilla["results"]}' if vanilla['results'] != expected else None
+    failure = ((f'{family}|{guard}|{field}', op['cmd'], [(field, vanilla['results'], rust['results'])])
                if rust['results'] != vanilla['results'] else None)
     return invalid, failure
 
@@ -330,6 +374,29 @@ def signatures(result):
         return ['crash']
     return [] if result['invalid'] else list(dict.fromkeys(failure[0] for failure in result['failures']))
 
+def classify(groups):
+    """(known, new, not_observed): signatures by known issue, the groups no entry names, and entries whose
+    pattern did not match this round.
+
+    `groups` is {signature: members}; the result reuses the members so the caller can shrink only new ones.
+    A pattern that matches nothing only means the round did not exercise it: that is not evidence its bug is
+    fixed, so the caller reports it as "not observed", never as "fixed".
+    """
+    known, new, matched = {}, {}, set()
+    for signature, members in groups.items():
+        issue = None
+        for pattern, candidate in KNOWN:
+            if re.fullmatch(pattern, signature):
+                matched.add(pattern)
+                if issue is None:
+                    issue = candidate
+        if issue is None:
+            new[signature] = members
+        else:
+            known.setdefault(issue, []).append(signature)
+    not_observed = [(issue, pattern) for pattern, issue in KNOWN if pattern not in matched]
+    return known, new, not_observed
+
 
 # ---------------------------------------------------------------------------------------------------------------
 # Shrinking: drop steps, NBT keys and ticks while the same divergence stays.
@@ -351,7 +418,8 @@ def reduce(scenario, edits):
 
 def edits(scenario):
     for i, step in enumerate(scenario['steps']):
-        if step['k'] == 'sync':  # a control for the comparison, not part of the scenario: shrinking keeps it
+        if step['k'] == 'sync' or step.get('guard'):
+            # Each reduced scenario must still check the same preconditions.
             continue
         if step['k'] == 'tick' and step['n'] > 1:
             yield ('half', i)
@@ -443,11 +511,16 @@ def main():
     for scenario, result in failing:
         for sig in signatures(result):
             groups.setdefault(sig, []).append((scenario, result))
-    # One bug, one shrink: each group's smallest scenario stands for it.
-    shrunk = shrink(runner, {sig: min(members, key=lambda m: len(json.dumps(m[0]))) for sig, members in groups.items()},
-                    args.shrink_rounds)
-    report = {'scenarios': len(scenarios), 'invalid': invalid, 'diverging': len(failing), 'groups': []}
-    for sig, members in sorted(groups.items(), key=lambda g: -len(g[1])):
+    known, new_groups, not_observed = classify(groups)
+    # One bug, one shrink: each new group's smallest scenario stands for it.
+    shrunk = shrink(runner, {sig: min(members, key=lambda m: len(json.dumps(m[0])))
+                             for sig, members in new_groups.items()}, args.shrink_rounds)
+    report = {'scenarios': len(scenarios), 'invalid': invalid, 'diverging': len(failing),
+              'known': [{'issue': issue, 'signatures': signatures} for issue, signatures in sorted(known.items())],
+              'not_observed': [{'issue': issue, 'pattern': pattern} for issue, pattern in not_observed],
+              # Each diverging seed's signatures, to compare runs of the same seeds before and after a change.
+              'by_seed': {s['seed']: signatures(r) for s, r in failing}, 'groups': []}
+    for sig, members in sorted(new_groups.items(), key=lambda g: -len(g[1])):
         scenario, result = shrunk[sig]
         report['groups'].append({
             'signature': sig, 'seeds': [s['seed'] for s, _ in members], 'scenario': scenario,
@@ -456,6 +529,10 @@ def main():
             'differences': result.get('crash') or [[cmd, d[:8]] for s, cmd, d in result['failures'] if s == sig][:3]})
     lab.write_json(work / 'report.json', report)
     print(f'{len(failing)} diverging scenarios in {len(groups)} groups ({runner.batches} harness runs):')
+    for entry in report['known']:
+        print(f'  known  #{entry["issue"]}: {", ".join(entry["signatures"])}')
+    for entry in report['not_observed']:
+        print(f'  not observed this round (not evidence of a fix): #{entry["issue"]} ({entry["pattern"]})')
     for group in report['groups']:
         print(f'  {len(group["seeds"]):3d}  {group["signature"]}')
     print(f'report: {work / "report.json"}')

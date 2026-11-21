@@ -2,6 +2,7 @@
 //! (the same model as native mods: required and optional, semver on `horizon-mod.toml`
 //! versions, one library copy shared by its dependents). Every refusal names its reason for the
 //! Mods page.
+mod calls;
 pub mod compile_budget;
 #[cfg(all(test, unix))]
 mod compile_budget_tests;
@@ -114,8 +115,15 @@ pub enum Refusal {
         budget: compile_budget::CompileBudget,
         why: String,
     },
-    /// The mod was compiled against another generated boundary.
+    /// The mod was compiled against another generated boundary core: the transport's rules or
+    /// a hand-written codec changed, or it predates calls by name.
     Layout { built: u64, game: u64 },
+    /// The mod calls or answers `call` (`Owner::method`), which this game changed (`changed`) or
+    /// doesn't have: it was built against another version of that call. A missing call may be one
+    /// this game dropped or one added after it, and the package records nothing that says which.
+    Call { call: String, changed: bool },
+    /// Two mods of one linked group were built against different mod APIs.
+    MixedGroup { first: String, second: String },
     /// The mod's generated point records differ from this game's.
     PointLayout { built: u64, game: u64 },
     /// The game has no shared Rust standard library beside its executable.
@@ -168,7 +176,25 @@ impl std::fmt::Display for Refusal {
             ),
             Self::Layout { .. } => write!(
                 f,
-                "built for another version of the mod API (including the prepared can_equip ABI)"
+                "built for another version of the mod API's transport; rebuild it (a wasm mod built before calls were linked by name needs one rebuild)"
+            ),
+            Self::Call {
+                call,
+                changed: true,
+            } => write!(
+                f,
+                "built against another version of `{call}`, which this game changed: rebuild it"
+            ),
+            Self::Call {
+                call,
+                changed: false,
+            } => write!(
+                f,
+                "calls `{call}`, which this game doesn't have: it was built for an older or newer game and needs a build for this one"
+            ),
+            Self::MixedGroup { first, second } => write!(
+                f,
+                "{first} and {second} share a linked group but were built against different mod APIs: rebuild them together"
             ),
             Self::PointLayout { built, game } => {
                 write!(
@@ -774,7 +800,7 @@ fn load_with_cache(
                 let _timer = load_times::timer(load_times::Phase::Subscribe);
                 let mut checked = Vec::new();
                 for mut module in mods {
-                    let subscriptions: Vec<(String, i32, bool)> = module
+                    let subscriptions: mod_api::wire::SubscribedAnswer = module
                         .call(
                             CallClass::Load,
                             boundary::Frame::default(),
@@ -1027,10 +1053,16 @@ mod tests {
                 (import "env" "memory" (memory 1))
                 (func (export "horizon_layout") (result i64) i64.const {})
                 (func (export "horizon_in") (param i32) (result i32) i32.const 512)
-                (func (export "horizon_hook") (param i32) (result i64) {stores} i64.const {})
+                (func (export "horizon_hook") (param i32) (result i64) {})
             )"#,
                 *mod_api::wire::LAYOUT,
-                (1024u64 << 32) | subscriptions.bytes().len() as u64
+                crate::calls::answering::<&str>(
+                    &[],
+                    &format!(
+                        "{stores} i64.const {}",
+                        (1024u64 << 32) | subscriptions.bytes().len() as u64
+                    )
+                )
             ))
             .unwrap();
             let loaded = load(&std, vec![package]);
@@ -1123,14 +1155,14 @@ mod tests {
         let packages = vec![
             package("b", "1.0.0", "lib = \"^1\"", 'b', "t", ""),
             package("lib", "1.2.0", "", 'a', "t", ""),
-            package("c", "1.0.0", "lib = \"^1\"", 'c', "t", ""),
+            package("e", "1.0.0", "lib = \"^1\"", 'c', "t", ""),
             package("alone", "1.0.0", "", 'd', "t", ""),
         ];
         let (groups, refused) = groups(&packages, horizon_mod_package::manifest::Side::Both);
         assert!(refused.is_empty());
         assert_eq!(
             ids(&packages, &groups),
-            [vec!["lib", "b", "c"], vec!["alone"]]
+            [vec!["lib", "b", "e"], vec!["alone"]]
         );
     }
 
@@ -1186,7 +1218,7 @@ mod tests {
             package("lib", "2.0.0", "", 'a', "t", ""),
             package("b", "1.0.0", "missing = \"^1\"", 'b', "t", ""),
             package(
-                "c",
+                "e",
                 "1.0.0",
                 "b = \"^1\"\nextra = { version = \"^1\", optional = true }",
                 'c',
@@ -1207,7 +1239,7 @@ mod tests {
                     }
                 ),
                 (
-                    "c".to_string(),
+                    "e".to_string(),
                     Refusal::DependencyRefused {
                         dependency: "b".into()
                     }
@@ -1257,7 +1289,7 @@ mod tests {
         let packages = vec![
             package("lib", "1.0.0", "", 'a', "t", ""),
             package("b", "1.0.0", "lib = \"^1\"", 'b', "t", &linked),
-            package("c", "1.0.0", "lib = \"^1\"", 'c', "other", ""),
+            package("e", "1.0.0", "lib = \"^1\"", 'c', "other", ""),
         ];
         let (_, refused) = groups(&packages, horizon_mod_package::manifest::Side::Both);
         assert_eq!(
@@ -1270,7 +1302,7 @@ mod tests {
                     }
                 ),
                 (
-                    "c".to_string(),
+                    "e".to_string(),
                     Refusal::Toolchain {
                         found: "other".into(),
                         group: "t".into()

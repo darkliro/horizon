@@ -515,7 +515,7 @@ dependencies = [
  "horizon-mod-point-emit",
  "horizon-mod-source",
  "horizon-mod-surface",
- "horizon-mod-wasm",
+ "horizon-mod-vocab",
  "horizon-port-pack",
  "horizon-release-sign",
  "libc",
@@ -530,7 +530,7 @@ dependencies = [
  "ureq",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
- "wasmtime",
+ "wat",
  "zip",
 ]
 
@@ -1828,6 +1828,7 @@ dependencies = [
  "horizon-bench",
  "horizon-chat-filter",
  "horizon-client-core",
+ "horizon-client-gameplay",
  "horizon-client-input",
  "horizon-client-lib",
  "horizon-client-render",
@@ -1838,8 +1839,8 @@ dependencies = [
  "horizon-engine-slots",
  "horizon-friends",
  "horizon-game-discovery",
+ "horizon-gameplay",
  "horizon-guest-stack",
- "horizon-hdr",
  "horizon-hooks",
  "horizon-items",
  "horizon-java-properties",
@@ -1864,7 +1865,6 @@ dependencies = [
  "horizon-threads",
  "horizon-world",
  "log",
- "miniz_oxide 0.8.9",
  "naga",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -1878,7 +1878,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
- "unicode-bidi",
  "ureq",
  "wat",
  "wgpu",
@@ -1898,12 +1897,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-client-gameplay"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "horizon-client-lib",
+ "horizon-core",
+ "horizon-world",
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "horizon-client-input"
 version = "0.1.0"
 dependencies = [
  "arboard",
  "horizon-client-core",
  "horizon-engine-slots",
+ "horizon-hooks",
  "horizon-mod-api-macros",
  "horizon-theme",
  "log",
@@ -2148,6 +2160,27 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "horizon-gameplay"
+version = "0.1.0"
+dependencies = [
+ "horizon-assets",
+ "horizon-client-core",
+ "horizon-client-lib",
+ "horizon-command",
+ "horizon-core",
+ "horizon-engine-slots",
+ "horizon-items",
+ "horizon-mod-package",
+ "horizon-mod-runtime",
+ "horizon-mod-vocab",
+ "horizon-protocol",
+ "horizon-threads",
+ "horizon-world",
+ "log",
+ "serde_json",
 ]
 
 [[package]]
@@ -2677,6 +2710,8 @@ dependencies = [
  "horizon-mod-runtime",
  "horizon-threads",
  "horizon-world",
+ "idna",
+ "idna_adapter",
  "ipconfig",
  "log",
  "serde_json",
@@ -2835,6 +2870,7 @@ dependencies = [
  "horizon-assets",
  "horizon-core",
  "horizon-threads",
+ "indexmap",
  "libm",
  "log",
  "lz4_flex",

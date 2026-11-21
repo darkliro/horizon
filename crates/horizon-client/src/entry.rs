@@ -123,6 +123,11 @@ pub fn start<G>(
     // Crates above the engine registered their hooks before this (horizon-official's `main`),
     // then the Horizon parts still in this crate; none registers after this point.
     game::player_hooks::register();
+    // `horizon-controller.txt` (platform, still in this crate's input until the controllers move
+    // out, layer plan M6), one player's side per seat.
+    if let Err(e) = horizon_hooks::settings::register(&horizon_client::gamepad::store::STORE) {
+        log::error!("Controllers: their settings came too late: {e}");
+    }
     horizon_hooks::engine::seal();
     // The text crates ship (`horizon_hooks::lang`), loaded with the game's own languages.
     horizon_client::lang::install_crate_files(horizon_hooks::lang::engine::all());
@@ -196,6 +201,9 @@ pub fn start<G>(
             alter_ground: crate::game::api_values::alter_ground,
             on_tree_grow: crate::game::native_tree_grow::on_tree_grow,
             rotate: crate::game::native_rotate::rotate,
+            can_survive: crate::game::native_survival::can_survive_v2,
+            may_place_on: crate::game::native_survival::may_place_on_v2,
+            can_sustain_plant: crate::game::native_survival::can_sustain_plant_v2,
             feature: crate::game::native_worldgen_parts::feature,
         },
     )
@@ -266,6 +274,12 @@ pub(crate) fn install_client_hooks() {
             let reader = horizon_client_render::api_context::LoopReader(context);
             let context = reader.context();
             mod_api::dispatch_living_breathe(&context, entity, kind, can_breathe, consume, refill);
+        },
+        player_login_profile: |player, name, properties| {
+            if !mod_api::__private::listened(mod_api::HookId::PlayerLoginProfile) {
+                return;
+            }
+            mod_api::dispatch_player_login_profile(player, name, properties);
         },
         farmland_trample: |context, entity, pos, state, distance, cancel| {
             if !mod_api::__private::listened(mod_api::HookId::FarmlandTrample) {

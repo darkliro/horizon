@@ -5,6 +5,11 @@ pub enum Msg {
     OfficialPlayers(Option<u64>),
     Storage(Result<Box<crate::storage::Report>, String>),
     Releases(Result<Vec<Release>, String>),
+    /// The release list as GitHub (or its mirror) answered it just now, never a kept copy: a
+    /// failed Stable download may be offered again.
+    ReleasesFromNetwork(Vec<Release>),
+    /// Home's Stable update moved on to this build, `nightly` having moved on since the offer.
+    StableRetry(Release),
     Links(Links),
     Progress(String, f32),
     Installed(String, Result<(), String>),
@@ -39,6 +44,8 @@ pub enum Msg {
         jars: Vec<horizon_platform::mod_package::manifest::JarRef>,
         reply: std::sync::mpsc::Sender<bool>,
     },
+    /// The step a start of the game is on (`play_step::say`), already in the launcher's language.
+    PlayStep(String),
     JarClient {
         run: Option<String>,
         prepared: Box<Result<Command, String>>,
@@ -47,6 +54,8 @@ pub enum Msg {
     PackLine(String),
     /// A modpack step ended: the pack as it now is.
     PackDone(Result<Box<crate::modpacks::Imported>, String>),
+    /// The imported packs, read on a thread for the window's read of that number.
+    ImportedPacks(u64, Vec<crate::modpacks::Imported>),
     /// The modpacks other launchers keep on this computer (`modpacks::found_on_this_computer`).
     FoundPacks(Vec<crate::other_launchers::Found>),
     /// Where the native-mods build is (`native_mods::Step::label`), and how far along.

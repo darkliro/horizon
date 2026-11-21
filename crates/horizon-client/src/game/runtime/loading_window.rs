@@ -137,8 +137,9 @@ pub(super) fn loading_renderer(
     let panorama = panorama
         .cloned()
         .unwrap_or_else(|| Arc::new(horizon_client::gfx::panorama::Faces::colour([0; 4])));
-    let (pixels, width, height) = atlas.map_or((EMPTY_HUD.as_slice(), 1, 1), |a| {
-        (a.pixels.as_slice(), a.width, a.height)
+    // `pixels()`: the loading screen keeps them compressed once its renderer has them.
+    let (pixels, width, height) = atlas.map_or((EMPTY_HUD.as_slice().into(), 1, 1), |a| {
+        (a.pixels(), a.width, a.height)
     });
     let (glint_pixels, glint_width, glint_height) = atlas
         .map_or((EMPTY_GLINT.as_slice(), 1, 1), |a| {
@@ -159,7 +160,7 @@ pub(super) fn loading_renderer(
         1,
         &[],
         &[],
-        (pixels, width, height),
+        (&pixels, width, height),
         (glint_pixels, glint_width, glint_height),
         (glint_pixels, glint_width, glint_height),
         (&FORCEFIELD[..], 1),
@@ -369,10 +370,6 @@ pub(super) fn start_game<'a>(
             },
         );
     }
-    if let Some(directory) = std::env::var_os("HORIZON_NATIVE_CLIENT_PARTICLES_FIXTURE") {
-        game.run_native_client_particles_fixture(std::path::Path::new(&directory))?;
-        return Ok(None);
-    }
     if let Some(directory) = std::env::var_os("HORIZON_BOAT_RIDER_FIXTURE") {
         game.run_boat_rider_fixture(std::path::Path::new(&directory))?;
         return Ok(None);
@@ -410,6 +407,11 @@ pub(super) fn start_game<'a>(
     game.publish_initial_client_models()?;
     // Finish Setup -> Config -> World before any screen, connection, input or tick hooks.
     game.native_configs_client_start();
+    // After the World phase: the Host bridge refuses add_particle during Setup, as for a mod.
+    if let Some(directory) = std::env::var_os("HORIZON_NATIVE_CLIENT_PARTICLES_FIXTURE") {
+        game.run_native_client_particles_fixture(std::path::Path::new(&directory))?;
+        return Ok(None);
+    }
     if let Some(error) = pack_error {
         game.open_options_at(true, horizon_client::options_ui::Page::Packs);
         game.ui.options.resource_error = Some(error);
@@ -450,6 +452,7 @@ pub(super) fn start_game<'a>(
                     seed: Some(seed),
                     creative,
                     create: None,
+                    existing_only: false,
                 });
             }
         }

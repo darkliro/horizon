@@ -29,6 +29,24 @@ fn mirror(tag: &Tag, key: &str) -> Option<Mirror> {
         .find(|m| Some(m.saved_name()) == text(tag, key).as_deref())
 }
 
+/// Whether [`read`] reads this piece: a `TemplateStructurePiece`'s constructor resets the
+/// orientation to NORTH and rebuilds the box from the template, unlike the other saved
+/// pieces, which keep their saved `BB`/`O`.
+pub(crate) fn is_template_piece(piece: &Tag) -> bool {
+    matches!(
+        crate::worldgen::generator_structures::saved_piece_name(piece).as_deref(),
+        Some(
+            "minecraft:shipwreck"
+                | "minecraft:orp"
+                | "minecraft:iglu"
+                | "minecraft:rupo"
+                | "minecraft:wmp"
+                | "minecraft:nefos"
+                | "minecraft:ecp"
+        )
+    )
+}
+
 /// `TemplateStructurePiece(StructurePieceType, CompoundTag, ...)` and its subclasses' tag
 /// constructors (`ShipwreckPieces.ShipwreckPiece`, `OceanRuinPieces.OceanRuinPiece.create`...):
 /// the box is rebuilt and the orientation reset to NORTH, and each subclass rebuilds its
@@ -364,8 +382,9 @@ mod tests {
             original.save(),
             "rebuild box and NORTH orientation"
         );
-        // `tejp` is a piece type Horizon cannot read yet.
-        for (key, value) in [("id", "minecraft:tejp"), ("Rot", "broken")] {
+        // An id no piece type binds rejects the entire start, and so does a
+        // readable id whose own fields are broken (the shipwreck's rotation).
+        for (key, value) in [("id", "minecraft:unknown_piece"), ("Rot", "broken")] {
             let mut broken = tag.clone();
             let Some(Tag::List(children)) = broken.get_mut("Children") else {
                 unreachable!()

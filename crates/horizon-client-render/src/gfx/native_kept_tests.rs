@@ -552,7 +552,7 @@ impl Screen {
         let mut encoder = device.create_command_encoder(&Default::default());
         let world = (&self.color, &self.depth, surface);
         let view = self.screen.create_view(&Default::default());
-        post.run(device, &mut encoder, world, &view, size, false, None, None);
+        post.run(device, &mut encoder, world, &view, size, None, None);
         let buffer = crate::gfx::copy_frame(device, &mut encoder, &self.screen, [4, 4]);
         queue.submit([encoder.finish()]);
         (buffer.slice(..)).map_async(wgpu::MapMode::Read, |r| r.unwrap());
@@ -1009,6 +1009,19 @@ fn a_compute_pass_writes_an_r32uint_texture_a_post_pass_loads() {
 /// `[[before_world]]` passes recorded by `NativePack::before_world`, then its chain; the
 /// screen's first pixel each frame, red `wants`.
 fn through_pack(manifest: &str, files: &[(&str, &str)], wants: &[f32]) {
+    through_pack_frames(manifest, files, wants, |_, _| {}, true);
+}
+
+/// `through_pack`, with `set` changing the renderer's frame before each (by its index), and
+/// with `refusal` the store's refusal on a device without room for it after them, which only a
+/// pack with `[[resource]]` has.
+fn through_pack_frames(
+    manifest: &str,
+    files: &[(&str, &str)],
+    wants: &[f32],
+    set: impl Fn(&mut crate::gfx::Frame, usize),
+    refusal: bool,
+) {
     let Some((device, queue)) = device() else {
         return;
     };
@@ -1031,6 +1044,7 @@ fn through_pack(manifest: &str, files: &[(&str, &str)], wants: &[f32]) {
     let mut frame = crate::gfx::pack_uniforms::initial_history_tests::frame(&hud);
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for (n, &want) in (1..).zip(wants) {
+        set(&mut frame, n as usize - 1);
         // A scripted clock: a slow frame on a loaded machine is no pause that resets the store.
         let timing = crate::gfx::pack_uniforms::FrameTiming::nth(n, 50.0);
         frame.pack.frame_timing = Some(timing);
@@ -1042,6 +1056,11 @@ fn through_pack(manifest: &str, files: &[(&str, &str)], wants: &[f32]) {
         let post = &mut pack.post;
         let got = screen.show((&device, &queue), post, &pack.frame.surface_view, [4, 4]);
         assert!(shows(got, [want, 0.0, 0.0]), "{got:?}, {want} expected");
+    }
+    if !refusal {
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "{error:?}");
+        return;
     }
     // The same pack again, on a device without the video memory for its store (`NO_ROOM`):
     // refused (`install_kept`), and this one keeps running, its store made again and its
@@ -1101,6 +1120,24 @@ fn a_pack_s_own_frames_run_its_compute_pass() {
     through_pack(manifest, &files, &[0.25, 0.5, 0.75]);
 }
 
+/// A pack whose files name `moon_phase` reads the phase the renderer's frame carries
+/// (`Sky::moon_phase`), through `NativePack::write`, where its prelude declares the field: each
+/// frame shows its own phase. Run with `WGPU_BACKEND=vulkan` and `WGPU_BACKEND=dx12` for each
+/// backend.
+#[test]
+fn a_pack_reads_the_moon_phase_the_renderer_draws() {
+    let files = [(
+        "p.wgsl",
+        "fn post(input: PostInput) -> vec4<f32> {\n    \
+         return vec4<f32>(f32(frame.moon_phase) * 0.125, 0.0, 0.0, 1.0);\n}\n",
+    )];
+    let phases = [2, 5, 7];
+    let wants = phases.map(|p| p as f32 * 0.125);
+    let manifest = "[[post]]\nfile = \"p.wgsl\"\n";
+    let set = |frame: &mut crate::gfx::Frame, n: usize| frame.sky.moon_phase = phases[n];
+    through_pack_frames(manifest, &files, &wants, set, false);
+}
+
 /// `SUMMING` with its compute pass before the world (`[[before_world]]`) instead.
 const BEFORE_SUMMING: (&str, [(&str, &str); 2]) = (
     "[[resource]]\nname = \"sum\"\nbuffer = 16\nelement = \"u32\"\nkeep = \"view\"\n\
@@ -1130,6 +1167,68 @@ fn a_before_world_pass_accumulates_in_a_buffer_and_starts_over_on_a_reset() {
 fn a_pack_s_own_frames_run_its_before_world_pass() {
     let (manifest, files) = BEFORE_SUMMING;
     through_pack(manifest, &files, &[0.25, 0.5, 0.75]);
+}
+
+/// A pack without the video memory for its kept resources (`NO_ROOM`) is refused through the
+/// hook the renderer installs every pipeline with (`ExternalPipeline::take_over`, from
+/// `Renderer::replace_executor`), which says why: the pack that ran keeps running, its store
+/// made again, unless there is no room for that either.
+#[test]
+fn a_pack_without_room_is_refused_through_the_pipeline_hook() {
+    use crate::gfx::external::{ExternalPipeline, Refused};
+    use crate::gfx::native_pack::{NativePack, tests};
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let (globals, empty) = tests::terrain_layouts(&device);
+    let terrain = tests::terrain_shape(&globals, &empty);
+    // Two packs that keep the same buffer, its pass at another stage: no rebuild of the other,
+    // so neither carries the other's store.
+    let pack = |(manifest, files): (&str, [(&str, &str); 2])| {
+        let manifest = format!("{manifest}[tonemap]\nfile = \"t.wgsl\"\n");
+        let report = report(&manifest, &[&files[..], &[("t.wgsl", IDENTITY)]].concat());
+        let built = NativePack::new(&device, &queue, &terrain, report, &[], Default::default());
+        Box::new(built.unwrap().0)
+    };
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut running: Box<dyn ExternalPipeline> = pack(SUMMING);
+    running.take_over(&device, None, [4, 4]).unwrap();
+    let held = |p: &mut Box<dyn ExternalPipeline>| {
+        let p = (p.as_mut() as &mut dyn std::any::Any).downcast_mut::<NativePack>();
+        p.and_then(|p| p.post.kept.as_ref()).map(|k| k.held.len())
+    };
+    assert_eq!(held(&mut running), Some(1));
+    let mut other: Box<dyn ExternalPipeline> = pack(BEFORE_SUMMING);
+    NO_ROOM.set(1);
+    let refused = other.take_over(&device, Some(running.as_mut()), [4, 4]);
+    let why = "its kept resources (1 MiB) don't fit in video memory (no room (test))";
+    let still = Refused {
+        why: why.into(),
+        old_runs: true,
+    };
+    assert_eq!(refused, Err(still));
+    assert_eq!(held(&mut running), Some(1));
+    assert_eq!(held(&mut other), Some(0));
+    // Without room for either store, the running pack can't keep running.
+    NO_ROOM.set(2);
+    let refused = other.take_over(&device, Some(running.as_mut()), [4, 4]);
+    assert!(
+        matches!(
+            refused,
+            Err(Refused {
+                old_runs: false,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    // With room, it takes over.
+    other
+        .take_over(&device, Some(running.as_mut()), [4, 4])
+        .unwrap();
+    assert_eq!(held(&mut other), Some(1));
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
 }
 
 /// A `[[before_world]]` pass writes this frame's version of an R-relative kept texture (adding
@@ -1354,7 +1453,7 @@ fn a_pack_without_kept_resources_makes_the_layouts_and_groups_it_made_before() {
     assert_eq!(before, [[3, 0, 1], [0, 6, 0], [0, 0, 0]]);
 }
 
-/// #16011 item 4: a pack's kept resources are made at install (`replace_native`), not while it
+/// #16011 item 4: a pack's kept resources are made at install (`replace_executor`), not while it
 /// builds, so one that fails to build makes none; a reload destroys the old store before it
 /// makes the new one, and a carried store stays; a pack whose kept formats the device can't make
 /// is refused while it builds, and the running store stays. Counted with
@@ -1524,7 +1623,6 @@ fn a_timed_frame_times_each_compute_pass_under_its_name() {
             world,
             &view,
             [4, 4],
-            false,
             Some(&mut timing),
             None,
         );

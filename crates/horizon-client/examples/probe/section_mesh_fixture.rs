@@ -8,7 +8,7 @@ use horizon_client::{
     blocks::BlockFacts,
     chunk::{Chunk, Light, MIN_Y, index},
     graphics::LeafCullingMode,
-    mesher::{EMISSION_BITS, FLUID_FACE_BITS, MeshTables, Mesher, OPAQUE_LAYER, TerrainVertex},
+    mesher::{FLUID_BIT, LEVEL_BITS, MeshTables, Mesher, OPAQUE_LAYER, TIER_BITS, TerrainVertex},
     models,
 };
 use horizon_core::biome::BiomeZoom;
@@ -131,6 +131,7 @@ fn scene(
         shader_pack_lighting: false,
         separate_ao: false,
         shader_pack: false,
+        looks: false,
         assets,
         render,
         tables,
@@ -176,7 +177,7 @@ fn scene(
                         z,
                         u,
                         w,
-                        argb(v.color | EMISSION_BITS | FLUID_FACE_BITS),
+                        argb(v.color | TIER_BITS | FLUID_BIT | LEVEL_BITS),
                         light_coords(v.light)
                     ])
                 })

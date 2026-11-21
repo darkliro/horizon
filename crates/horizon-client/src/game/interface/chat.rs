@@ -316,6 +316,14 @@ pub struct UiState {
     /// F2 screenshots not written yet: each reports in chat once its PNG is.
     pub screenshot_messages: Vec<std::path::PathBuf>,
     pub screenshot_writes: Vec<super::screenshot_writer::ScreenshotWrite>,
+    /// The path a mod's `request_screenshot` queued, until its readback reaches
+    /// `save_screenshot`: that capture is written without replacing a file.
+    pub mod_screenshot: Option<std::path::PathBuf>,
+    /// Uncompressed bytes of the mod captures written this session (`request_screenshot`'s budget).
+    pub mod_screenshot_bytes: u64,
+    /// The `screenshot` hook is running: a mod's request from inside it is `Busy`.
+    /// Shared with the guard that clears it, so a listener's panic can't leave it set.
+    pub screenshot_hook: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The options screens.
     pub options: horizon_client::options_ui::OptionsUi,
     /// The prepared resources before resource packs are layered on.
@@ -2306,16 +2314,44 @@ impl Game<'_> {
             .into_owned();
         let mut message = None;
         let mut cancel = false;
+        let hook = super::native_screenshot_request::HookRunning::start(&self.ui.screenshot_hook);
         self.native_screenshot(
             pending.image_mut(),
             &mut file_name,
             &mut message,
             &mut cancel,
         );
+        drop(hook);
+        let by_mod = self
+            .ui
+            .mod_screenshot
+            .take_if(|path| *path == pending.path)
+            .is_some();
         if cancel {
             self.ui.screenshot_messages.remove(at);
             self.post_screenshot_chat(screenshot_cancel_line(message));
             return None;
+        }
+        if by_mod {
+            // Charged before the writer starts, at no less than the minimum, so a hook that
+            // shrinks the image can't make captures free.
+            let charge =
+                super::native_screenshot_request::mod_screenshot_charge(pending.raw_bytes());
+            if !super::native_screenshot_request::within_budget(
+                self.ui.mod_screenshot_bytes,
+                charge,
+            ) {
+                self.ui.screenshot_messages.remove(at);
+                self.post_screenshot_chat(Text::translate(
+                    "screenshot.failure",
+                    &[Text::literal(
+                        "mod screenshots have used this session's budget",
+                    )],
+                ));
+                return None;
+            }
+            pending.no_replace = true;
+            self.ui.mod_screenshot_bytes += charge;
         }
         let root = horizon_client::logging::player_dir().join("screenshots");
         self.ui
@@ -2341,16 +2377,7 @@ impl Game<'_> {
         let message = match result {
             Ok(_) => {
                 log::info!("Saved screenshot to {}", path.display());
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let link = Text::styled(
-                    name,
-                    Style {
-                        underlined: Some(true),
-                        click: Some(ClickEvent::OpenFile(path.to_string_lossy().into_owned())),
-                        ..Style::default()
-                    },
-                );
-                message.unwrap_or_else(|| Text::translate("screenshot.success", &[link]))
+                message.unwrap_or_else(|| screenshot_saved_line(&path, None))
             }
             Err(e) => Text::translate("screenshot.failure", &[Text::literal(e.clone())]),
         };
@@ -2367,6 +2394,25 @@ impl Game<'_> {
             self.visual_ticks(),
             focused,
         );
+    }
+}
+
+/// The chat line for a saved screenshot: vanilla's, linking the file, or with its HDR copy
+/// (`hdr`) Horizon's, linking both.
+pub(super) fn screenshot_saved_line(path: &std::path::Path, hdr: Option<&std::path::Path>) -> Text {
+    let link = |path: &std::path::Path| {
+        Text::styled(
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            Style {
+                underlined: Some(true),
+                click: Some(ClickEvent::OpenFile(path.to_string_lossy().into_owned())),
+                ..Style::default()
+            },
+        )
+    };
+    match hdr {
+        Some(hdr) => Text::translate("horizon.screenshot.success_hdr", &[link(path), link(hdr)]),
+        None => Text::translate("screenshot.success", &[link(path)]),
     }
 }
 
@@ -2448,6 +2494,55 @@ mod tests {
                 &[Text::translate("horizon.screenshot.canceled", &[])]
             )
         );
+    }
+
+    /// An F2 shot with an HDR copy links both files; one without links the SDR file alone,
+    /// in vanilla's line.
+    #[test]
+    fn a_screenshot_line_links_the_hdr_copy_only_when_one_was_written() {
+        let sdr = std::path::Path::new("screenshots/shot.png");
+        let hdr = std::path::Path::new("screenshots/shot-hdr.png");
+        let link = |name: &str, file: &str| {
+            Text::styled(
+                name.to_owned(),
+                Style {
+                    underlined: Some(true),
+                    click: Some(ClickEvent::OpenFile(file.into())),
+                    ..Style::default()
+                },
+            )
+        };
+        let plain = screenshot_saved_line(sdr, None);
+        assert_eq!(
+            plain,
+            Text::translate(
+                "screenshot.success",
+                &[link("shot.png", "screenshots/shot.png")]
+            )
+        );
+        let both = screenshot_saved_line(sdr, Some(hdr));
+        assert_eq!(
+            both,
+            Text::translate(
+                "horizon.screenshot.success_hdr",
+                &[
+                    link("shot.png", "screenshots/shot.png"),
+                    link("shot-hdr.png", "screenshots/shot-hdr.png")
+                ]
+            )
+        );
+        use horizon_client::lang;
+        let mut en_us = std::collections::HashMap::new();
+        lang::read_lang_file(
+            include_bytes!("../../../assets/horizon/lang/en_us.json"),
+            &mut en_us,
+        );
+        // A text renders its translation when it is made.
+        let (shown, missing) = lang::scoped(lang::Language::of("en_us", en_us), || {
+            screenshot_saved_line(sdr, Some(hdr)).plain()
+        });
+        assert_eq!(shown, "Saved screenshot as shot.png and shot-hdr.png");
+        assert!(missing.is_empty(), "{missing:?}");
     }
 
     #[test]

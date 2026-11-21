@@ -1585,6 +1585,51 @@ impl StructureSearchResult {
     }
 }
 
+/// A structure a position is in, from `LevelRef::structures_at`: by its start's box, one of its
+/// pieces as placed, or both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct StructureAt {
+    /// Registry id of the structure.
+    pub structure: String,
+    /// Whether its start's box holds the position (`StructureManager.getStructureAt`).
+    pub in_box: bool,
+    /// Whether one of its pieces, as placed, holds the position
+    /// (`StructureManager.getStructureWithPieceAt`). A piece that settled below the box it was
+    /// made in, as a shipwreck does, holds blocks outside the start's box.
+    pub in_piece: bool,
+}
+
+impl StructureAt {
+    /// A structure reaching a position, by its start's box and by a piece.
+    pub fn new(structure: String, in_box: bool, in_piece: bool) -> Self {
+        Self {
+            structure,
+            in_box,
+            in_piece,
+        }
+    }
+}
+
+/// A loaded block entity from `LevelRef::block_entities`: its block's position and its type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct BlockEntityAt {
+    /// The position of its block.
+    pub pos: [i32; 3],
+    /// Registry id of its type (`BlockEntity.getType`): `minecraft:chest`.
+    pub id: String,
+}
+
+impl BlockEntityAt {
+    /// A block entity at `pos` of type `id`.
+    pub fn new(pos: [i32; 3], id: String) -> Self {
+        Self { pos, id }
+    }
+}
+
 /// Why a server-wide game rule read was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
 #[non_exhaustive]

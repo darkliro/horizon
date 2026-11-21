@@ -856,7 +856,9 @@ impl Game<'_> {
             .as_deref()
             .map(horizon_client::item_data::command_components)
         {
-            Some(Ok(tag)) => horizon_client::item_data::decode_components(Some(&tag)),
+            Some(Ok(tag)) => {
+                horizon_client::item_data::decode_components_for_item(id, Some(&tag))
+            }
             Some(Err(e)) => return Err(CommandError::new(Text::literal(e))),
             None => (0, None),
         };
@@ -1223,13 +1225,10 @@ impl Game<'_> {
             _ => stack,
         }
     }
-    /// `ItemStack.getMaxStackSize`: the max_stack_size component, else the
-    /// item's.
+    /// `ItemStack.getMaxStackSize`: the max_stack_size component (a removed
+    /// one being vanilla's default of 1), else the item's.
     pub(in crate::game) fn stack_max_size(&self, s: &ItemStack) -> u32 {
-        if let Some(Tag::Int(n)) = s.data().and_then(|d| d.other("minecraft:max_stack_size")) {
-            return (*n).clamp(1, 99) as u32;
-        }
-        self.items().get(&s.item).map_or(64, |i| i.max_stack)
+        s.max_stack_size(self.items())
     }
     /// `ResourceOrIdArgument.getLootModifier`: an inline modifier (SNBT) or
     /// a registered one.
@@ -1632,7 +1631,8 @@ fn edit_components(stack: &mut ItemStack, f: impl FnOnce(&mut horizon_core::nbt:
     };
     f(&mut c);
     let tag = Tag::Compound(c);
-    let (damage, extra) = horizon_client::item_data::decode_components(Some(&tag));
+    let (damage, extra) =
+        horizon_client::item_data::decode_components_for_item(&stack.item, Some(&tag));
     stack.damage = damage;
     stack.extra = extra;
     stack.tidy();
@@ -3071,6 +3071,9 @@ mod registered_slot_source_preservation_tests {
         assert_eq!((&*hand.item, hand.count), ("minecraft:stone", 1));
     }
 }
+
+#[cfg(test)]
+include!("items/registered_source_qualification_v2_tests.rs");
 
 #[cfg(test)]
 mod set_custom_data_tests {

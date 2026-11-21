@@ -1189,6 +1189,20 @@ impl ProfileProperty {
     }
 }
 
+/// How a [`Profiles`] lookup stands: the game resolves profiles in the background, so a
+/// lookup's first call answers [`Pending`](Self::Pending) and a later one its answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum ProfileResolution {
+    /// The lookup is still running, or waiting for the resolver's per-minute budget; ask again
+    /// on a later tick.
+    Pending,
+    /// The services' answer: the profile, or `None` when there is no such account or the lookup
+    /// failed (for example, a rate-limited lookup). `None` does not prove the account is missing.
+    Done(Option<GameProfile>),
+}
+
 /// Why [`PlayerRef::open_mod_menu`] opened nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1212,6 +1226,39 @@ impl From<crate::text::TextFormError> for OpenMenuError {
 }
 
 impl NoBackend for OpenMenuError {
+    fn no_backend() -> Self {
+        Self::PlayerUnavailable
+    }
+}
+
+/// Why [`PlayerRef::open_station`] opened nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum OpenStationError {
+    /// The menu type is not a workstation the game opens without a block: the crafting
+    /// table's, the loom's, the grindstone's, the cartography table's, the stonecutter's,
+    /// the smithing table's or the anvil's.
+    NotStation,
+    /// The player is stale, not connected (a fake player), or not in the world; also a host
+    /// without a game.
+    PlayerUnavailable,
+    /// More `inputs` than the station has input slots.
+    TooManyInputs,
+    /// The player's station is asking the mods already, while it opens or takes a click: a
+    /// listener there (`prepare_item_craft`, `anvil_update`...) can't open another in its place.
+    Busy,
+    /// One of the inputs was refused at the game's item conversion boundary.
+    Stack(StackWriteError),
+}
+
+impl From<StackWriteError> for OpenStationError {
+    fn from(error: StackWriteError) -> Self {
+        Self::Stack(error)
+    }
+}
+
+impl NoBackend for OpenStationError {
     fn no_backend() -> Self {
         Self::PlayerUnavailable
     }
@@ -1325,6 +1372,42 @@ impl ApplyEffectTickEvent<'_> {
     pub fn eat(&mut self, nutrition: i32, saturation_modifier: f32) {
         self.changes
             .push(EffectTickChange::Eat(nutrition, saturation_modifier));
+    }
+}
+
+/// A sidebar a server mod shows one player (`player_set_sidebar`): a title and
+/// up to 15 lines, top first.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct Sidebar {
+    /// The objective's display name over the lines.
+    pub title: Text,
+    /// The lines, top first; past 15 are not shown, as vanilla's sidebar shows 15.
+    pub lines: Vec<SidebarLine>,
+}
+impl Sidebar {
+    /// A sidebar with this title and lines.
+    pub fn new(title: Text, lines: Vec<SidebarLine>) -> Self {
+        Self { title, lines }
+    }
+}
+
+/// One sidebar line: its text on the left and, where a score's number would be,
+/// an optional text on the right (`NumberFormat` `fixed`; none shows nothing, `blank`).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct SidebarLine {
+    /// The line's text.
+    pub text: Text,
+    /// The text in the score's place on the right.
+    pub value: Option<Text>,
+}
+impl SidebarLine {
+    /// A line with this text and right-hand value.
+    pub fn new(text: Text, value: Option<Text>) -> Self {
+        Self { text, value }
     }
 }
 

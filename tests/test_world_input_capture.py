@@ -47,23 +47,23 @@ class WorldInputCaptureTests(unittest.TestCase):
         game = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
                        for path in ("game/world/player_spawn.rs", "game/runtime/window_handler.rs", "game.rs"))
         remote_dir = next(ROOT.glob('crates/horizon-client/src/game/*/remote'))
-        remote = (remote_dir / "mod.rs").read_text(encoding="utf-8")
+        remote = (remote_dir / "tick.rs").read_text(encoding="utf-8")
         level_tick = (remote_dir / "client_level_tick.rs").read_text(encoding="utf-8")
         spawn = method(game, "spawn_player")
         self.assertLess(spawn.index("self.player = Some(player)"),
                         spawn.index("self.capture_loaded_world()"))
         # ClientPacketListener.tick: the level load tracker ends the loading screen,
         # the server hears PlayerLoaded, the mouse is captured, then the player moves.
-        ready = remote[remote.index("    fn tick_client_load("):]
+        ready = remote[remote.index("    pub(super) fn tick_client_load_body("):]
         self.assertLess(ready.index("r.loaded_sent = true"),
                         ready.index("self.capture_loaded_world()"))
         level_fn = level_tick[level_tick.index("    pub(in crate::game) fn tick_remote_level("):]
         self.assertIn("self.tick_remote_player(running, hold)", level_fn)
-        level = method(remote, "tick_remote_player")
+        level = method(remote, "tick_remote_player_body")
         self.assertLess(level.index("self.tick_client_load()"),
                         level.index("self.tick_local_player("))
         # The extracted local-player pass owns the movement input now.
-        self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player"))
+        self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player_body"))
 
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_capture_lifecycle(self):
@@ -152,7 +152,8 @@ struct Game {
 }
 impl Default for Game {
     fn default() -> Self {
-        Self { focused: true, agent_pointer: false, window: Some(Window::default()),
+        Self { focused: true, agent_pointer: false,
+            window: Some(Window { focus: Cell::new(true), ..Window::default() }),
             keyboard_mouse: true, split_window: false, view_at: [0, 0],
             mouse: Mouse::default(), captured: false, capture_mode: None, regrab_on_refocus: false, title: None,
             screen: Screen::Playing, remote: None, studio: Studio::default(), replay: Replay::default(),
@@ -186,6 +187,53 @@ impl Game {
 METHODS
 }
 fn main() {
+    // A direct grab while the title screen is open leaves the native pointer alone.
+    {
+        let mut game = Game::default();
+        game.title = Some(());
+        game.window.as_ref().unwrap().visible.set(true);
+        game.capture(true);
+        assert!(!game.captured);
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+    }
+    // The game can still capture logically on the title screen in internal runs.
+    for (offscreen, unclaimed, scripted) in [
+        (true, false, false), (false, true, false), (false, false, true),
+    ] {
+        let mut game = Game::default();
+        game.title = Some(());
+        game.options.offscreen = offscreen;
+        game.unclaimed_window = unclaimed;
+        game.scripted = scripted;
+        game.agent_pointer = true;
+        let window = game.window.as_ref().unwrap();
+        window.focus.set(false);
+        window.visible.set(true);
+        game.capture(true);
+        assert!(game.captured);
+        assert!(game.mouse.ignore_first);
+        assert!(!game.agent_pointer);
+        assert!(game.capture_mode.is_none());
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+    }
+    // A window opened in the background has not sent a focus-loss event yet.
+    {
+        let mut game = Game::default();
+        game.window.as_ref().unwrap().focus.set(false);
+        game.window.as_ref().unwrap().visible.set(true);
+        game.capture(true);
+        assert!(!game.captured);
+        let window = game.window.as_ref().unwrap();
+        assert_eq!((window.grabs.get(), window.warps.get()), (0, 0));
+        assert!(window.visible.get());
+        window.focus.set(true);
+        game.capture(true);
+        assert!(game.captured);
+    }
     // The server pack prompt keeps the pointer: nothing grabs it while it is open.
     {
         let mut game = Game::default();
@@ -407,6 +455,7 @@ fn main() {
     {
         let mut game = Game::default();
         game.unclaimed_window = true;
+        game.window.as_ref().unwrap().focus.set(false);
         game.claim_window(&Loop);
         assert_eq!(game.applied_focus, vec![false]);
         game.capture(true);
@@ -527,7 +576,10 @@ fn main() {
         capture = method(source, "capture").replace(
             "horizon_client::mouse::mouse_position_after_grab_change",
             "mouse_position_after_grab_change")
-        fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change"))
+        grab_start = source.index("struct Grab {")
+        grab_helpers = source[grab_start:source.index("\n#[cfg(test)]", grab_start)]
+        fixture = fixture.replace("HELPER", function(mouse, "mouse_position_after_grab_change") +
+                                  "\n" + grab_helpers)
         fixture = fixture.replace("METHODS", capture + "\n" +
                                   method(source, "capture_loaded_world") + "\n" +
                                   method(source, "regrab_on_refocus") + "\n" +
@@ -564,10 +616,15 @@ mod input_trace {
 struct Radial(bool);
 impl Radial { fn is_open(&self) -> bool { self.0 } }
 struct Pad { radial: Radial }
+struct Replay { driver: Option<()> }
+impl Replay { fn playing(&self) -> bool { self.driver.is_some() } }
+struct StudioFreecam { active: bool }
+struct Studio { freecam: StudioFreecam }
+impl Studio { fn flying(&self) -> bool { self.freecam.active } }
 struct Game {
     pending_save: Option<()>, captured: bool, focused: bool, keyboard_mouse: bool, split_window: bool,
     options: Options, screen: Screen, mouse: MouseLook, last_input: Instant, pad: Pad, scripted: bool,
-    unclaimed_window: bool,
+    unclaimed_window: bool, replay: Replay, studio: Studio,
 }
 impl Game {
     fn scripted_run(&self) -> bool { self.scripted }
@@ -594,22 +651,26 @@ fn main() {
         (false, false, true, true, true, false, false, true, false, false),
         (false, false, true, true, true, false, false, false, true, false),
     ] {
-        let mut game = Game {
-            pending_save: saving.then_some(()), captured: true, focused: active,
-            keyboard_mouse: owner, split_window: split, options: Options { offscreen },
-            screen: if playing { Screen::Playing } else { Screen::Paused },
-            mouse: MouseLook::default(), last_input: Instant::now(), pad: Pad { radial: Radial(radial) },
-            scripted, unclaimed_window: unclaimed,
-        };
-        game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (0.0, 0.0) });
-        game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
-        let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false };
-        let (x, y) = game.mouse.handle_accumulated_movement(1.0, true, true, look).unwrap();
-        let mut rotation = Rotation { x_rot: 0.0, y_rot: 0.0, x_rot_o: 0.0, y_rot_o: 0.0 };
-        rotation.turn(x, y);
-        let want = if turns { (3.0, -1.5) } else { (0.0, 0.0) };
-        assert!((rotation.y_rot - want.0).abs() < 0.00001 && (rotation.x_rot - want.1).abs() < 0.00001,
-            "rotation=({}, {}), offscreen={offscreen}, split={split}, owner={owner}, active={active}, playing={playing}, saving={saving}, radial={radial}, scripted={scripted}, unclaimed={unclaimed}", rotation.y_rot, rotation.x_rot);
+        // Replay suppresses recorded-view motion; freecam still obeys every ownership gate.
+        for (replay, freecam) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut game = Game {
+                pending_save: saving.then_some(()), captured: true, focused: active,
+                keyboard_mouse: owner, split_window: split, options: Options { offscreen },
+                screen: if playing { Screen::Playing } else { Screen::Paused },
+                mouse: MouseLook::default(), last_input: Instant::now(), pad: Pad { radial: Radial(radial) },
+                scripted, unclaimed_window: unclaimed, replay: Replay { driver: replay.then_some(()) },
+                studio: Studio { freecam: StudioFreecam { active: freecam } },
+            };
+            game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (0.0, 0.0) });
+            game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
+            let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false };
+            let (x, y) = game.mouse.handle_accumulated_movement(1.0, true, true, look).unwrap();
+            let mut rotation = Rotation { x_rot: 0.0, y_rot: 0.0, x_rot_o: 0.0, y_rot_o: 0.0 };
+            rotation.turn(x, y);
+            let want = if turns && (!replay || freecam) { (3.0, -1.5) } else { (0.0, 0.0) };
+            assert!((rotation.y_rot - want.0).abs() < 0.00001 && (rotation.x_rot - want.1).abs() < 0.00001,
+                "rotation=({}, {}), offscreen={offscreen}, split={split}, owner={owner}, active={active}, playing={playing}, saving={saving}, radial={radial}, scripted={scripted}, unclaimed={unclaimed}, replay={replay}, freecam={freecam}", rotation.y_rot, rotation.x_rot);
+        }
     }
 }
 '''

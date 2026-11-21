@@ -80,7 +80,8 @@ horizon-rust/horizon-mods under `native/<name>/`, [mods.md](modding/src/start/in
 options. Players install them from the launcher's Mods page, and the launcher builds them into the game
 ([modding/src/how-to/native-mods.md](modding/src/how-to/native-mods.md)). The game keeps
 the hook points they use (`crates/horizon-client/src/game/native_hooks/`), and `horizon-extras.txt` keeps the old
-keys and `movedToMods`. The Extras page keeps a **Zoom** row: the mod's switch and Settings button when
+keys and `movedToMods`. A port reads its extra's old keys once through the mod API's `official_extra_settings`
+(the keys of each mod id are `MOVED_KEYS` in `crates/horizon-client-render/src/extras.rs`). The Extras page keeps a **Zoom** row: the mod's switch and Settings button when
 it is built in, else a note saying to install it from the Mods page.
 
 The game still draws the minimap, for the native mod (`native_minimap` in `native_hooks/`, [mods.md](modding/src/how-to/content-mods.md)):
@@ -277,6 +278,13 @@ of P1: the others follow P1's answer.
   the title screen's whole splash pool; off, every namespace's
   `texts/splashes.txt` joins it (`crates/horizon-client/src/splashes.rs`). Read
   on each resource reload.
+
+### Finer far terrain while zoomed (`lodZoomDetail`, default off)
+- No Extras page entry yet: set `lodZoomDetail:true` in `horizon-extras.txt` with
+  the game closed. While a zoom magnifies far terrain (LOD Distance on), its tiles
+  are planned finer, at the cost of more tiles while the zoom is held
+  (`lod::ZoomAim`, `fov.rs`). Off until a measurement shows those tiles arrive
+  while the zoom is still held.
 
 ## Shared rules
 

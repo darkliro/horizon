@@ -46,6 +46,7 @@ mod glass_storage;
 mod glass_toast;
 mod glass_ui;
 mod glass_versions;
+mod glide;
 mod home;
 mod home_tabs;
 mod import_page;
@@ -79,6 +80,7 @@ mod partner;
 mod perf;
 mod picture_cache;
 mod plate;
+mod play_step;
 mod profile_heads;
 mod screenshots_page;
 mod scrollbar;
@@ -274,6 +276,9 @@ struct Launcher {
     update_error: Option<String>,
     self_update: SelfUpdate,
     self_update_hidden: bool,
+    /// The restart for links.json's `min_launcher` was tried this start, or this launcher is
+    /// what one started: it isn't tried (again) before the next start.
+    min_restart_tried: bool,
     /// The Horizon version being installed as an update: whether it becomes the selected one is
     /// judged when it finishes.
     update_install: Option<String>,
@@ -282,6 +287,11 @@ struct Launcher {
     instance_install: Option<String>,
     /// One for an instance waiting for the install running now to end.
     install_next: Option<Release>,
+    /// The Stable build Home's Update is installing (`nightly::install_stable`).
+    stable_install: Option<Release>,
+    /// A Stable build whose download failed: not offered again until the release list is read
+    /// from the network (`Msg::ReleasesFromNetwork`).
+    stable_failed: Option<Release>,
     /// The install bar's previous and current fraction, so it moves rather than jumps.
     bar: (f32, f32),
     releases: Load<Vec<Release>>,
@@ -320,6 +330,12 @@ struct Launcher {
     /// Native mods (`native_mods`, on the Mods page): the build's step while it runs, why it
     /// failed, and the warning before a build while it is open, with the mods it names.
     native_step: Option<String>,
+    /// The player pressed Stop on the build under way: the card says it is stopping, and its
+    /// Stop buttons wait, until the build ends (#19300).
+    native_stopping: bool,
+    /// A build waiting for its base version's preparation, or for an install of it, kept as it
+    /// was started (#18659).
+    native_prepare_first: Option<native_mods::prepare_first::Waiting>,
     /// Where the build under way is, for the card's stages and bar.
     native_progress: Option<native_mods::Progress>,
     /// The first build's one-time download (the compiler), in bytes; `None` once it is there.
@@ -455,7 +471,11 @@ struct Launcher {
     /// The game is waiting for its session (a token renewal), or a Java instance for its files
     /// and Java (`start_java`), before it starts.
     starting_client: Option<String>,
+    /// The instance that start is for, whatever is selected by the time it ends.
     starting_instance: Option<String>,
+    /// The Stop of the start under way while it may run its instance's pre-launch command
+    /// (Windows runs it before the game): kept until the start's result is handled.
+    pre_launch_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Play was pressed on a version not prepared yet: it starts once this preparation ends well.
     play_when_prepared: Option<(String, String)>,
     /// Join a friend: the code typed on the Play page, and the one the game
@@ -501,6 +521,8 @@ struct Launcher {
     perf: perf::Perf,
     install_started: Option<Instant>,
     prepare_started: Option<Instant>,
+    /// The version the preparation under way is for: its end checks that one is ready.
+    prepare_tag: Option<String>,
     /// The download under way as first seen (when, files done), for the time left.
     download_seen: Option<(Instant, usize)>,
     /// The tab open under Home's hero (`home_tabs.rs`).
@@ -526,6 +548,8 @@ struct Launcher {
     /// Modrinth projects' icon URLs (`instance_mods.rs`).
     project_icons: instance_mods::ProjectIcons,
     play_pressed: Option<Instant>,
+    /// The step the start in progress said last (`play_step`).
+    play_step: play_step::PlayStep,
     /// `horizon-launcher benchmark` started this window to measure it.
     bench: Option<perf::Bench>,
     /// The Modpacks page: the imported packs (read when the page first opens), the one shown,
@@ -534,6 +558,8 @@ struct Launcher {
     /// Modpacks installed from Horizon's registry, each its own profile.
     registry_packs: Vec<horizon_launcher::browser::horizon::pack::Installed>,
     packs_loaded: Option<Instant>,
+    /// The imported packs' read on a thread, and whether it may still apply (`load_packs`).
+    packs_reading: modpacks_page::PackReads,
     pack_open: Option<String>,
     pack_filter: Option<horizon_port_pack::report::Status>,
     pack_busy: bool,
@@ -545,6 +571,10 @@ struct Launcher {
     found_scanning: bool,
     /// The game starting now plays this pack's profile (its work folder).
     starting_pack: Option<std::path::PathBuf>,
+    /// The folder of the instance a start is preparing, while `starting_client` is set.
+    starting_work: Option<std::path::PathBuf>,
+    /// The pack folder a Port step is rebuilding now.
+    porting: Option<std::path::PathBuf>,
     /// The Mods page: the browser's search, installs and updates (`mods_page.rs`).
     mods: mods_page::Mods,
     github: github_mods_page::Github,
@@ -558,6 +588,8 @@ struct Launcher {
     /// Pictures from disk made at their drawn size (`picture_cache`).
     pictures: picture_cache::Pictures,
     game_packs: packs_page::Packs,
+    /// The games' answers about their shader API seen so far (`game_shader_api::answers`).
+    shader_answers: u64,
     world_packs: datapacks_page::WorldPacks,
     export: Option<export_page::ExportPanel>,
     launch: Option<launch_page::LaunchPanel>,
@@ -593,8 +625,8 @@ actions!(horizon_launcher, [Quit, CloseWindow]);
 fn shut_down(cx: &mut App) {
     servers_page::stop_on_quit();
     telemetry::send_before_exit();
-    // A downloaded launcher update goes in only when the player presses Update: closing drops it.
-    horizon_launcher::update_handoff::forget();
+    // A downloaded launcher update goes in once this process has exited; the game keeps running.
+    horizon_launcher::update_handoff::on_close();
     cx.quit()
 }
 
@@ -762,20 +794,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_selection_survives_a_removal_or_moves_to_the_newest_left() {
-        let left = ["v0.2.49".to_string(), "v0.2.48".to_string()];
-        let pick =
-            |saved: Option<&str>| super::selection_after_removal(&left, saved.map(String::from));
-        assert_eq!(pick(Some("v0.2.48")).as_deref(), Some("v0.2.48"));
-        assert_eq!(pick(Some("v0.2.47")).as_deref(), Some("v0.2.49"));
-        assert_eq!(pick(None).as_deref(), Some("v0.2.49"));
-        assert_eq!(
-            super::selection_after_removal(&[], Some("v0.2.47".into())),
-            None
-        );
-    }
-
     /// An owner's Play works on a version not prepared yet: it prepares it (downloading
     /// Minecraft from Mojang when this computer has no install), then plays. Without an owner
     /// it stays off: signing in comes first.
@@ -818,6 +836,32 @@ mod tests {
         assert!(!starts_now(true, true, false), "prepared again under way");
         assert!(!starts_now(false, false, false), "not prepared");
         assert!(!starts_now(true, false, true), "already running");
+    }
+
+    /// A sidebar row says Running or Starting for the instance that was started, not for
+    /// whichever one is selected (#16186).
+    #[test]
+    fn a_row_shows_the_game_of_its_own_instance_only() {
+        use super::frame::{row_phase, running_ids, RowPhase};
+        assert_eq!(row_phase("a", &["a"], None), Some(RowPhase::Running));
+        assert_eq!(row_phase("b", &["a"], None), None, "B is only selected");
+        assert_eq!(row_phase("a", &[], Some("a")), Some(RowPhase::Starting));
+        assert_eq!(row_phase("b", &[], Some("a")), None);
+        assert_eq!(row_phase("a", &[], None), None, "nothing runs");
+        // Several games: one runs while another starts.
+        assert_eq!(row_phase("a", &["a"], Some("b")), Some(RowPhase::Running));
+        assert_eq!(row_phase("b", &["a"], Some("b")), Some(RowPhase::Starting));
+        assert_eq!(row_phase("b", &["a", "b"], None), Some(RowPhase::Running));
+        // The started instance deleted (ids don't change on a rename): no row has its game.
+        assert_eq!(row_phase("c", &["a"], Some("b")), None);
+        // The ids come from the run's own instance, and only while its game runs.
+        let run = ("a".to_string(), std::time::Instant::now());
+        assert_eq!(running_ids(true, Some(&run)), ["a"]);
+        assert!(running_ids(false, Some(&run)).is_empty());
+        assert!(
+            running_ids(true, None).is_empty(),
+            "a pack with no instance"
+        );
     }
 
     #[test]

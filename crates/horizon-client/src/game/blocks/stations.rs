@@ -746,11 +746,10 @@ impl Game<'_> {
         }
         self.station = Some(s);
     }
+    /// `ItemStack.getMaxStackSize` for a station slot: the stack's own
+    /// `max_stack_size` (a removed one being vanilla's 1), else the item's.
     pub(super) fn max_stack(&self, stack: &ItemStack) -> u32 {
-        self.res
-            .items()
-            .get(&stack.item)
-            .map_or(64, |i| i.max_stack)
+        stack.max_stack_size(self.res.items())
     }
     /// `Slot.mayPlace` and `getMaxStackSize` for station slots.
     fn slot_rules(&self, slot: usize, stack: &ItemStack) -> (bool, u32) {
@@ -1764,7 +1763,7 @@ impl Game<'_> {
             };
             // PotionContents.getPotionDescription: the effect names are
             // translatable, read in the selected language like every other line.
-            for (text, cat) in brewing::tooltip(stack.potion(), scale, &translate) {
+            for (text, cat) in brewing::tooltip(stack, scale, &translate) {
                 let c = match cat {
                     brewing::Category::Beneficial => rgba(85, 85, 255, 255),
                     brewing::Category::Harmful => rgba(255, 85, 85, 255),

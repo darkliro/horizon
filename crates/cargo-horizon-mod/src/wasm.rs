@@ -4,7 +4,7 @@
 //! A wasm mod is a member of its dependency group, linked at load by the game
 //! (`horizon-mod-wasm`): one memory, one copy of std and of each library mod. So every member is
 //! a position-independent shared module built by one pinned toolchain, with std built from
-//! source (`-Zbuild-std`) so its symbols are the same in every member. This tool is also the
+//! source (`-Zbuild-std`) so its symbols are the same in every member, whichever host built it (the\n//! wrapper gives std crates a host-free disambiguator). This tool is also the
 //! link step (cargo calls it as the linker, with `HORIZON_MOD_LINK` set): the std member links
 //! std whole and exports it; a mod leaves std and its library mods out, to resolve to theirs.
 use horizon_mod_package::manifest::{MANIFEST, WASM, sha512_of};
@@ -24,7 +24,7 @@ const LLD_ENV: &str = "HORIZON_MOD_LLD";
 /// The library mods' crate names, comma-separated, that a member leaves out.
 const PROVIDED_ENV: &str = "HORIZON_MOD_PROVIDED";
 const PROFILE: &str = "horizon-wasm";
-const FLAGS: &str = "-Crelocation-model=pic -Zshare-generics=n -Zdefault-visibility=hidden --cfg=horizon_shared_artifacts_v2";
+const FLAGS: &str = "-Crelocation-model=pic -Zshare-generics=n -Zdefault-visibility=hidden --cfg=horizon_shared_artifacts_v3";
 
 /// Guest boundary exports, kept even though they originate in an rlib dependency.
 const GUEST_EXPORTS: &[&str] = &["horizon_layout", "horizon_in", "horizon_hook"];
@@ -199,9 +199,14 @@ fn std_member(target_dir: &Path, toolchain: &Toolchain) -> Result<Vec<u8>, Strin
         "[package]\nname = \"horizon-wasm-std\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
     )
     .map_err(|e| e.to_string())?;
+    // The array's length is the transport's own value, which the game checks
+    // (`horizon_group_words`) when it links a group.
+    let words = mod_vocab::wire::GROUP_WORDS;
     std::fs::write(
         dir.join("src/lib.rs"),
-        "// The group's one std: linked whole and exported. The array is the group's shared state: word 0\n// points at its handler table, word 1 counts its cache budget, word 2 guards eviction, words 3.. are eviction callbacks\n// (`horizon_mod_api::wire::guest`).\n#[unsafe(no_mangle)]\npub static horizon_group_state: [core::sync::atomic::AtomicUsize; 32] =\n    [const { core::sync::atomic::AtomicUsize::new(0) }; 32];\n",
+        format!(
+            "// The group's one std: linked whole and exported. The array is the group's shared state (`horizon_mod_api::wire::guest`).\n#[unsafe(no_mangle)]\npub static horizon_group_state: [core::sync::atomic::AtomicUsize; {words}] =\n    [const {{ core::sync::atomic::AtomicUsize::new(0) }}; {words}];\n/// The array's length, which the game checks.\n#[unsafe(no_mangle)]\npub extern \"C\" fn horizon_group_words() -> u32 {{\n    {words}\n}}\n"
+        ),
     )
     .map_err(|e| e.to_string())?;
     let mut command = cargo_command("rustc", "std", &dir, target_dir, toolchain)?;

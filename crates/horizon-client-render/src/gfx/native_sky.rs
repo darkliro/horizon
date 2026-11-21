@@ -8,6 +8,8 @@
 
 use horizon_shader_api::{check::CheckedStage, stages::GROUP};
 
+use super::external::SkyPass;
+use super::native_post::kept::StageReads;
 use super::native_post::{NativeFrame, present_constants};
 use super::wgsl_prefix::{TERRAIN, prefixed, section};
 
@@ -25,6 +27,8 @@ const PACK_ENTRY: &str = "
 pub struct NativeSky {
     pipeline: wgpu::RenderPipeline,
     pub label: String,
+    /// `[sky] reads`: none without.
+    pub(super) kept: Option<StageReads>,
 }
 
 /// terrain.wgsl's sky with every name it declares (and `globals`) prefixed.
@@ -96,11 +100,11 @@ fn pipeline(
 }
 
 /// The sky's naga module and the layout of its pipelines: `globals` at group 0, the frame
-/// at group 3.
+/// at group 3, with the kept resources the stage reads (`kept`).
 fn build(
     device: &wgpu::Device,
     globals: &wgpu::BindGroupLayout,
-    frame: &NativeFrame,
+    (frame, kept): (&NativeFrame, Option<&StageReads>),
     stage: &CheckedStage,
 ) -> Result<(naga::Module, wgpu::PipelineLayout), String> {
     let text = shader_source(&stage.source, frame.linear);
@@ -108,7 +112,7 @@ fn build(
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))?;
     let mut groups: [Option<&wgpu::BindGroupLayout>; GROUP as usize + 1] = Default::default();
     groups[0] = Some(globals);
-    groups[GROUP as usize] = Some(&frame.layout);
+    groups[GROUP as usize] = Some(kept.map_or(&frame.layout, |k| &k.layout));
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Native shader pack sky"),
         bind_group_layouts: &groups,
@@ -119,18 +123,25 @@ fn build(
 
 impl NativeSky {
     /// The pipeline of the pack's sky `stage` with the option values `constants`, drawing
-    /// onto the world's target of `format`; `globals` is the terrain's group 0.
-    pub fn new(
+    /// onto the world's target of `format`; `globals` is the terrain's group 0, and the frame
+    /// with the kept resources the stage reads (`kept`) its group 3.
+    pub(in crate::gfx) fn new(
         device: &wgpu::Device,
         globals: &wgpu::BindGroupLayout,
-        frame: &NativeFrame,
+        (frame, kept): (&NativeFrame, Option<StageReads>),
         stage: &CheckedStage,
         constants: &[(String, f64)],
         format: wgpu::TextureFormat,
     ) -> Result<Self, String> {
-        let (module, layout) = build(device, globals, frame, stage)?;
+        let limits = device.limits();
+        let others = super::native_material::terrain_entries();
+        if let Some(why) = (kept.as_ref()).and_then(|k| k.over(frame, &others, &limits)) {
+            return Err(format!("{}: {why}", stage.file));
+        }
+        let (module, layout) = build(device, globals, (frame, kept.as_ref()), stage)?;
         let present = present_constants(&module, constants);
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&super::dx12_compiler::module_label(&stage.label)),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -143,34 +154,34 @@ impl NativeSky {
             &present,
             format,
         );
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(Self {
             pipeline,
             label: stage.label.clone(),
+            kept,
         })
     }
 
-    /// Draws the sky in a pass whose group 0 is the terrain's.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, frame: &NativeFrame) {
+    /// Draws the sky in a pass whose group 0 is the terrain's (`group`).
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, frame: &NativeFrame, parity: usize) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(GROUP, &frame.group, &[]);
+        pass.set_bind_group(GROUP, self.group(frame, parity), &[]);
         pass.draw(0..3, 0..1);
     }
-}
 
-/// What the renderer hands the pack for its sky's pass of its own (`NativePack::draw_sky_pass`).
-pub struct SkyPass<'a> {
-    pub device: &'a wgpu::Device,
-    pub encoder: &'a mut wgpu::CommandEncoder,
-    /// The world's colour and depth, and the colour's format.
-    pub target: super::timing::Target<'a>,
-    pub depth: &'a wgpu::TextureView,
-    /// The world's clear colour.
-    pub clear: wgpu::Color,
-    /// The terrain's group 0.
-    pub globals: &'a wgpu::BindGroup,
+    /// Its group 3: the frame's, or the one with the kept resources it reads, this frame's
+    /// version `parity`.
+    pub(super) fn group<'a>(
+        &'a self,
+        frame: &'a NativeFrame,
+        parity: usize,
+    ) -> &'a wgpu::BindGroup {
+        let kept = self.kept.as_ref().and_then(|k| k.group(parity));
+        kept.unwrap_or(&frame.group)
+    }
 }
 
 impl super::native_pack::NativePack {
@@ -214,7 +225,7 @@ impl super::native_pack::NativePack {
             ..Default::default()
         });
         pass.set_bind_group(0, globals, &[]);
-        sky.draw(&mut pass, &self.frame);
+        sky.draw(&mut pass, &self.frame, self.post.parity());
     }
 
     /// The pack's sky inside the world pass, whose group 0 is the terrain's. False when the
@@ -223,18 +234,8 @@ impl super::native_pack::NativePack {
         let Some(sky) = &self.sky else {
             return false;
         };
-        sky.draw(pass, &self.frame);
+        sky.draw(pass, &self.frame, self.post.parity());
         true
-    }
-
-    /// The pack's sky stage draws the sun itself, so the renderer leaves out vanilla's.
-    pub fn hides_sun(&self) -> bool {
-        self.sky.is_some() && !self.vanilla_sun
-    }
-
-    /// The pack's sky stage draws the stars itself, so the renderer leaves out vanilla's.
-    pub fn hides_stars(&self) -> bool {
-        self.sky.is_some() && !self.vanilla_stars
     }
 }
 
@@ -351,7 +352,7 @@ mod tests {
                 stage.label = label.to_owned();
                 let format = wgpu::TextureFormat::Rgba8Unorm;
                 let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
-                let sky = NativeSky::new(&device, &globals, &frame, &stage, &[], format);
+                let sky = NativeSky::new(&device, &globals, (&frame, None), &stage, &[], format);
                 let internal = pollster::block_on(internal.pop());
                 assert!(
                     sky.is_ok() && internal.is_none(),
@@ -407,10 +408,11 @@ mod tests {
 
         let gain = [("gain".to_owned(), 1.0)];
         let draw = |stage: &CheckedStage, vanilla: bool| -> Vec<u8> {
-            let sky =
-                NativeSky::new(&device, &globals_layout, &frame, stage, &gain, format).unwrap();
+            let pack = (&frame, None);
+            let sky = NativeSky::new(&device, &globals_layout, pack, stage, &gain, format).unwrap();
             let pipeline = if vanilla {
-                let (module, layout) = build(&device, &globals_layout, &frame, stage).unwrap();
+                let (module, layout) =
+                    build(&device, &globals_layout, (&frame, None), stage).unwrap();
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: None,
                     source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),

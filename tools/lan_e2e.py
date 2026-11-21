@@ -15,7 +15,7 @@ address. The script then checks, from both sides, what a guest's game used to ge
              dimension change, a death and respawn); the inventory opens as its own menu, items kept;
 - crafting:  the guest crafts planks in the inventory's 2x2 grid and opens a crafting table, which
              leaves the host's screen and mouse look alone;
-- datapack-recipe: (--server-thread) a crafting recipe from the world's data pack shows its result in the
+- datapack-recipe: a crafting recipe from the world's data pack shows its result in the
              table of the host's window and of a guest, and taking it crafts (#6733);
 - recipes-hmod: opt-in, requires native Recipes: search original .hmod content, fill the server's
              crafting grid, consume inputs and preserve both players' output after save/rejoin (#9647);
@@ -1314,6 +1314,12 @@ def first_hurt(guest, before, ticks):
     return health
 
 
+def nearest_mob_distance(near, kind, origin):
+    """Distance from `origin` to the closest living `kind` in a `mobs` reply's `near` list, or None."""
+    gaps = [math.dist(m['pos'], origin) for m in near if m['kind'] == kind and m['health'] > 0]
+    return min(gaps) if gaps else None
+
+
 def check_mobs(host, guest, out):
     host('command', command='gamemode creative')
     host('command', command='difficulty normal')
@@ -1321,6 +1327,7 @@ def check_mobs(host, guest, out):
     guest('command', command='gamemode survival')
     guest.wait(10)
     hurt = {}
+    gap = {}
     try:
         for mob, distance in (('zombie', 3), ('skeleton', 7)):
             x, y, z = pos_of(guest)
@@ -1329,13 +1336,17 @@ def check_mobs(host, guest, out):
             low = first_hurt(guest, before, 300)
             guest.shot(out, f'mobs-{mob}')
             host.shot(out, f'mobs-{mob}')
+            # Where the mob stands now, for the report if it never hurt the guest.
+            near = host.raw('mobs', 16).get('near', [])
+            gap[mob] = nearest_mob_distance(near, f'minecraft:{mob}', pos_of(guest))
             host('command', command=f'kill @e[type=minecraft:{mob}]')
             hurt[mob] = (before, low)
     finally:
         host('command', command='gamemode survival')
         host('command', command='time set day')
     for mob, (before, low) in hurt.items():
-        assert low < before, f'the {mob} never hurt the guest: health {before} -> {low} (all: {hurt})'
+        assert low < before, (f'the {mob} never hurt the guest: health {before} -> {low}, '
+                              f'the {mob} stood {gap[mob]} blocks from the guest (all: {hurt})')
     return hurt
 
 
@@ -7469,8 +7480,6 @@ def main():
     parser.add_argument('--bin-dir', help='prebuilt horizon-client and horizon-ctl (default: build with the fast profile)')
     parser.add_argument('--check', action='append', choices=CHECKS, help='run only these checks (repeatable)')
     parser.add_argument('--out', default=str(ROOT / '.local/lan-e2e'), help='screenshots and game logs go here')
-    # The host's world always runs on its server thread; the flag stays for existing callers.
-    parser.add_argument('--server-thread', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.bin_dir:
         bins = Path(args.bin_dir).resolve()
@@ -7492,7 +7501,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     # Recipes is an opt-in native mod; this check requires a game built with it.
     checks = args.check or [name for name in CHECKS if name != 'recipes-hmod']
-    results = run(bins / 'horizon-ctl', out, resources, checks)
+    results = run(lab.binary(bins, 'horizon-ctl'), out, resources, checks)
     (out / 'results.json').write_text(json.dumps({'checks': results}, indent=2) + '\n')
     print(json.dumps(results, indent=1))
     sys.exit(0 if results and all(r['pass'] for r in results.values()) else 1)
@@ -14367,6 +14376,55 @@ def check_loot_give_guest(host, guest, out):
 
 CHECKS += ['loot_give_guest']
 CHECK_FNS['loot_give_guest'] = check_loot_give_guest
+
+
+def check_hive_bees(host, guest, out):
+    """Hive the guest breaks with Silk Touch keeps its bees and honey on the guest's
+    client, not only on the server: the stack arrives with `minecraft:bees` and
+    `minecraft:block_state` (BeehiveBlock.playerWillDestroy, Bees and BlockItemStateProperties'
+    stream codecs)."""
+    x, y, z = (int(v // 1) for v in pos_of(guest))
+    cell = (x, y + 1, z + 2)
+    host('command', command=f'fill {x - 1} {y} {z + 1} {x + 1} {y + 3} {z + 3} minecraft:air')
+    guest('command', command='clear @s')
+    guest('command', command='gamemode survival')
+    # An axe is the hive's tool: Efficiency V netherite breaks it at once (35 / 0.6 / 30 > 1).
+    guest('command', command='item replace entity @s weapon.mainhand with '
+                             'minecraft:netherite_axe[enchantments={silk_touch:1,efficiency:5}]')
+    host('command', command=f'setblock {cell[0]} {cell[1]} {cell[2]} minecraft:beehive[honey_level=5]'
+                            '{bees:[{entity_data:{id:"minecraft:bee"},ticks_in_hive:0,min_ticks_in_hive:2400}]}')
+    guest.wait(10)
+    try:
+        guest.raw('look-at', x + 0.5, y + 1.5, z + 2.5)
+        guest.raw('mouse', 'left', 'click')
+        guest.wait(10)
+        broken = host.raw('block', *cell).get('block')
+        guest.raw('collect', '6')
+        guest.wait(10)
+        inv = guest('inventory')
+        hives = [s for s in inv['hotbar'] + inv['main'] if s and s.get('item') == 'minecraft:beehive']
+        server = server_reply(guest, 'data get entity @s Inventory[{id:"minecraft:beehive"}].components',
+                              'bees')
+        guest.shot(out, 'hive-bees')
+    finally:
+        guest('command', command='gamemode creative')
+        guest('command', command='clear @s')
+    client = hives[0].get('components', '') if hives else ''
+    bee = re.compile(r'id"?:\s*"minecraft:bee"')
+    honey = re.compile(r'honey_level"?:\s*"5"')
+    seen = {'broken': broken, 'client': client, 'server': server,
+            'client bees': len(bee.findall(client)), 'server bees': len(bee.findall(server)),
+            'client honey': bool(honey.search(client)), 'server honey': bool(honey.search(server))}
+    assert broken == 'minecraft:air', f'the hive still stands: {seen}'
+    assert len(hives) == 1, f'the guest picked up {len(hives)} hive stacks: {inv["counts"]}'
+    assert seen['server bees'] == 1 and seen['server honey'], f'the server\'s hive: {seen}'
+    assert seen['client bees'] == 1, f'the guest\'s client lost the bees: {seen}'
+    assert seen['client honey'], f'the guest\'s client lost the honey level: {seen}'
+    return seen
+
+
+CHECKS += ['hive_bees']
+CHECK_FNS['hive_bees'] = check_hive_bees
 
 
 if __name__ == '__main__':

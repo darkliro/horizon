@@ -51,7 +51,7 @@ Pillager.wantsItem	skip:other		dead code: only a white banner passes, and Pillag
 PiglinBrute.createAttributes	skip:data		attributes come from entity-types.json
 PiglinBrute.customServerAiStep	inline	crates/horizon-client/src/mobs/piglin.rs::ai_step	after the goals that pick the target: update_activity, then maybe_play_brute_sound; the goals set in register_brute stand in for vanilla's brain tick
 PiglinBrute.finalizeSpawn	inline	crates/horizon-client/src/mobs/finalize.rs::Ctx::mob	golden axe in the main hand via populate; initMemories is missing
-PiglinBrute.hurtServer	inline	crates/horizon-client/src/mobs/piglin.rs::register_brute	gap: minor: retaliation is the HurtByTarget goal; no PiglinAi.maybeRetaliate for non-piglin attackers
+PiglinBrute.hurtServer	inline	crates/horizon-client/src/mobs/piglin.rs::piglin_hurt	PiglinBruteAi.wasHurtBy is PiglinAi.maybeRetaliate: a hit that passes it calls the adult piglins and brutes to the attacker; another brute's or a piglin's hit is ignored
 PiglinBrute.wantsToPickUp	port	crates/horizon-client/src/mobs/equip.rs::wants_to_pick_up
 PiglinBruteAi.createIdleLookBehaviors	inline	crates/horizon-client/src/mobs/piglin.rs::register_brute	gap: minor: looks at players only (LookAtPlayer); no look at piglins, random look or do-nothing pause
 PiglinBruteAi.createIdleMovementBehaviors	inline	crates/horizon-client/src/mobs/piglin.rs::register_brute	the walk back to the home memory is `BruteStrollHome` (`StrollToPoi(HOME, 0.6F, 2, 100)`); gap: minor: no visits to piglins (`InteractWith`) and no `StrollAroundPoi`, and the goal yields within ten blocks of home where vanilla re-targets it every 80 ticks
@@ -65,7 +65,7 @@ PiglinBruteAi.maybePlayActivitySound	port	crates/horizon-client/src/mobs/piglin.
 PiglinBruteAi.playActivitySound	port	crates/horizon-client/src/mobs/piglin.rs::play_brute_sound	entity.piglin_brute.angry when the fight activity starts
 PiglinBruteAi.setAngerTarget	missing		minor: no 600-tick anger memory; the target goals keep the target instead
 PiglinBruteAi.updateActivity	inline	crates/horizon-client/src/mobs/piglin.rs::update_activity	the first valid activity (fight on a target, else idle for a brute) is stored and voiced on a change; shared with PiglinAi and HoglinAi
-StartAdmiringItemIfSeen.create	inline	crates/horizon-client/src/game/mobs/piglins.rs::Game::piglin_pickups	gap: player: a piglin takes a wanted item and admires it in hand; it does not stop to admire one it only sees on the ground
+StartAdmiringItemIfSeen.create	inline	crates/horizon-gameplay/src/piglins.rs::piglin_pickups	gap: player: a piglin takes a wanted item and admires it in hand; it does not stop to admire one it only sees on the ground
 StopAdmiringIfItemTooFarAway.create	inline	crates/horizon-client/src/mobs/piglin.rs::Memories::admire_seen	the 9 block test on NEAREST_VISIBLE_WANTED_ITEM (squared 81) while the off hand holds what is admired, folded into the admire memory tick
 StopAdmiringIfTiredOfTryingToReachItem.create	inline	crates/horizon-client/src/mobs/piglin.rs::Memories::admire_seen	the 200 tick TIME_TRYING_TO_REACH_ADMIRE_ITEM countdown that ends the admire, then DISABLE_WALK_TO_ADMIRE_ITEM for 200
 Parched.getArrow	inline	crates/horizon-client/src/mobs/undead.rs::perform_ranged_attack	Parched arrows carry weakness for 600 ticks
@@ -74,7 +74,7 @@ Stray.checkStraySpawnRules	port	crates/horizon-client/src/mobs/spawn_rules.rs::c
 Stray.getArrow	inline	crates/horizon-client/src/mobs/undead.rs::perform_ranged_attack	Stray arrows carry slowness for 600 ticks
 CaveSpider.getVehicleAttachmentPoint	port	crates/horizon-client/src/mobs/riders.rs::vehicle_attachment	0.21875 of the scale when the vehicle's box is no wider than the spider's; the wider case falls to the type default
 VillagerDataHolder.finalizeVillagerType	inline	crates/horizon-client/src/mobs/finalize.rs::Ctx::villager_type
-Abilities.apply	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::apply_remote_abilities	gap: minor: invulnerable, flying, may fly and flying speed only; instabuild, may build and walk speed are not applied
+Abilities.apply	port	crates/horizon-client/src/game/network/remote/abilities.rs::Game::apply_remote_abilities	gap: minor: invulnerable, flying, may fly and flying speed only; instabuild, may build and walk speed are not applied
 Abilities.pack	skip:java		record copy for the abilities packet; the flags are read in remote.rs
 PlayerSkin.with	missing		minor: skin patches (body, cape, elytra and model overrides) are not applied on top of a profile skin
 PlayerSkin.Patch.create	skip:java		record factory for the patch; the patch itself is missing (see PlayerSkin.with)
@@ -109,25 +109,25 @@ AbstractMinecartContainer.createMenu	inline	crates/horizon-client/src/game/entit
 AbstractMinecartContainer.remove	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::drop_vehicle_contents	Containers.dropContents on every destroying removal, whatever entity_drops says: the damage path's kill or a creative player's discard, and /kill after the open menu writes its slots back; a loot table still held drops the roll made on load
 MinecartChest.interact	inline	crates/horizon-client/src/game/entities/minecarts.rs::Game::interact_cart	chest arm: opens the cart's items and plays the chest sound
 MinecartCommandBlock.activateMinecart	inline	crates/horizon-client/src/game/entities/minecarts.rs::Game::activate_cart	gap: minor: no command ever runs; the cart holds no command since its editor is missing
-MinecartCommandBlock.defineSynchedData	port	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::new	the cart's `synced_command` and `synced_output` start empty on the cart itself, as `DATA_ID_COMMAND_NAME` and `DATA_ID_LAST_OUTPUT` do
-MinecartCommandBlock.interact	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::remote_use_entity	the client opens the command editor of the cart it right-clicked
+MinecartCommandBlock.defineSynchedData	port	crates/horizon-gameplay/src/minecarts.rs::Minecart::new	the cart's `synced_command` and `synced_output` start empty on the cart itself, as `DATA_ID_COMMAND_NAME` and `DATA_ID_LAST_OUTPUT` do
+MinecartCommandBlock.interact	port	crates/horizon-client/src/game/network/remote/interaction_prediction.rs::Game::remote_use_entity	the client opens the command editor of the cart it right-clicked
 MinecartCommandBlock.onSyncedDataUpdated	inline	crates/horizon-client/src/game/administration/command_minecarts.rs::Game::cart_command_updated	the command is the cart's own field rather than synched entity data, which `onUpdated` copies out
-MinecartCommandBlock.readAdditionalSaveData	inline	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::from_nbt	loads the base command block and syncs its command/output; a changed command invokes setCommand and resets SuccessCount
+MinecartCommandBlock.readAdditionalSaveData	inline	crates/horizon-gameplay/src/minecarts.rs::Minecart::from_nbt	loads the base command block and syncs its command/output; a changed command invokes setCommand and resets SuccessCount
 MinecartCommandBlock.MinecartCommandBase.createCommandSourceStack	port	crates/horizon-client/src/game/administration/command_minecarts.rs::Game::perform_cart_command	the due command runs with the cart as its source: its position, rotation and game master level
 MinecartCommandBlock.MinecartCommandBase.onUpdated	inline	crates/horizon-client/src/game/administration/command_minecarts.rs::Game::cart_command_updated	copies the command and the last output into the cart's synched fields
-MinecartFurnace.addAdditionalSaveData	port	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::to_nbt
+MinecartFurnace.addAdditionalSaveData	port	crates/horizon-gameplay/src/minecarts.rs::Minecart::to_nbt
 MinecartFurnace.addFuel	inline	crates/horizon-client/src/game/entities/minecarts.rs::Game::interact_cart	furnace arm: coal or charcoal adds 3600 ticks of fuel up to 32000
 MinecartFurnace.applyNaturalSlowdown	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::natural_slowdown
-MinecartFurnace.calculateNewPushAlong	port	crates/horizon-client/src/game/entities/minecarts.rs::push_along	the push projected on the movement when both horizontal lengths pass 1.0E-4 and 0.001, else the push; the slow path and the cart tick both call it
+MinecartFurnace.calculateNewPushAlong	port	crates/horizon-gameplay/src/minecarts.rs::push_along	the push projected on the movement when both horizontal lengths pass 1.0E-4 and 0.001, else the push; the slow path and the cart tick both call it
 MinecartFurnace.getDefaultDisplayBlockState	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::display_state	lit furnace while it has fuel
 MinecartFurnace.getMaxSpeed	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::max_speed	half speed on land, three quarters of 0.2 in water
 MinecartFurnace.interact	inline	crates/horizon-client/src/game/entities/minecarts.rs::Game::interact_cart	furnace arm
-MinecartFurnace.readAdditionalSaveData	port	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::from_nbt
+MinecartFurnace.readAdditionalSaveData	port	crates/horizon-gameplay/src/minecarts.rs::Minecart::from_nbt
 MinecartFurnace.tick	inline	crates/horizon-client/src/game/entities/minecarts.rs::Game::tick_cart	furnace variant: fuel counts down, push clears at zero, smoke puffs
 MinecartSpawner.tick	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::tick_cart	BaseSpawner.serverTick at the cart's block (spawner.rs server_tick_spawner_of); its broadcastEvent is an entity event on the cart
 MinecartSpawner.createTicker	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::tick_cart	the server ticker: the CartKind::Spawner arm
-MinecartSpawner.readAdditionalSaveData	port	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::from_nbt	BaseSpawner.load
-MinecartSpawner.addAdditionalSaveData	port	crates/horizon-client/src/game/entities/minecarts.rs::Minecart::to_nbt	BaseSpawner.save
+MinecartSpawner.readAdditionalSaveData	port	crates/horizon-gameplay/src/minecarts.rs::Minecart::from_nbt	BaseSpawner.load
+MinecartSpawner.addAdditionalSaveData	port	crates/horizon-gameplay/src/minecarts.rs::Minecart::to_nbt	BaseSpawner.save
 MinecartSpawner.getDefaultDisplayBlockState	port	crates/horizon-client/src/game/entities/minecarts.rs::Game::display_state	the spawner block
 NewMinecartBehavior	skip:other		experimental minecart_improvements physics; Horizon always runs the old behaviour in minecarts.rs and writes that pack disabled in save.rs
 NewMinecartBehavior.TrackIteration	skip:other		part of the experimental minecart_improvements physics; see NewMinecartBehavior

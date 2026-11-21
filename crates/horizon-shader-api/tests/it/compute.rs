@@ -534,6 +534,18 @@ fn a_compute_file_keeps_the_api_s_rules() {
     );
 }
 
+/// `storageBarrier()` is WGSL's, as `workgroupBarrier()` is: the check takes it in a compute
+/// pass, reached by every invocation, between a write to a kept buffer and a read of it.
+#[test]
+fn a_compute_pass_may_order_its_buffer_writes_with_a_storage_barrier() {
+    let ordered = "override bounces: i32 = 1;\nfn compute(input: ComputeInput) {\n    \
+                   if input.in_bounds {\n        cache[input.cell.x] = vec4<u32>(1u);\n    }\n    \
+                   storageBarrier();\n    \
+                   if input.in_bounds && input.local == 0u {\n        \
+                   cache[input.cell.x] = cache[input.cell.x] + vec4<u32>(1u);\n    }\n}\n";
+    check(&example_with("cache_update.wgsl", ordered)).unwrap();
+}
+
 #[test]
 fn pass_counts_are_bounded() {
     let before = |i: usize| {
@@ -624,7 +636,7 @@ fn a_compute_entry_is_a_dispatch_in_the_chain() {
     );
     for key in [
         "compute = true",
-        "reads = [\"tex\"]",
+        "writes = [\"buf\"]",
         "dispatch = \"pixels\"",
     ] {
         refused(
@@ -863,6 +875,30 @@ fn compute_files_that_trace_are_built_against_the_scene() {
             assert_eq!(scene.contains("ray_query"), traced, "{kind:?}");
             assert_eq!(stub.contains("fn trace("), traced, "{kind:?}");
         }
+    }
+}
+
+/// With `[ray_tracing] lights = true`, a `[[before_world]]` pass and a compute `[[post]]` pass
+/// that name the light functions, and no trace function, are built against the scene with the
+/// light sources (binding 80); the pass of the same pack that names none is built without them.
+#[test]
+fn compute_files_that_name_the_light_sources_get_them() {
+    let counts = "fn compute(input: ComputeInput) {\n    \
+                  if input.in_bounds { hits[input.cell.x] = f32(ray_light_count()); }\n}\n";
+    let near = "fn compute(input: ComputeInput) {\n    \
+                let n = ray_lights_near(vec3<f32>(hits[0]));\n    \
+                let l: RayLight = ray_light(ray_light_at(n.x));\n    \
+                _ = l.position * l.level + l.color * f32(l.material + n.y);\n}\n";
+    let manifest = TRACING.replace("[ray_tracing]\n", "[ray_tracing]\nlights = true\n");
+    let files = [("w.wgsl", counts), ("c.wgsl", near), ("last.wgsl", PICTURE)];
+    let report = check(&pack(&format!("{manifest}{LAST}"), &files)).unwrap();
+    for (kind, lights) in [
+        (StageKind::BeforeWorld, true),
+        (StageKind::Compute, true),
+        (StageKind::Post, false),
+    ] {
+        let stage = report.stages.iter().find(|s| s.kind == kind).unwrap();
+        assert_eq!(stage.traces_lights(), lights, "{kind:?}");
     }
 }
 

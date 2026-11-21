@@ -524,4 +524,79 @@ mod tooltip_tests {
         assert_eq!(layout.bar, [4.0, 8.0 + 3.0 * 9.0 + 4.0]);
         assert_eq!(layout.empty_description, Some([4.0, 8.0]));
     }
+
+    #[test]
+    fn bundle_removes_selected_item_or_defaults_to_last_inserted() {
+        let Some(items) = items() else { return };
+        let bundle = bundle_with(&[
+            ("minecraft:dirt", 5),
+            ("minecraft:stone", 10),
+            ("minecraft:apple", 2),
+        ]);
+        // Initially, selected is -1. remove_one takes index 0 (dirt, first stack).
+        let mut contents = Contents::of(&items, &bundle).unwrap();
+        assert_eq!(contents.selected(), -1);
+        let removed = contents.remove_one(&items).unwrap();
+        assert_eq!(&*removed.item, "minecraft:dirt");
+        assert_eq!(removed.count, 5);
+
+        // When an item is explicitly selected (e.g. index 2: apple):
+        let mut bundle = bundle_with(&[
+            ("minecraft:dirt", 5),
+            ("minecraft:stone", 10),
+            ("minecraft:apple", 2),
+        ]);
+        toggle_selected(&mut bundle, 2);
+        let mut contents = Contents::of(&items, &bundle).unwrap();
+        assert_eq!(contents.selected(), 2);
+        let removed = contents.remove_one(&items).unwrap();
+        assert_eq!(&*removed.item, "minecraft:apple");
+        assert_eq!(removed.count, 2);
+        assert_eq!(contents.selected(), -1);
+    }
+}
+
+#[cfg(test)]
+mod stack_size_tests {
+    use super::*;
+
+    /// Stone with its own `max_stack_size`, or with the component removed
+    /// (`!minecraft:max_stack_size`).
+    fn stone(size: Option<i32>, count: u32) -> ItemStack {
+        let mut stack = ItemStack::new("minecraft:stone", count);
+        let data = stack.data_mut();
+        match size {
+            Some(n) => data.set_other("minecraft:max_stack_size", Some(Tag::Int(n))),
+            None => data.set_other(
+                "!minecraft:max_stack_size",
+                Some(Tag::Compound(Default::default())),
+            ),
+        };
+        stack.tidy();
+        stack
+    }
+
+    /// `BundleContents.getWeight` weighs a stack by
+    /// `1 / ItemStack.getMaxStackSize()`: four stones with a `max_stack_size`
+    /// of 4 fill a bundle, and one whose component is removed is vanilla's
+    /// `getOrDefault` default of 1, which fills it on its own.
+    #[test]
+    fn a_bundle_weighs_a_stack_by_its_own_max_stack_size() {
+        let Some(items) = crate::items::prepared_items() else {
+            return;
+        };
+        let bundle = ItemStack::new("minecraft:bundle", 1);
+        let mut four = stone(Some(4), 8);
+        let mut contents = Contents::of(&items, &bundle).expect("a bundle");
+        assert_eq!(contents.room_for(&items, &four), 4);
+        assert_eq!(contents.try_insert(&items, &mut four, true), 4);
+        assert_eq!(four.count, 4);
+        assert!(contents.is_full());
+        let mut one = stone(None, 2);
+        let mut contents = Contents::of(&items, &bundle).expect("a bundle");
+        assert_eq!(contents.room_for(&items, &one), 1);
+        assert_eq!(contents.try_insert(&items, &mut one, true), 1);
+        assert_eq!(one.count, 1);
+        assert!(contents.is_full());
+    }
 }

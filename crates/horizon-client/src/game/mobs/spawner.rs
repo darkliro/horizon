@@ -575,8 +575,17 @@ impl Game<'_> {
             p.position.y.floor() as i32,
             p.position.z.floor() as i32,
         ];
-        let (keys, trial_keys, vault_keys) =
-            nearby_remote_spawner_keys(&self.world.block_entities, center);
+        let (keys, trial_keys, vault_keys) = {
+            use horizon_client::block_entities::Listed;
+            let listed = &self.world.block_entities;
+            nearby_remote_spawner_keys(
+                listed
+                    .listed(Listed::Spawner)
+                    .chain(listed.listed(Listed::TrialSpawner))
+                    .chain(listed.listed(Listed::Vault)),
+                center,
+            )
+        };
         self.client_tick_spawners(&keys);
         for key in trial_keys {
             self.client_tick_trial_spawner(key);
@@ -602,7 +611,7 @@ impl Game<'_> {
         let shadow_sections = self
             .renderer
             .as_ref()
-            .filter(|_| self.pack_ids.is_some() && self.pack_shadow_casters.0);
+            .filter(|_| self.pack_ids.is_some() && self.occlusion.shadow_casters.0);
         for (key, (_, mob)) in &self.spawners.displays {
             let at = glam::DVec3::new(f64::from(key.0), f64::from(key.1), f64::from(key.2));
             if at.distance_squared(camera) >= 64.0 * 64.0 {

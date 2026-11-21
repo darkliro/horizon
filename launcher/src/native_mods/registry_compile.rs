@@ -278,7 +278,7 @@ pub(super) fn compile(
                 toml::toml! { path = facade_relative package = facade_package }.into(),
             );
         }
-        let mut link_args = sdk.link_args.clone();
+        let mut link_args = Vec::new();
         if cfg!(target_os = "linux") {
             link_args.push("-Wl,--disable-new-dtags".into());
             link_args.push("-Wl,-rpath,$ORIGIN".into());
@@ -407,13 +407,9 @@ pub(super) fn compile(
     plan.fetch_with_patches(rust, out, &patches)?;
     let metadata = super::registry_inventory::read(rust, out)
         .map_err(|error| plan.explain_resolution(error))?;
-    plan.check_mods(&super::registry_lock::RegistryLock::parse(
+    plan.check(&super::registry_lock::RegistryLock::parse(
         &super::read_lock(out)?,
     )?)?;
-    plan.allowed.check_partial_resolution(
-        &super::registry_lock::RegistryLock::parse(&super::read_lock(out)?)?,
-        &plan.game,
-    )?;
     let mut game_names = plan.game.game_package_names();
     for registry in patches.values() {
         for name in registry.as_table().expect("validated SDK patches").keys() {
@@ -430,7 +426,7 @@ pub(super) fn compile(
     for (name, path) in &externs {
         prebuilt::refuse_closure_rlib("horizon_patch", name, path)?;
     }
-    let mut link_args = sdk.link_args.clone();
+    let mut link_args = Vec::new();
     if cfg!(target_os = "linux") {
         link_args.push("-Wl,--disable-new-dtags".into());
         link_args.push("-Wl,-rpath,$ORIGIN".into());

@@ -14,6 +14,9 @@ pub struct SpriteAnimation {
     frames: Arc<Vec<Vec<u8>>>,
     clip: Arc<AnimationClip>,
     materials: [Option<Arc<Vec<Vec<u8>>>>; 2],
+    /// The frames' width and height when they are not square; `None` for square frames. Frames
+    /// stay as decoded: [`SpriteAnimation::frame_at`] makes a frame's square at any size.
+    shape: Option<[u32; 2]>,
 }
 /// What an animated sprite shows: `frame`, mixed `millis` thousandths of the
 /// way towards `next` (0 for a single frame).
@@ -78,13 +81,22 @@ impl SpriteAnimation {
             }
         }
     }
+    /// A frame nearest-resampled to `width` x `height`. A frame that is not square yet reads as
+    /// its square (of its longer side) would: the texels the layer will hold.
     pub fn resized_pixels(&self, frame: usize, width: u32, height: u32) -> Vec<u8> {
         let source = self.pixels(frame);
-        let side = (source.len() / 4).isqrt() as u32;
-        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        let [fw, fh] = self
+            .shape
+            .unwrap_or_else(|| [(source.len() / 4).isqrt() as u32; 2]);
+        let side = u64::from(fw.max(fh));
+        let pick = |i: u32, extent: u32, along: u32| {
+            u64::from(i) * side / u64::from(extent) * u64::from(along) / side
+        };
+        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
         for y in 0..height {
+            let row = pick(y, height, fh) * u64::from(fw);
             for x in 0..width {
-                let offset = ((y * side / height * side + x * side / width) * 4) as usize;
+                let offset = ((row + pick(x, width, fw)) * 4) as usize;
                 out.extend_from_slice(&source[offset..offset + 4]);
             }
         }
@@ -92,6 +104,15 @@ impl SpriteAnimation {
     }
     pub fn pixels(&self, frame: usize) -> &[u8] {
         &self.frames[frame]
+    }
+    /// A frame as its layer shows it at `side` x `side`: its square of its longer side,
+    /// nearest-resampled to `side` (the texels squaring then `resample` picked).
+    pub fn frame_at(&self, frame: usize, side: u32) -> Vec<u8> {
+        let source = self.pixels(frame);
+        let [w, h] = self
+            .shape
+            .unwrap_or_else(|| [(source.len() / 4).isqrt() as u32; 2]);
+        region_layer(source, w, [0, 0, w, h], side)
     }
     pub fn frame_count(&self) -> usize {
         self.frames.len()
@@ -122,9 +143,12 @@ pub struct Sprites {
     pub translucent: Vec<bool>,
     /// Each layer's `MipmapGenerator` settings.
     pub mips: Vec<crate::mipmap::Settings>,
-    /// Each layer's frames at the texture's own resolution (square), and the
-    /// frame shown first.
+    /// Each layer's frames at the texture's own resolution, its longer side first, and the
+    /// frame shown first. Square unless `shapes` names the layer.
     native: Vec<(u32, Arc<Vec<Vec<u8>>>, usize)>,
+    /// The width and height of the frames of each layer whose frames are not square: they are
+    /// squared once, at the layers' size, by [`Sprites::finish`].
+    shapes: std::collections::HashMap<u32, [u32; 2]>,
     /// Each layer's LabPBR maps (`_n` normals, `_s` specular) beside its texture: their
     /// frames at their own resolution (square).
     pbr: Vec<[Option<(u32, Vec<Vec<u8>>)>; 2]>,
@@ -145,7 +169,22 @@ pub struct Sprites {
     /// Textures [`Sprites::prefetch`] decoded ahead of their insert, by sprite name or
     /// resource path.
     ready: std::collections::HashMap<String, crate::sprite_cache::Decoded>,
+    /// Textures past [`max_layers`] that the missing texture stands in for
+    /// ([`Sprites::plan_within_capacity`]).
+    dropped: std::collections::HashSet<String>,
+    /// The one missing texture layer those share.
+    overflow_layer: Option<u32>,
 }
+/// The most block sprite layers the renderer draws from: its arrays
+/// (`gfx::SPRITE_ARRAYS`) of the layers known before the GPU is (`gfx::sprite_split`,
+/// 2048 unless `HORIZON_SPRITE_SPLIT` asks for fewer). A GPU that holds fewer per array
+/// still refuses more, as before.
+pub fn max_layers() -> usize {
+    crate::gfx::SPRITE_ARRAYS as usize * crate::gfx::sprite_split() as usize
+}
+/// Layers [`Sprites::plan_within_capacity`] keeps free for what later loaders add
+/// (connected-texture tiles, run-time sprites).
+const LATE_LAYERS: usize = 512;
 /// Edge length of vanilla's block textures: the smallest array layer.
 pub const SPRITE_SIZE: u32 = 16;
 /// The largest sprite array (all layers of the top mip level) when the settings leave it to
@@ -191,14 +230,66 @@ const LAYERS_AT_LEAST: u64 = 1024;
 pub const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
 /// A layer's specular map where its texture has none: rough, not metal, not glowing.
 pub const NO_SPECULAR: [u8; 4] = [0, 0, 0, 0];
-/// The largest power-of-two side from `start` down (at least `SPRITE_SIZE`) at which `layers`
-/// square RGBA layers take at most `bytes`.
+/// The largest power-of-two side from `start` down (at least `SPRITE_SIZE`, at most a full
+/// atlas side, whatever the budget) at which `layers` square RGBA layers take at most `bytes`.
 fn side_within(start: u32, layers: u64, bytes: u64) -> u32 {
-    let mut size = start.max(SPRITE_SIZE).next_power_of_two();
-    while size > SPRITE_SIZE && layers * u64::from(size) * u64::from(size) * 4 > bytes {
+    let mut size = start
+        .clamp(SPRITE_SIZE, crate::hud::MAX_ATLAS_SIZE)
+        .next_power_of_two();
+    let take = |size: u32| u128::from(layers) * u128::from(size).pow(2) * 4;
+    while size > SPRITE_SIZE && take(size) > u128::from(bytes) {
         size /= 2;
     }
     size
+}
+/// The most texels of a non-square frame's square [`hash_square`] walks.
+const SQUARE_HASHED: u64 = 1 << 24;
+/// Hashes the square of its longer side a `w` x `h` RGBA frame becomes, row by row, without
+/// making it: still textures share a layer when their squares are equal, as when frames were
+/// squared at decoding. A square frame is its own square. A non-square frame whose square has
+/// more than [`SQUARE_HASHED`] texels hashes its own texels and shape instead: walking its square
+/// would cost more than the frame, and a different shape gives the same square only for
+/// degenerate content (a uniform colour, rows repeating as squaring repeats them).
+fn hash_square(frame: &[u8], [w, h]: [u32; 2], hasher: &mut impl std::hash::Hasher) {
+    let side = u64::from(w.max(h));
+    if w != h && side * side > SQUARE_HASHED {
+        hasher.write_u8(1);
+        hasher.write(frame);
+        hasher.write_u32(w);
+        hasher.write_u32(h);
+        return;
+    }
+    hasher.write_u8(0);
+    hasher.write_u64(side);
+    let mut row = Vec::with_capacity(side as usize * 4);
+    for r in 0..side {
+        let source_row = (r * u64::from(h) / side) as usize * w as usize;
+        row.clear();
+        for c in 0..side {
+            let at = (source_row + (c * u64::from(w) / side) as usize) * 4;
+            row.extend_from_slice(&frame[at..at + 4]);
+        }
+        hasher.write(&row);
+    }
+}
+/// The `size` x `size` layer of the `w` x `h` region at `x, y` of RGBA `pixels`, `stride` pixels
+/// wide. Its texels are those of the region nearest-resampled to a square of its longer side and
+/// that square nearest-resampled to `size` (`resample`), picked in one pass, so the square of
+/// the longer side is never made.
+fn region_layer(pixels: &[u8], stride: u32, [x, y, w, h]: [u32; 4], size: u32) -> Vec<u8> {
+    let side = u64::from(w.max(h));
+    let pick = |i: u32, extent: u32| {
+        (u64::from(i) * side / u64::from(size) * u64::from(extent) / side) as usize
+    };
+    let mut out = Vec::with_capacity(size as usize * size as usize * 4);
+    for row in 0..size {
+        let source_row = y as usize + pick(row, h);
+        for column in 0..size {
+            let at = (source_row * stride as usize + x as usize + pick(column, w)) * 4;
+            out.extend_from_slice(&pixels[at..at + 4]);
+        }
+    }
+    out
 }
 /// Reduce data maps by selecting whole texels: material IDs and sentinel bytes cannot be averaged.
 fn shrink_map(frame: Vec<u8>, side: u32, max: u32) -> (u32, Vec<u8>) {
@@ -263,19 +354,31 @@ impl Sprites {
             return true;
         }
         let (side, frames, _) = &self.native[layer as usize];
+        let [width, height] = self.shapes.get(&layer).copied().unwrap_or([*side; 2]);
         let side = *side as usize;
+        let (width, height) = (width as usize, height as usize);
         let range = |axis: usize| {
             let lo = uv.iter().map(|p| p[axis]).fold(f32::INFINITY, f32::min);
             let hi = uv.iter().map(|p| p[axis]).fold(f32::NEG_INFINITY, f32::max);
             let clamp = |v: f32| (v.max(0.0) as usize).min(side);
             clamp((lo * side as f32).floor())..clamp((hi * side as f32).ceil())
         };
-        let (columns, rows) = (range(0), range(1));
+        // The frame's texels under the square's range: squaring repeats each, in order, so the
+        // range's ends map to the ends of a contiguous run, and each texel is read once.
+        let source = |r: std::ops::Range<usize>, extent: usize| match r.is_empty() {
+            true => 0..0,
+            false => {
+                // In `u64`: a side past 65536 overflows these products in a 32-bit `usize`.
+                let map = |i: usize| (i as u64 * extent as u64 / side as u64) as usize;
+                map(r.start)..map(r.end - 1) + 1
+            }
+        };
+        let (columns, rows) = (source(range(0), width), source(range(1), height));
         frames.iter().all(|frame| {
             rows.clone().all(|y| {
                 columns
                     .clone()
-                    .all(|x| frame[(y * side + x) * 4 + 3] == 255)
+                    .all(|x| frame[(y * width + x) * 4 + 3] == 255)
             })
         })
     }
@@ -313,21 +416,24 @@ impl Sprites {
             self.size = size;
             return;
         }
-        let mut resized = Vec::with_capacity(self.native.len());
         self.pixels.clear();
-        for (from, frames, initial) in &self.native {
-            // Native frames already match the atlas size: share the immutable
-            // buffers with animations rather than copying every frame again.
-            let frames: Arc<Vec<Vec<u8>>> = if *from == size {
-                Arc::clone(frames)
-            } else {
-                Arc::new(frames.iter().map(|f| resample(f, *from, size)).collect())
-            };
-            self.pixels.extend_from_slice(&frames[*initial]);
-            resized.push(frames);
+        // Only the frame each layer shows first is made at the layers' size. Animations keep
+        // their frames as decoded (shared, not copied); the animator makes them at its own edge
+        // and charges what it builds first (`gfx::animate`).
+        for (layer, (from, frames, initial)) in self.native.iter().enumerate() {
+            let frame = &frames[*initial];
+            match self.shapes.get(&(layer as u32)) {
+                Some(&[w, h]) => self
+                    .pixels
+                    .extend(region_layer(frame, w, [0, 0, w, h], size)),
+                None if *from == size => self.pixels.extend_from_slice(frame),
+                None => self.pixels.extend(resample(frame, *from, size)),
+            }
         }
         for animation in &mut self.animations {
-            animation.frames = resized[animation.layer as usize].clone();
+            let layer = animation.layer;
+            animation.frames = Arc::clone(&self.native[layer as usize].1);
+            animation.shape = self.shapes.get(&layer).copied();
         }
         self.size = size;
         self.normals.clear();
@@ -339,20 +445,13 @@ impl Sprites {
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
             log::info!("Horizon: LabPBR maps at {pbr_size} px, {layers} layers");
-            for animation in &mut self.animations {
-                animation.materials = self.pbr[animation.layer as usize].each_ref().map(|map| {
-                    map.as_ref().map(|(from, frames)| {
-                        Arc::new(
-                            frames
-                                .iter()
-                                .map(|frame| resample(frame, *from, pbr_size))
-                                .collect(),
-                        )
-                    })
-                });
-            }
+            // Only each layer's initial frame is made at the shared size here. Animations keep
+            // the companion frames as stored; the material animator resamples the one frame it
+            // shows from its own side (`gfx::material_animate`), as it does for colour frames.
+            let mut stored = Vec::with_capacity(self.pbr.len());
             for (layer, maps) in std::mem::take(&mut self.pbr).into_iter().enumerate() {
-                for (map, (out, none)) in maps.into_iter().zip([
+                let mut kept: [Option<Arc<Vec<Vec<u8>>>>; 2] = [None, None];
+                for ((map, kept), (out, none)) in maps.into_iter().zip(&mut kept).zip([
                     (&mut self.normals, FLAT_NORMAL),
                     (&mut self.specular, NO_SPECULAR),
                 ]) {
@@ -362,10 +461,15 @@ impl Sprites {
                             let (from, pixels) =
                                 shrink_map(frames[initial].clone(), from, pbr_size);
                             out.extend(resample(&pixels, from, pbr_size));
+                            *kept = Some(Arc::new(frames));
                         }
                         None => out.extend(none.repeat((pbr_size * pbr_size) as usize)),
                     }
                 }
+                stored.push(kept);
+            }
+            for animation in &mut self.animations {
+                animation.materials = stored[animation.layer as usize].clone();
             }
         }
     }
@@ -396,6 +500,9 @@ impl Sprites {
     }
     /// Like `insert`, but refuses unreadable or oversized PNG data before decoding.
     pub fn insert_limited(&mut self, name: &str, max: u64) -> Result<u32> {
+        if self.dropped.contains(name) {
+            return Ok(self.overflow_layer());
+        }
         let bytes = self.limited_png(name, max)?;
         if let Some(layer) = self.layers.get(name) {
             return Ok(*layer);
@@ -410,6 +517,9 @@ impl Sprites {
         if let Some(layer) = self.layers.get(name) {
             return Ok(*layer);
         }
+        if self.dropped.contains(name) {
+            return Ok(self.overflow_layer());
+        }
         let loaded = self.load(name, None);
         self.or_missing(name, loaded)
     }
@@ -422,28 +532,106 @@ impl Sprites {
                 if name != "minecraft:missingno" {
                     log::warn!("Horizon: using the missing texture for {name}: {e}");
                 }
-                // MissingTextureAtlasSprite.generateMissingImage: 16x16,
-                // magenta and black quarters.
-                let frame: Vec<u8> = (0..SPRITE_SIZE * SPRITE_SIZE)
-                    .flat_map(|i| {
-                        let (x, y) = (i % SPRITE_SIZE, i / SPRITE_SIZE);
-                        if (y < SPRITE_SIZE / 2) ^ (x < SPRITE_SIZE / 2) {
-                            [248, 0, 248, 255]
-                        } else {
-                            [0, 0, 0, 255]
-                        }
-                    })
-                    .collect();
-                let layer = u32::try_from(self.native.len())?;
-                self.opaque.push(true);
-                self.pbr.push([None, None]);
-                self.translucent.push(false);
-                self.mips.push(crate::mipmap::Settings::default());
+                // Past the renderer's layers, the shared missing texture.
+                let layer = if self.full() {
+                    self.overflow_layer()
+                } else {
+                    self.push_missing()?
+                };
                 self.layers.insert(name.to_owned(), layer);
-                self.native.push((SPRITE_SIZE, Arc::new(vec![frame]), 0));
                 Ok(layer)
             }
         }
+    }
+    /// A new layer of vanilla's missing texture (`MissingTextureAtlasSprite.generateMissingImage`:
+    /// 16x16, magenta and black quarters), under no name.
+    fn push_missing(&mut self) -> Result<u32> {
+        let frame: Vec<u8> = (0..SPRITE_SIZE * SPRITE_SIZE)
+            .flat_map(|i| {
+                let (x, y) = (i % SPRITE_SIZE, i / SPRITE_SIZE);
+                if (y < SPRITE_SIZE / 2) ^ (x < SPRITE_SIZE / 2) {
+                    [248, 0, 248, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        let layer = u32::try_from(self.native.len())?;
+        self.opaque.push(true);
+        self.pbr.push([None, None]);
+        self.translucent.push(false);
+        self.mips.push(crate::mipmap::Settings::default());
+        self.native.push((SPRITE_SIZE, Arc::new(vec![frame]), 0));
+        Ok(layer)
+    }
+    /// Whether one more layer would pass [`max_layers`] (keeping room for the shared missing
+    /// texture's own).
+    fn full(&self) -> bool {
+        self.native.len() + usize::from(self.overflow_layer.is_none()) >= max_layers()
+    }
+    /// Fit a loader's textures (`names`, about to be inserted) within [`max_layers`], with
+    /// room left for later loaders: past it the GPU arrays can't hold them and the game
+    /// would not start. The mod namespaces with the most new textures give theirs up first,
+    /// in reverse name order, until the rest fit; the missing texture stands in for them.
+    /// Vanilla's textures are never given up. A pack that fits is left as it is.
+    pub fn plan_within_capacity<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        self.plan_within(names, max_layers().saturating_sub(LATE_LAYERS));
+    }
+    fn plan_within<'a>(&mut self, names: impl IntoIterator<Item = &'a str>, capacity: usize) {
+        let new: std::collections::BTreeSet<&str> = names
+            .into_iter()
+            .filter(|n| !self.layers.contains_key(*n) && !self.dropped.contains(*n))
+            .collect();
+        let mut over = (self.native.len() + new.len()).saturating_sub(capacity);
+        if over == 0 {
+            return;
+        }
+        // The missing texture's own layer.
+        over += usize::from(self.overflow_layer.is_none());
+        let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for name in &new {
+            match name.split_once(':') {
+                Some((ns, _)) if ns != "minecraft" => {
+                    by_namespace.entry(ns).or_default().push(name)
+                }
+                _ => {}
+            }
+        }
+        let mut namespaces: Vec<_> = by_namespace.into_iter().collect();
+        namespaces.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        let mut given_up = Vec::new();
+        // Each name keeps a layer, the missing texture's: geometry that finds its sprites by
+        // name (`sprite_layers`, a native mod's section geometry) draws the checkerboard
+        // instead of leaving the face out.
+        let missing = self.overflow_layer();
+        for (ns, names) in namespaces {
+            if over == 0 {
+                break;
+            }
+            let take = names.len().min(over);
+            for name in names.iter().rev().take(take) {
+                self.dropped.insert((*name).to_owned());
+                self.layers.insert((*name).to_owned(), missing);
+            }
+            over -= take;
+            given_up.push(format!("{ns} ({take})"));
+        }
+        log::warn!(
+            "Horizon: block textures past the {} layers the renderer draws from; \
+             the missing texture stands in for {}",
+            max_layers(),
+            given_up.join(", ")
+        );
+    }
+    /// The missing texture layer the textures past [`max_layers`] share, under no name of its
+    /// own.
+    fn overflow_layer(&mut self) -> u32 {
+        if let Some(layer) = self.overflow_layer {
+            return layer;
+        }
+        let layer = self.push_missing().unwrap_or(0);
+        self.overflow_layer = Some(layer);
+        layer
     }
     /// Decode on every thread the textures about to be inserted: sprite names, or resource
     /// paths outside `textures/` (as [`Sprites::insert_file`] takes them). A loader that adds
@@ -456,6 +644,7 @@ impl Sprites {
             .into_iter()
             .filter(|name| {
                 !self.layers.contains_key(*name)
+                    && !self.dropped.contains(*name)
                     && !self.ready.contains_key(*name)
                     && self.disk.as_ref().is_none_or(|d| d.get(name).is_none())
             })
@@ -595,6 +784,7 @@ impl Sprites {
                 }
                 let decoded = crate::sprite_cache::Decoded {
                     side,
+                    frame_size: [side, side],
                     animation: animation.clone().filter(|_| frames.len() > 1),
                     strategy,
                     alpha_cutoff_bias,
@@ -609,7 +799,9 @@ impl Sprites {
             .collect::<Result<Vec<_>>>()?;
         // Where Fusion doesn't draw the sheet (items, other models), the lone tile rather than
         // the whole sheet squeezed square, whose size would set every layer's.
-        if let (Some(&own), Some(&first)) = (self.layers.get(name), tiles.iter().flatten().next()) {
+        if let (Some(&own), Some(&first)) = (self.layers.get(name), tiles.iter().flatten().next())
+            && Some(own) != self.overflow_layer
+        {
             self.show_as(own, first);
         }
         Ok(tiles)
@@ -619,6 +811,10 @@ impl Sprites {
         self.still.retain(|_, l| *l != layer);
         let (l, s) = (layer as usize, source as usize);
         self.native[l] = self.native[s].clone();
+        match self.shapes.get(&source).copied() {
+            Some(shape) => self.shapes.insert(layer, shape),
+            None => self.shapes.remove(&layer),
+        };
         self.opaque[l] = self.opaque[s];
         self.translucent[l] = self.translucent[s];
         self.mips[l] = self.mips[s];
@@ -686,26 +882,25 @@ impl Sprites {
         let columns = png_width / width;
         let count = columns * (png_height / height);
         // Layers are square; a frame of another shape is nearest-resampled to
-        // its longer side so UVs (normalized per layer) are unchanged.
+        // its longer side so UVs (normalized per layer) are unchanged. That square is
+        // made only at the layers' size (`lay_out`).
         let side = width.max(height);
         let mut frames = Vec::new();
+        // The frames keep their own shape: together exactly the decoded image's pixels.
         for index in 0..count {
-            let x = index % columns * width;
+            let x = (index % columns * width) as usize;
             let y = index / columns * height;
-            let mut frame = Vec::with_capacity((side * side * 4) as usize);
-            for row in 0..side {
-                let source_row = y + row * height / side;
-                for column in 0..side {
-                    let offset =
-                        ((source_row * png_width + x + column * width / side) * 4) as usize;
-                    frame.extend_from_slice(&pixels[offset..offset + 4]);
-                }
+            let mut frame = Vec::with_capacity(width as usize * height as usize * 4);
+            for row in y..y + height {
+                let start = (row as usize * png_width as usize + x) * 4;
+                frame.extend_from_slice(&pixels[start..start + width as usize * 4]);
             }
             frames.push(frame);
         }
         let texture = texture_section(metadata.as_ref());
         Ok(crate::sprite_cache::Decoded {
             side,
+            frame_size: [width, height],
             frames,
             animation: animation_text,
             strategy: texture
@@ -731,6 +926,7 @@ impl Sprites {
     fn register(&mut self, name: &str, decoded: crate::sprite_cache::Decoded) -> Result<u32> {
         let crate::sprite_cache::Decoded {
             side,
+            frame_size,
             frames,
             animation: animation_text,
             strategy,
@@ -771,7 +967,7 @@ impl Sprites {
             (animation.is_none() && frames.len() == 1 && !self.apart.contains(name)).then(|| {
                 use std::hash::{Hash, Hasher};
                 let mut frame = std::collections::hash_map::DefaultHasher::new();
-                frames[0].hash(&mut frame);
+                hash_square(&frames[0], frame_size, &mut frame);
                 let mut maps = std::collections::hash_map::DefaultHasher::new();
                 pbr.hash(&mut maps);
                 StillKey {
@@ -788,6 +984,13 @@ impl Sprites {
         if let Some(&same) = still.as_ref().and_then(|k| self.still.get(k)) {
             self.layers.insert(name.to_owned(), same);
             return Ok(same);
+        }
+        // Past what the renderer draws from, a texture no plan foresaw shows missing too
+        // (with room for the missing texture's own layer).
+        if self.full() {
+            let layer = self.overflow_layer();
+            self.layers.insert(name.to_owned(), layer);
+            return Ok(layer);
         }
         if let Some(key) = still {
             self.still.insert(key, layer);
@@ -806,6 +1009,7 @@ impl Sprites {
                 frames: frames.clone(),
                 clip: Arc::new(clip),
                 materials: [None, None],
+                shape: (frame_size != [side, side]).then_some(frame_size),
             });
         }
         self.mips.push(settings);
@@ -814,8 +1018,26 @@ impl Sprites {
         self.pbr.push(pbr);
         self.layers.insert(name.to_owned(), layer);
         self.native.push((side, frames, initial));
+        if frame_size != [side, side] {
+            self.shapes.insert(layer, frame_size);
+        }
         Ok(layer)
     }
+}
+
+/// Refuses `count` square frames of `side` before they are made: a frame of any shape becomes a
+/// square layer, so a 32768x1 image of a few hundred bytes squared at its own side would ask for
+/// 4 GiB. A side may be at most [`MAX_ATLAS_SIZE`](crate::hud::MAX_ATLAS_SIZE), and all `count`
+/// squares together at most a full atlas, the ceiling [`crate::hud::read_png`] puts on the image.
+pub(crate) fn check_frames(side: u32, count: u32) -> std::result::Result<(), String> {
+    let atlas = u128::from(crate::hud::MAX_ATLAS_SIZE);
+    let texels = u128::from(count) * u128::from(side) * u128::from(side);
+    if u128::from(side) > atlas || texels > atlas * atlas {
+        return Err(format!(
+            "{count} frames of {side}x{side} are larger than any atlas"
+        ));
+    }
+    Ok(())
 }
 
 /// A PNG's width, height and pixels as RGBA. From the prepared data file
@@ -825,16 +1047,7 @@ fn read_rgba(source: &ResourceSource, path: &str) -> Result<(u32, u32, Vec<u8>)>
     decode_rgba(&source.read(path)?)
 }
 pub(crate) fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.ignore_checksums(true);
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info()?;
-    let mut bytes = vec![
-        0;
-        reader
-            .output_buffer_size()
-            .ok_or("sprite exceeds decoder limits")?
-    ];
+    let (mut reader, mut bytes) = crate::hud::read_png(bytes)?;
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
     let mut pixels = Vec::with_capacity(info.width as usize * info.height as usize * 4);
@@ -894,18 +1107,12 @@ fn pbr_map(
     }
     let side = w.max(h);
     let output_side = side_within(side, LAYERS_AT_LEAST, max_map_bytes()).min(side);
+    // Only the frames at `output_side` are made.
+    check_frames(output_side, columns * rows).ok()?;
     let frames = (0..columns * rows)
         .map(|index| {
             let (x, y) = (index % columns * w, index / columns * h);
-            let mut frame = Vec::with_capacity((side * side * 4) as usize);
-            for row in 0..side {
-                for column in 0..side {
-                    let offset =
-                        (((y + row * h / side) * map_width + x + column * w / side) * 4) as usize;
-                    frame.extend_from_slice(&pixels[offset..offset + 4]);
-                }
-            }
-            resample(&frame, side, output_side)
+            region_layer(&pixels, map_width, [x, y, w, h], output_side)
         })
         .collect();
     Some((output_side, frames))
@@ -941,6 +1148,7 @@ pub(crate) fn test_frames(layer: u32, frames: Vec<Vec<u8>>, metadata: &str) -> S
         clip: Arc::new(metadata.clip(frames.len() as u32).unwrap().unwrap()),
         frames: Arc::new(frames),
         materials: [None, None],
+        shape: None,
     }
 }
 
@@ -966,6 +1174,38 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Past the arrays' layers, the namespaces with the most new textures give theirs up
+    /// first and share the missing texture, under their own names; vanilla's are never
+    /// given up.
+    #[test]
+    fn textures_past_the_layers_give_way_by_namespace() {
+        let mut sprites = Sprites::default();
+        let names = [
+            "big:block/a",
+            "big:block/b",
+            "big:block/c",
+            "small:block/x",
+            "minecraft:block/stone",
+        ];
+        sprites.plan_within(names, 4);
+        // Five new and four fit, one of them the missing texture's: two give way.
+        let dropped: std::collections::BTreeSet<_> = sprites.dropped.iter().cloned().collect();
+        assert_eq!(
+            dropped,
+            ["big:block/b".to_owned(), "big:block/c".to_owned()].into()
+        );
+        let missing = sprites.insert("big:block/c").unwrap();
+        assert_eq!(sprites.insert("big:block/b").unwrap(), missing);
+        assert_eq!(sprites.count(), 1);
+        // Found by name too, as geometry that never inserts looks them up.
+        assert_eq!(sprites.layers.get("big:block/b"), Some(&missing));
+        assert_eq!(sprites.layers.get("big:block/a"), None);
+        // A load that fits gives nothing up.
+        let mut fits = Sprites::default();
+        fits.plan_within(names, 5);
+        assert!(fits.dropped.is_empty());
+    }
     use std::fs::{self, File};
     #[test]
     fn archive_sprites_keep_deferred_reads_and_cache_on_their_reload_snapshot() -> Result<()> {
@@ -1087,11 +1327,13 @@ mod tests {
             ..Default::default()
         };
         sprites.finish();
+        // Both animations share their layers' decoded frames; a smaller one shows them
+        // resampled to the layers' size.
         assert!(Arc::ptr_eq(&sprites.animations[0].frames, &native));
-        assert!(!Arc::ptr_eq(&sprites.animations[1].frames, &smaller));
+        assert!(Arc::ptr_eq(&sprites.animations[1].frames, &smaller));
         assert_eq!(sprites.animations[0].pixels(1), pixels[1].as_slice());
         let resized = resample(&smaller[0], 8, SPRITE_SIZE);
-        assert_eq!(sprites.animations[1].pixels(0), resized.as_slice());
+        assert_eq!(sprites.animations[1].frame_at(0, SPRITE_SIZE), resized);
         assert_eq!(&sprites.pixels[..pixels[1].len()], pixels[1].as_slice());
     }
     #[test]
@@ -1140,6 +1382,44 @@ mod tests {
         assert_eq!(sprites.normals[16 * 16 * 4..][..4], FLAT_NORMAL);
         assert_eq!(sprites.specular[..4], NO_SPECULAR);
         assert_eq!(sprites.specular.len(), 2 * 16 * 16 * 4);
+    }
+    /// Companion maps are kept like colour frames: a 16 px map's frames stay at 16 px beside a
+    /// 128 px map, and only the initial frame is made at the shared size. A sheet of 16448
+    /// such frames would be 16448 x 128^2 x 4 = 1,028 MiB per map resampled up front, against
+    /// 16448 x 16^2 x 4 = 16 MiB as stored; the material animator resamples the one frame it
+    /// shows (`gfx::material_animate`).
+    #[test]
+    fn companion_frames_keep_their_stored_size() {
+        assert_eq!(16_448u64 * 128 * 128 * 4, 1_028 << 20);
+        assert_eq!(16_448u64 * 16 * 16 * 4, 16_842_752);
+        let maps: Vec<Vec<u8>> = (0..4u8).map(|i| [i, 1, 2, 255].repeat(16 * 16)).collect();
+        let mut sprites = Sprites {
+            native: vec![
+                (16, Arc::new(vec![vec![0; 16 * 16 * 4]; 4]), 2),
+                (128, Arc::new(vec![vec![0; 128 * 128 * 4]]), 0),
+            ],
+            pbr: vec![
+                [None, Some((16, maps.clone()))],
+                [None, Some((128, vec![[7, 7, 7, 255].repeat(128 * 128)]))],
+            ],
+            animations: vec![test_frames(
+                0,
+                vec![vec![0; 16 * 16 * 4]; 4],
+                r#"{"frametime":1}"#,
+            )],
+            ..Default::default()
+        };
+        sprites.finish();
+        assert_eq!(sprites.pbr_size, 128);
+        assert_eq!(
+            sprites.animations[0].material_frames(1),
+            Some(maps.as_slice())
+        );
+        assert_eq!(sprites.animations[0].material_frames(0), None);
+        assert_eq!(
+            sprites.specular[..128 * 128 * 4],
+            resample(&maps[2], 16, 128)
+        );
     }
     #[test]
     fn companion_grid_and_static_map_follow_colour_frame_selection() {
@@ -1677,6 +1957,7 @@ mod tests {
         let animation = SpriteAnimation {
             layer: 0,
             materials: [None, None],
+            shape: None,
             frames: Arc::new(vec![vec![], vec![], vec![]]),
             clip: Arc::new(AnimationMetadata::from_json(r#"{"frames":[{"index":2,"time":8},{"index":1,"time":3},{"index":1,"time":2},0]}"#).unwrap().clip(3).unwrap().unwrap()),
         };
@@ -1717,5 +1998,352 @@ mod tests {
         let stepped = test_clip(16, 0, r#"{"frametime":4}"#);
         assert_eq!(stepped.blend(1), blend(0, 0, 0));
         assert_eq!(stepped.blend(5), blend(1, 1, 0));
+    }
+}
+
+#[cfg(test)]
+mod png_size_tests {
+    use crate::hud::{claimed_size_png, grey_png};
+
+    /// A block texture whose header claims more pixels than a full atlas is refused from its
+    /// header, as an undecodable one is, before memory for its pixels is reserved.
+    #[test]
+    fn a_sprite_claiming_a_huge_size_is_refused() {
+        let error = super::decode_rgba(&claimed_size_png(16_385, 16_384)).unwrap_err();
+        assert!(
+            error.to_string().contains("16385x16384 PNG is larger"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_sprite_at_the_side_limit_still_decodes() {
+        let side = crate::atlas_sources::MAX_SPRITE_SIDE as u32;
+        let (width, height, rgba) = super::decode_rgba(&grey_png(side, 1)).unwrap();
+        assert_eq!((width, height, rgba.len()), (side, 1, side as usize * 4));
+    }
+
+    fn decode_sprite(
+        png: &[u8],
+        mcmeta: Option<&str>,
+    ) -> crate::Result<crate::sprite_cache::Decoded> {
+        let path = "assets/minecraft/textures/block/test.png";
+        let files = mcmeta.map(|text| {
+            (
+                format!("{path}.mcmeta"),
+                horizon_assets::resource_source::Resource::bytes(text.as_bytes().to_vec()),
+            )
+        });
+        let source = super::ResourceSource::indexed(files.into_iter().collect());
+        super::Sprites::decode_file_data(&source, path, "minecraft:block/test", Some(png))
+    }
+
+    /// A real 32768x1 (or 1x32768) PNG is a few hundred bytes and decodes to 128 KiB; its
+    /// square of 32768 (4 GiB) is never made: the frame keeps its shape until the layers' size
+    /// is known.
+    #[test]
+    fn a_sprite_far_from_square_keeps_its_shape() {
+        let side = crate::atlas_sources::MAX_SPRITE_SIDE as u32;
+        for (width, height) in [(side, 1), (1, side)] {
+            let decoded = decode_sprite(&grey_png(width, height), None).unwrap();
+            assert_eq!((decoded.side, decoded.frame_size), (side, [width, height]));
+            assert_eq!(decoded.frames.len(), 1);
+            assert_eq!(decoded.frames[0].len(), side as usize * 4);
+        }
+    }
+
+    /// An RGBA image whose texel at (x, y) is unlike its neighbours'.
+    fn pattern(width: u32, height: u32) -> Vec<u8> {
+        (0..width * height)
+            .flat_map(|i| {
+                let (x, y) = (i % width, i / width);
+                [x as u8, y as u8, (x * 7 + y * 13) as u8, 255]
+            })
+            .collect()
+    }
+    fn png_of(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(pixels).unwrap();
+        writer.finish().unwrap();
+        encoded
+    }
+    /// What Horizon did before frames kept their shape: the region squared at its longer side,
+    /// then that square resampled to `size`.
+    fn squared_then_resampled(
+        pixels: &[u8],
+        stride: u32,
+        [x, y, w, h]: [u32; 4],
+        size: u32,
+    ) -> Vec<u8> {
+        let side = w.max(h);
+        let mut square = Vec::new();
+        for row in 0..side {
+            let source_row = y + row * h / side;
+            for column in 0..side {
+                let offset = ((source_row * stride + x + column * w / side) * 4) as usize;
+                square.extend_from_slice(&pixels[offset..offset + 4]);
+            }
+        }
+        super::resample(&square, side, size)
+    }
+
+    /// The one-pass layer picks the same texels as squaring then resampling, for square and
+    /// non-square regions, scaled up, down and kept.
+    #[test]
+    fn a_region_layer_matches_squaring_then_resampling() {
+        for (w, h, size) in [
+            (16, 16, 16),
+            (16, 16, 32),
+            (16, 16, 8),
+            (24, 10, 32),
+            (24, 10, 24),
+            (24, 10, 16),
+            (10, 24, 32),
+            (7, 3, 16),
+            (1, 32, 16),
+            (32, 1, 64),
+            (64, 2, 1024),
+        ] {
+            let stride = w + 5;
+            let pixels = pattern(stride, h + 4);
+            assert_eq!(
+                super::region_layer(&pixels, stride, [3, 2, w, h], size),
+                squared_then_resampled(&pixels, stride, [3, 2, w, h], size),
+                "{w}x{h} to {size}"
+            );
+        }
+    }
+
+    /// Layers and animation frames after `finish` are byte for byte what they were when frames
+    /// were squared at decoding: a square-frame strip, an interpolated sheet of 24x10 frames,
+    /// and a still 24x10 texture.
+    #[test]
+    fn finished_layers_are_unchanged() {
+        for (width, height, frame, mcmeta) in [
+            (16, 48, [16, 16], Some(r#"{"animation":{}}"#)),
+            (
+                24,
+                40,
+                [24, 10],
+                Some(r#"{"animation":{"width":24,"height":10,"interpolate":true}}"#),
+            ),
+            (24, 10, [24, 10], None),
+        ] {
+            let pixels = pattern(width, height);
+            let path = "assets/minecraft/textures/block/test.png";
+            let mut files = vec![(
+                path.to_owned(),
+                horizon_assets::resource_source::Resource::bytes(png_of(width, height, &pixels)),
+            )];
+            if let Some(text) = mcmeta {
+                files.push((
+                    format!("{path}.mcmeta"),
+                    horizon_assets::resource_source::Resource::bytes(text.as_bytes().to_vec()),
+                ));
+            }
+            let source = super::ResourceSource::indexed(files.into_iter().collect());
+            let mut sprites = super::Sprites::new(source);
+            sprites.insert("minecraft:block/test").unwrap();
+            sprites.finish();
+            let [fw, fh] = frame;
+            let expected: Vec<Vec<u8>> = (0..height / fh)
+                .map(|i| squared_then_resampled(&pixels, width, [0, i * fh, fw, fh], sprites.size))
+                .collect();
+            assert_eq!(sprites.pixels, expected[0], "{width}x{height}");
+            match mcmeta {
+                Some(_) => {
+                    let animation = &sprites.animations[0];
+                    let frames: Vec<Vec<u8>> = (0..animation.frame_count())
+                        .map(|f| animation.frame_at(f, sprites.size))
+                        .collect();
+                    assert_eq!(frames, expected);
+                }
+                None => assert!(sprites.animations.is_empty()),
+            }
+        }
+    }
+
+    /// 1024x8224 with 1024x32 frames (257 of them) decodes to 32 MiB and loads; charged as 257
+    /// squares of 1024 it passed a full atlas and was refused. A small sheet of the same shape
+    /// loads with its frames as cut, and at the real size only the layers' size decides: its
+    /// frames animate at layers of 512 and below and stay still at 1024 (257 x 1024^2 texels
+    /// is 0.4% over a full atlas).
+    #[test]
+    fn a_sheet_of_wide_frames_loads() {
+        let mcmeta = r#"{"animation":{"width":64,"height":2}}"#;
+        let decoded = decode_sprite(&grey_png(64, 2 * 257), Some(mcmeta)).unwrap();
+        assert_eq!((decoded.side, decoded.frame_size), (64, [64, 2]));
+        assert_eq!(decoded.frames.len(), 257);
+        assert!(decoded.frames.iter().all(|f| f.len() == 64 * 2 * 4));
+        assert!(super::check_frames(512, 257).is_ok());
+        assert!(super::check_frames(1024, 257).is_err());
+    }
+
+    /// An animated HUD sprite is read before `finish` squares its frames: it reads each
+    /// frame as its square would, and as it does once squared.
+    #[test]
+    fn a_frame_not_yet_square_resizes_as_its_square() {
+        let frame = pattern(4, 2);
+        let square = super::region_layer(&frame, 4, [0, 0, 4, 2], 4);
+        let mut wide = super::test_frames(0, vec![frame.clone(), frame], r#"{"frametime":1}"#);
+        let squared = super::test_frames(0, vec![square.clone(), square], r#"{"frametime":1}"#);
+        wide.shape = Some([4, 2]);
+        for (width, height) in [(4, 4), (8, 8), (3, 5), (16, 2)] {
+            assert_eq!(
+                wide.resized_pixels(1, width, height),
+                squared.resized_pixels(1, width, height),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// Opacity under a quad reads the frame's own texels: a 4x1 frame whose last texel is
+    /// see-through is opaque under its left three quarters only.
+    #[test]
+    fn opacity_of_a_frame_not_yet_square() {
+        let mut frame = [9, 9, 9, 255].repeat(4);
+        frame[15] = 0;
+        let sprites = super::Sprites {
+            native: vec![(4, std::sync::Arc::new(vec![frame]), 0)],
+            shapes: std::collections::HashMap::from([(0, [4, 1])]),
+            opaque: vec![false],
+            ..Default::default()
+        };
+        let quad = |u: f32| [[0.0, 0.0], [u, 0.0], [u, 1.0], [0.0, 1.0]];
+        assert!(sprites.region_opaque(0, &quad(0.75)));
+        assert!(!sprites.region_opaque(0, &quad(1.0)));
+    }
+
+    /// `finish` makes only the frame a layer shows first at the layers' size: 65 frames of
+    /// 2048x1 (520 KiB as decoded) would be 65 x 2048^2 texels (1.06 GiB) squared. The animation
+    /// keeps its decoded frames; the animator charges what it would build (`gfx::animate`).
+    #[test]
+    fn finish_makes_only_the_first_frame_at_the_layers_size() {
+        let frames: Vec<Vec<u8>> = (0..65u8).map(|i| [i, 0, 0, 255].repeat(2048)).collect();
+        let native = std::sync::Arc::new(frames.clone());
+        let mut sprites = super::Sprites {
+            native: vec![(2048, native.clone(), 0)],
+            shapes: std::collections::HashMap::from([(0, [2048, 1])]),
+            pbr: vec![[None, None]],
+            animations: vec![super::test_frames(0, frames, r#"{"frametime":1}"#)],
+            ..Default::default()
+        };
+        sprites.finish();
+        assert_eq!(sprites.size, 2048);
+        assert!(std::sync::Arc::ptr_eq(
+            &sprites.animations[0].frames,
+            &native
+        ));
+        assert_eq!(sprites.pixels.len(), 2048 * 2048 * 4);
+        assert_eq!(sprites.pixels[..4], [0, 0, 0, 255]);
+    }
+
+    /// A 1024x4112 sheet of 16x16 frames (16448 of them) beside 128 px textures: squared at the
+    /// layers' size its frames would be 1,028 MiB, while the animator builds them at their own
+    /// 16 px edge (about 21.4 MiB of chains, `gfx::animate`) and plays them. A small sheet of
+    /// 16x16 frames beside a 128 px texture keeps its frames as decoded, and shows each as the
+    /// frames squared at 128 did.
+    #[test]
+    fn small_frames_beside_large_textures_keep_their_size() {
+        assert!(super::check_frames(16, 16_448).is_ok());
+        let sheet = pattern(32, 32);
+        let path = "assets/minecraft/textures/block/test.png";
+        let large = "assets/minecraft/textures/block/large.png";
+        let bytes = |b: Vec<u8>| horizon_assets::resource_source::Resource::bytes(b);
+        let mcmeta = r#"{"animation":{"width":16,"height":16}}"#;
+        let source = super::ResourceSource::indexed(
+            [
+                (path.to_owned(), bytes(png_of(32, 32, &sheet))),
+                (format!("{path}.mcmeta"), bytes(mcmeta.as_bytes().to_vec())),
+                (large.to_owned(), bytes(grey_png(128, 128))),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut sprites = super::Sprites::new(source);
+        sprites.insert("minecraft:block/test").unwrap();
+        sprites.insert("minecraft:block/large").unwrap();
+        sprites.finish();
+        assert_eq!(sprites.size, 128);
+        let animation = &sprites.animations[0];
+        assert_eq!(animation.frame_count(), 4);
+        for f in 0..4u32 {
+            assert_eq!(animation.pixels(f as usize).len(), 16 * 16 * 4);
+            let region = [f % 2 * 16, f / 2 * 16, 16, 16];
+            assert_eq!(
+                animation.frame_at(f as usize, 128),
+                squared_then_resampled(&sheet, 32, region, 128)
+            );
+        }
+    }
+
+    /// The LabPBR sizing of a tall, narrow companion map: its side is clamped before the
+    /// budget is charged, which overflowed `u64` for 1024 layers of a 2^28 side.
+    #[test]
+    fn the_layer_size_of_a_huge_side_stays_in_range() {
+        let maps = super::map_bytes(super::DEFAULT_TEXTURE_BUDGET);
+        assert_eq!(
+            super::side_within(1 << 28, super::LAYERS_AT_LEAST, maps),
+            128
+        );
+        assert_eq!(super::side_within(u32::MAX, 1, u64::MAX), 16_384);
+        // Every input at its maximum: no overflow, the smallest side.
+        assert_eq!(
+            super::side_within(u32::MAX, u64::MAX, u64::MAX),
+            super::SPRITE_SIZE
+        );
+        assert_eq!(super::side_within(16_385, 1, u64::MAX), 16_384);
+    }
+
+    /// Still textures share a layer when their squares are equal: a patterned 2x4 texture and
+    /// a 4x4 copy with each column doubled, as before frames kept their shape.
+    #[test]
+    fn stills_with_equal_squares_hash_alike() {
+        use std::hash::Hasher;
+        let hash = |frame: &[u8], shape: [u32; 2]| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            super::hash_square(frame, shape, &mut hasher);
+            hasher.finish()
+        };
+        let narrow = pattern(2, 4);
+        let doubled: Vec<u8> = narrow.chunks(4).flat_map(|p| [p, p].concat()).collect();
+        assert_eq!(hash(&narrow, [2, 4]), hash(&doubled, [4, 4]));
+        assert_ne!(hash(&narrow, [2, 4]), hash(&pattern(4, 4), [4, 4]));
+    }
+
+    #[test]
+    fn a_tall_animation_strip_still_loads() {
+        let decoded = decode_sprite(&grey_png(16, 64), Some(r#"{"animation":{}}"#)).unwrap();
+        assert_eq!((decoded.side, decoded.frames.len()), (16, 4));
+        assert_eq!(decoded.frames[3], [128, 128, 128, 255].repeat(256));
+    }
+
+    /// A strip of 16x16 frames a little over 32768 pixels tall (about 2 MiB) loads in the Java
+    /// game: its sheet is longer than any texture side, its frames are small.
+    #[test]
+    fn a_strip_longer_than_any_texture_side_loads() {
+        let height = crate::atlas_sources::MAX_SPRITE_SIDE as u32 + 16;
+        let decoded = decode_sprite(&grey_png(16, height), Some(r#"{"animation":{}}"#)).unwrap();
+        assert_eq!(
+            (decoded.side, decoded.frames.len()),
+            (16, height as usize / 16)
+        );
+    }
+
+    /// The largest frame the check lets through is 1 GiB, too heavy to decode in CI: its edges
+    /// are tested on the check alone.
+    #[test]
+    fn frames_are_bounded_by_the_atlas() {
+        let atlas = crate::hud::MAX_ATLAS_SIZE;
+        assert_eq!(super::check_frames(atlas, 1), Ok(()));
+        assert!(super::check_frames(atlas + 1, 1).is_err());
+        assert!(super::check_frames(atlas, 2).is_err());
+        assert_eq!(super::check_frames(16, atlas * atlas / 256), Ok(()));
+        assert!(super::check_frames(16, atlas * atlas / 256 + 1).is_err());
+        assert!(super::check_frames(u32::MAX, u32::MAX).is_err());
     }
 }

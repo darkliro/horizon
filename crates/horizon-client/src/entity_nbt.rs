@@ -89,8 +89,21 @@ fn hidden_effect_from_nbt(effect: &'static str, tag: &Tag) -> crate::effects::Ef
 pub fn kind(tag: &Tag) -> Option<String> {
     horizon_client_core::identifier::normalize_id(&text(tag.get("id"))?)
 }
+/// The clamp `Entity.load` applies to every saved position: ±3.0000512E7 on x
+/// and z, ±2.0E7 on y.
+pub fn clamp_loaded_position(p: [f64; 3]) -> [f64; 3] {
+    [
+        p[0].clamp(-30_000_512.0, 30_000_512.0),
+        p[1].clamp(-20_000_000.0, 20_000_000.0),
+        p[2].clamp(-30_000_512.0, 30_000_512.0),
+    ]
+}
+/// `Entity.load`'s `Pos`: the saved coordinates, clamped to the world's limits.
 pub fn position(tag: &Tag) -> Option<Vec3> {
-    read_doubles::<3>(tag.get("Pos")).map(|p| Vec3::new(p[0], p[1], p[2]))
+    read_doubles::<3>(tag.get("Pos")).map(|p| {
+        let p = clamp_loaded_position(p);
+        Vec3::new(p[0], p[1], p[2])
+    })
 }
 pub fn uuid(tag: &Tag) -> Option<[i32; 4]> {
     uuid_from_tag(tag.get("UUID"))
@@ -107,6 +120,41 @@ pub fn loaded_motion(tag: &Tag) -> Vec3 {
 }
 pub fn rotation(tag: &Tag) -> [f32; 2] {
     read_doubles::<2>(tag.get("Rotation")).map_or([0.0; 2], |r| [r[0] as f32, r[1] as f32])
+}
+/// `Entity.baseTick` for a burning entity Horizon keeps as its loaded compound:
+/// one tick off a positive `Fire`, which an unset or spent `Fire` leaves alone.
+pub fn count_down_fire(tag: &mut Tag) {
+    let Tag::Compound(c) = tag else { return };
+    if let Some(ticks) = number(c.get(&"Fire".into())).map(|v| v as i16)
+        && ticks > 0
+    {
+        c.insert("Fire".into(), Tag::Short(ticks - 1));
+    }
+}
+/// `Entity.baseTick` of a fire-immune entity (an `AreaEffectCloud`): a positive
+/// `Fire` is cleared on its tick, while a loaded 0 or negative value stays.
+pub fn clear_positive_fire(tag: &mut Tag) {
+    let Tag::Compound(c) = tag else { return };
+    if let Some(ticks) = number(c.get(&"Fire".into())).map(|v| v as i16)
+        && ticks > 0
+    {
+        c.insert("Fire".into(), Tag::Short(0));
+    }
+}
+/// A saved Rotation as `Entity.load` takes it (`setRot`, read off vanilla 26.3 by the parity rows): the yaw `% 360`
+/// (so 400 loads as 40 but 270 stays 270 and -190 stays -190: Java's remainder keeps the sign) and the pitch
+/// `% 360` clamped to [-90, 90]; a component that is not finite is discarded (`setYRot`/`setXRot`) and loads as
+/// 0. What a save writes is read with [`rotation`].
+pub fn loaded_rotation(tag: &Tag) -> [f32; 2] {
+    let [yaw, pitch] = rotation(tag);
+    [
+        if yaw.is_finite() { yaw % 360.0 } else { 0.0 },
+        if pitch.is_finite() {
+            (pitch % 360.0).clamp(-90.0, 90.0)
+        } else {
+            0.0
+        },
+    ]
 }
 /// `TagValueInput.getBooleanOr`: a numeric tag's byteValue is nonzero, with a false default.
 pub fn flag(tag: &Tag, key: &str) -> bool {
@@ -1703,7 +1751,7 @@ fn put_sulfur_attributes(map: &mut Compound, m: &Mob) {
 /// `Brain.Packed`: the memories finalizeSpawn set, over the saved ones.
 /// `CustomName`: a text component saved as a string, a compound or a list,
 /// flattened as `Component.getString` does (`translate`, `extra`).
-pub(crate) fn custom_name(tag: &Tag) -> Option<String> {
+fn custom_name(tag: &Tag) -> Option<String> {
     match tag.get("CustomName")? {
         Tag::String(s) => Some(s.to_string_lossy()),
         t @ (Tag::Compound(_) | Tag::List(_)) => Some(name_text(t).plain()),
@@ -1762,12 +1810,15 @@ fn mob_from_nbt_at(
     authoritative: bool,
 ) -> Option<Mob> {
     let kind = types.get(&self::kind(tag)?)?.clone();
-    let [yaw, pitch] = rotation(tag);
+    let [yaw, pitch] = loaded_rotation(tag);
     let mut m = if authoritative {
         Mob::with_random(id, kind, position, yaw, random)
     } else {
         Mob::remote_with_random(id, kind, position, yaw, random)
     };
+    // `Entity.load` runs after the constructor, so the saved yaw wins over
+    // what a type's register does to it (a shulker's register zeroes it).
+    m.yaw = yaw;
     m.velocity = motion(tag);
     m.head_pitch = pitch;
     // LivingEntity.readAdditionalSaveData: `setSharedFlag(7, getBooleanOr(FallFlying, false))`.
@@ -2727,12 +2778,13 @@ pub fn evoker_fangs_to_nbt(
     owner: Option<[i32; 4]>,
     uuid: [i32; 4],
     raw: Option<&Tag>,
+    live_motion: Option<Vec3>,
 ) -> Tag {
     let mut tag = Base {
         id: "minecraft:evoker_fangs",
         uuid,
         position,
-        motion: raw.map(motion).unwrap_or(Vec3::ZERO),
+        motion: live_motion.unwrap_or_else(|| raw.map(motion).unwrap_or(Vec3::ZERO)),
         rotation: [yaw, raw.map(rotation).unwrap_or([0.0; 2])[1]],
         on_ground: raw.is_some_and(|t| flag(t, "OnGround")),
         fall_distance: raw.map_or(0.0, |t| ground_from_nbt(t).1),
@@ -3602,7 +3654,8 @@ pub fn cushion_to_nbt(c: &Cushion, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
         uuid,
         position: c.position,
         motion: Vec3::ZERO,
-        rotation: [c.yaw, 0.0],
+        // The cushion never turns: its saved pitch is the one it was loaded with.
+        rotation: [c.yaw, raw.map_or(0.0, |t| loaded_rotation(t)[1])],
         on_ground,
         fall_distance,
     };
@@ -3625,13 +3678,8 @@ pub fn cushion_from_nbt(tag: &Tag, id: u32) -> Option<Cushion> {
             position.z.floor() as i32,
         ],
     };
-    let yaw = match tag.get("Rotation") {
-        Some(Tag::List(l)) => l
-            .first()
-            .and_then(|v| crate::save::float(Some(v)))
-            .unwrap_or(0.0) as f32,
-        _ => 0.0,
-    };
+    // `Entity.load`: the yaw `% 360` (a cushion keeps no pitch of its own: the saved one is read as loaded).
+    let yaw = loaded_rotation(tag)[0];
     let color =
         crate::entities::dye_index(&text(tag.get("color")).unwrap_or_else(|| "white".into()));
     Some(Cushion {
@@ -3693,6 +3741,25 @@ mod cushion_tests {
         assert_eq!(loaded.color_name(), "red");
         assert_eq!(loaded.check_interval, 0);
         assert_eq!(loaded.bounds(), cushion.bounds());
+    }
+
+    #[test]
+    fn a_summoned_cushion_keeps_its_yaw_and_pitch_through_a_save() {
+        // summon ... {Rotation:[75f,20f]}: the saved yaw 75 and pitch 20 come back.
+        let raw = Tag::compound([
+            ("Pos", Tag::List(vec![Tag::Double(0.5f64.to_bits()); 3])),
+            (
+                "Rotation",
+                Tag::List(vec![
+                    Tag::Float(75f32.to_bits()),
+                    Tag::Float(20f32.to_bits()),
+                ]),
+            ),
+        ]);
+        let cushion = cushion_from_nbt(&raw, 1).unwrap();
+        assert_eq!(cushion.yaw, 75.0);
+        let saved = cushion_to_nbt(&cushion, [1, 2, 3, 4], Some(&raw));
+        assert_eq!(rotation(&saved), [75.0, 20.0]);
     }
 }
 /// `ItemFrame.setDirection`: a frame on a wall turns to face away from it
@@ -4445,7 +4512,7 @@ mod tests {
         .0;
         let at = super::Vec3::new(1.0, 200.0, 1.0);
         let fall = |raw: Option<&super::Tag>| match super::evoker_fangs_to_nbt(
-            at, 0.0, 99, None, [1; 4], raw,
+            at, 0.0, 99, None, [1; 4], raw, None,
         )
         .get("fall_distance")
         {
@@ -6506,6 +6573,30 @@ mod tests {
         map.remove(&"Fire".into());
         assert_eq!(orbs_from_nbt(&tag)[0].fire_ticks, 0);
     }
+    /// `Entity.baseTick` takes one tick off a burning `Fire` (`Fire:300s` reads
+    /// 299 after one tick); 0 and -1 stay. A fire-immune cloud clears only a
+    /// positive `Fire` on its tick.
+    #[test]
+    fn a_loaded_fire_counts_down_and_a_cloud_clears_it() {
+        let fire = |snbt: &str| {
+            let mut tag = horizon_core::nbt::parse_snbt(snbt).unwrap().0;
+            super::count_down_fire(&mut tag);
+            number(tag.get("Fire"))
+        };
+        assert_eq!(fire("{Fire:300s}"), Some(299));
+        assert_eq!(fire("{Fire:1s}"), Some(0));
+        assert_eq!(fire("{Fire:0s}"), Some(0));
+        assert_eq!(fire("{Fire:-1s}"), Some(-1));
+        let cleared = |snbt: &str| {
+            let mut tag = horizon_core::nbt::parse_snbt(snbt).unwrap().0;
+            super::clear_positive_fire(&mut tag);
+            number(tag.get("Fire"))
+        };
+        assert_eq!(cleared("{Fire:300s}"), Some(0));
+        assert_eq!(cleared("{Fire:-5s}"), Some(-5));
+        assert_eq!(cleared("{Fire:0s}"), Some(0));
+        assert_eq!(cleared("{Age:5}"), None);
+    }
 }
 
 /// `Brain`'s two measured Warden Unit memories, using actual existing slots.
@@ -6803,6 +6894,15 @@ pub fn apply_item_components(m: &mut Mob, stack: &crate::items::ItemStack) {
     let Some(components) = stack.data() else {
         return;
     };
+    // SulfurCube.applyImplicitComponent(SULFUR_CUBE_CONTENT), before the
+    // custom name: setItemSlotAndDropWhenKilled(BODY, the absorbed block).
+    if m.species() == crate::mobs::Species::SulfurCube
+        && let Some(body) = components
+            .other("minecraft:sulfur_cube_content")
+            .and_then(item_from_nbt)
+    {
+        m.extra.set_body_stack(Some(body));
+    }
     if let Some(name) = stack.custom_name() {
         m.custom_name = Some(name);
         // Entity.applyImplicitComponent(CUSTOM_NAME): the whole text.
@@ -11158,5 +11258,75 @@ mod equine_temper_preservation_tests {
             let nbt = mob_to_nbt(&ravager, [0; 4], None, None, |_| None);
             assert_eq!(nbt.get("attributes"), Some(&saved));
         }
+    }
+}
+
+#[cfg(test)]
+mod sulfur_bucket_content_tests {
+    use super::*;
+    use crate::mobs::Species;
+
+    fn mob(species: Species, id: &str) -> Mob {
+        let mut kind = crate::mobs::sensor_scan_tests::kind();
+        let ty = Arc::make_mut(&mut kind);
+        ty.species = species;
+        ty.id = id.into();
+        Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0)
+    }
+
+    /// `MobBucketItem.spawn` → `SulfurCube.applyImplicitComponent`: a cube
+    /// released from its bucket wears the block the bucket recorded
+    /// (`minecraft:sulfur_cube_content`) as its body again (#17990).
+    #[test]
+    fn a_released_sulfur_cube_keeps_the_block_its_bucket_carried() {
+        let mut cube = mob(Species::SulfurCube, "minecraft:sulfur_cube");
+        cube.extra.set_body(Some("minecraft:oak_planks".into()));
+        let mut bucket = crate::items::ItemStack::new("minecraft:sulfur_cube_bucket", 1);
+        bucket.extra = Some(Box::new(bucket_components(&cube)));
+        let bucket = item_from_nbt(&item_to_nbt(&bucket)).unwrap();
+
+        let mut released = mob(Species::SulfurCube, "minecraft:sulfur_cube");
+        apply_item_components(&mut released, &bucket);
+        assert_eq!(released.extra.body_id(), Some("minecraft:oak_planks"));
+
+        let empty = crate::items::ItemStack::new("minecraft:sulfur_cube_bucket", 1);
+        let mut released = mob(Species::SulfurCube, "minecraft:sulfur_cube");
+        apply_item_components(&mut released, &empty);
+        assert_eq!(released.extra.body_id(), None, "a bucket without content");
+
+        let mut cod = mob(Species::Cod, "minecraft:cod");
+        apply_item_components(&mut cod, &bucket);
+        assert_eq!(cod.extra.body_id(), None, "only a sulfur cube reads it");
+    }
+}
+
+#[cfg(test)]
+mod loaded_rotation_tests {
+    use super::*;
+
+    fn tag(yaw: f32, pitch: f32) -> Tag {
+        Tag::compound([(
+            "Rotation",
+            Tag::List(vec![Tag::Float(yaw.to_bits()), Tag::Float(pitch.to_bits())]),
+        )])
+    }
+
+    /// vanilla 26.3's values (the parity rows): yaw `% 360`, pitch `% 360` clamped to +-90.
+    #[test]
+    fn a_saved_rotation_loads_like_vanilla() {
+        assert_eq!(loaded_rotation(&tag(400.0, 100.0)), [40.0, 90.0]);
+        assert_eq!(loaded_rotation(&tag(270.0, 370.0)), [270.0, 10.0]);
+        assert_eq!(loaded_rotation(&tag(-190.0, -100.0)), [-190.0, -90.0]);
+        assert_eq!(loaded_rotation(&tag(180.0, 45.0)), [180.0, 45.0]);
+        assert_eq!(loaded_rotation(&tag(73.0, -24.0)), [73.0, -24.0]);
+        // a non-finite component is discarded: it loads as 0 and a save writes 0
+        assert_eq!(loaded_rotation(&tag(f32::NAN, 20.0)), [0.0, 20.0]);
+        assert_eq!(loaded_rotation(&tag(30.0, f32::INFINITY)), [30.0, 0.0]);
+        // a save writes the raw value (a painting's yaw 270 from its facing) and reads it back as it is
+        assert_eq!(rotation(&tag(270.0, 10.0)), [270.0, 10.0]);
+        assert_eq!(
+            loaded_rotation(&Tag::compound(Vec::<(&str, Tag)>::new())),
+            [0.0, 0.0]
+        );
     }
 }

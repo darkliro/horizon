@@ -851,6 +851,27 @@ fn a_shader_pack_goes_by_the_game_of_the_instance_it_is_for() {
     );
     assert_eq!(install(&for_0_2, &selected.home).unwrap(), "1.0.0");
 
+    // An installed game that didn't say its lines (too slow at its first start, say): no shader
+    // pack goes in by the launcher's own line, not even one refused as made for another game,
+    // and the next install asks it again and goes by its answer.
+    let quiet = "nightly-2026-11-17-bbbbbbb";
+    fs::create_dir_all(crate::backend::version_dir(quiet)).unwrap();
+    fs::write(crate::backend::version_dir(quiet).join(".installed"), "").unwrap();
+    crate::instances::create("Quiet", None).unwrap();
+    let quiet_home = crate::instances::edit("Quiet", |meta| meta.version = Some(quiet.into()))
+        .unwrap()
+        .home;
+    assert_eq!(
+        install(&for_0_1, &quiet_home).unwrap_err(),
+        "Soft Glow: the installed game didn't say which shader API it serves. Try again."
+    );
+    assert!(
+        !quiet_home.join("mod-browser").exists(),
+        "nothing was downloaded"
+    );
+    crate::game_shader_api::tests::will_say(quiet, &["0.1"]);
+    assert_eq!(install(&for_0_1, &quiet_home).unwrap(), "0.9.0");
+
     // A newer version for 0.2 comes out: the instance on the Nightly stays on its 0.1 version.
     let mut newer = sample();
     glow_for_0_1(&mut newer, &root, false);
@@ -1087,4 +1108,387 @@ fn a_project_is_starred_on_the_repository_its_source_is_in() {
     ] {
         assert_eq!(repo(source), None, "{source:?}");
     }
+}
+
+/// A zip in the native format this Horizon retired (`horizon-native.json`, as `zoom` 2.0.0 was).
+fn retired_native(path: &Path) {
+    use std::io::Write;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    for name in [
+        "horizon-native.json",
+        "mixins/coords_hud/horizon-mixin.toml",
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+/// The browser's list holding `coords_hud` at `version` in `file`, turned on.
+fn old_entry(home: &Path, file: &str, version: &str) -> Vec<installed::Entry> {
+    let entry = serde_json::json!({
+        "source": "horizon", "project": "coords_hud", "slug": "coords_hud",
+        "title": "Coordinates HUD", "kind": "mod", "version": version, "number": version,
+        "file": file, "checksum": "SHA-256:00", "page": ""
+    });
+    let list = installed::Installed {
+        entries: vec![serde_json::from_value(entry).unwrap()],
+    };
+    list.save(home).unwrap();
+    java::set_enabled(home, "coords_hud", true).unwrap();
+    list.entries
+}
+
+/// An id that was a native mod and came back as a plain mod (`zoom` 3.0.0): the player's
+/// entry from then points into `horizon-native-mods/`, at a file that is gone or in the retired
+/// native format. Installing the mod replaces that entry, so its row reads the new file. So does
+/// an entry of the very version installed whose file is gone: it is downloaded again.
+#[test]
+fn a_stale_native_entry_is_replaced_by_the_mod_the_id_became() {
+    let index = sample();
+    let p = hud(&index);
+    let current = &index.project("coords_hud").unwrap().versions[0].version;
+    let native = "horizon-native-mods/coords_hud.hmod";
+    for (case, old, version, retired) in [
+        ("gone", native, "0.0.1", false),
+        ("retired", native, "0.0.1", true),
+        (
+            "same-version-gone",
+            "horizon-mods/coords_hud.hmod",
+            current.as_str(),
+            false,
+        ),
+    ] {
+        let home = scratch(&format!("stale-native-{case}"));
+        if retired {
+            retired_native(&home.join(old));
+        }
+        old_entry(&home, old, version);
+
+        let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+        assert_eq!(done[0].file, "horizon-mods/coords_hud.hmod");
+        let list = installed::Installed::load(&home).entries;
+        assert_eq!(list, done);
+        let package = horizon_platform::mod_package::Package::read(&home.join(&list[0].file));
+        assert_eq!(package.unwrap().manifest.id, "coords_hud");
+        assert!(!home.join(native).exists());
+        assert!(java::is_enabled(&home, "coords_hud"));
+        assert!(crate::native_status::enabled(&home).is_empty());
+        fs::remove_dir_all(&home).unwrap();
+    }
+}
+
+/// A zip at `path` holding `name` with `text`: an archive this Horizon can't read as a mod.
+fn outdated(path: &Path, name: &str, text: &str) -> Vec<u8> {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    zip.start_file(name, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    assert!(horizon_platform::mod_package::Package::read(path).is_err());
+    fs::read(path).unwrap()
+}
+
+/// As `zoom` 1.0.0's manifest was, made for the earlier mod system.
+const EARLIER: &str = "id = \"coords_hud\"\nversion = \"0.0.1\"\ncapabilities = [\"render\"]\n";
+const HUD: &str = "horizon-mods/coords_hud.hmod";
+
+/// [`old_entry`] for [`HUD`], with the checksum of the file that is there.
+fn old_entry_checked(home: &Path) -> Vec<installed::Entry> {
+    let mut list = installed::Installed {
+        entries: old_entry(home, HUD, "0.0.1"),
+    };
+    let hash = index::sha256_file(&home.join(HUD)).unwrap();
+    list.entries[0].checksum = format!("SHA-256:{hash}");
+    list.save(home).unwrap();
+    list.entries
+}
+
+/// The files moved aside in `horizon-mods/`.
+fn backups(home: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(home.join("horizon-mods"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().contains(".hmod.replaced-"))
+        .collect();
+    found.sort();
+    found
+}
+
+/// An entry from the earlier mod system (as `zoom` 1.0.0 was) names a `.hmod` right where the new
+/// file goes, an archive this Horizon can't read as a mod. Installing the mod replaces it, and
+/// the old file is kept beside it, though the entry's checksum names it. A file there that is
+/// no archive at all is refused as before and stays.
+#[test]
+fn an_outdated_mod_file_is_replaced_by_the_new_version() {
+    let index = sample();
+    let p = hud(&index);
+
+    let home = scratch("stale-outdated");
+    let old = home.join(HUD);
+    let before = outdated(&old, "horizon-mod.toml", EARLIER);
+    old_entry_checked(&home);
+
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+    assert_eq!(done[0].file, HUD);
+    assert_eq!(installed::Installed::load(&home).entries, done);
+    let package = horizon_platform::mod_package::Package::read(&old).unwrap();
+    assert_eq!(package.manifest.version, done[0].version);
+    assert!(java::is_enabled(&home, "coords_hud"));
+    let kept = backups(&home);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), before);
+    fs::remove_dir_all(&home).unwrap();
+
+    let home = scratch("stale-not-an-archive");
+    let old = home.join(HUD);
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, "not an archive").unwrap();
+    let list = old_entry(&home, HUD, "0.0.1");
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&old).unwrap(), b"not an archive");
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An archive at the entry's path that the entry's checksum doesn't name (a file the player put
+/// there) isn't lost: it is moved aside under a name the game doesn't load, and stays.
+#[test]
+fn an_unrelated_archive_where_the_mod_goes_is_kept_beside_it() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-unrelated");
+    let before = outdated(&home.join(HUD), "notes.txt", "mine");
+    old_entry(&home, HUD, "0.0.1");
+
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+    assert_eq!(installed::Installed::load(&home).entries, done);
+    assert!(horizon_platform::mod_package::Package::read(&home.join(HUD)).is_ok());
+    let kept = backups(&home);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), before);
+    let loaded = horizon_platform::mod_package::manifest::find(&home.join("horizon-mods"));
+    assert_eq!(loaded, [home.join(HUD)]);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// The list can't be saved once the new file is in: the old file comes back to its place, with
+/// its entry, and nothing of the install is left.
+#[test]
+fn a_failed_save_puts_the_outdated_file_back() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-save-fails");
+    let before = outdated(&home.join(HUD), "horizon-mod.toml", EARLIER);
+    let list = old_entry_checked(&home);
+    fs::create_dir_all(home.join("mod-browser/downloads")).unwrap();
+
+    // Read but not replaced: held without delete sharing on Windows, in a folder that takes no
+    // new file on Unix.
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(home.join("mod-browser.json"))
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(home.join("probe"), "").is_ok() {
+            eprintln!("skipped: permissions don't stop this user (root?)");
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::remove_dir_all(&home).unwrap();
+            return;
+        }
+    }
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    #[cfg(windows)]
+    drop(held);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(e.contains("mod-browser.json"), "{e}");
+    assert_eq!(fs::read(home.join(HUD)).unwrap(), before);
+    assert_eq!(backups(&home), Vec::<PathBuf>::new());
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// `horizon-mods` is a link (a junction on Windows) to a folder outside the game folder: the
+/// outdated file behind it is not replaced or moved.
+#[test]
+fn an_outdated_file_behind_a_linked_mod_folder_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-linked-folder");
+    let outside = scratch("stale-outdated-linked-folder-outside");
+    let before = outdated(
+        &outside.join("coords_hud.hmod"),
+        "horizon-mod.toml",
+        EARLIER,
+    );
+    let link = home.join("horizon-mods");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+    #[cfg(windows)]
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .args([&link, &outside])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !made {
+        eprintln!("skipped: this account can't make folder links");
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+        return;
+    }
+    let list = old_entry_checked(&home);
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("leads outside the game folder"), "{e}");
+    assert_eq!(fs::read(outside.join("coords_hud.hmod")).unwrap(), before);
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    let downloads = home.join("mod-browser/downloads");
+    assert_eq!(fs::read_dir(downloads).map_or(0, |d| d.count()), 0);
+    // The link itself goes, never what it points at.
+    #[cfg(windows)]
+    fs::remove_dir(&link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+    fs::remove_dir_all(&outside).unwrap();
+}
+
+/// Two files moved aside in the same second get two names, and an earlier one is never
+/// written over.
+#[test]
+fn a_backup_name_is_never_taken_twice() {
+    let home = scratch("backup-names");
+    let file = home.join("coords_hud.hmod");
+    let first = reserve_backup(&file, 7).unwrap();
+    fs::write(&first, "earlier").unwrap();
+    let second = reserve_backup(&file, 7).unwrap();
+    let third = reserve_backup(&file, 7).unwrap();
+    assert_eq!(first, home.join("coords_hud.hmod.replaced-7"));
+    assert_eq!(second, home.join("coords_hud.hmod.replaced-7-1"));
+    assert_eq!(third, home.join("coords_hud.hmod.replaced-7-2"));
+    assert_eq!(fs::read(&first).unwrap(), b"earlier");
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A retired native file the launcher can't read right now (another program holds it, or no
+/// permission) is not taken for gone or retired: the install refuses, as before, and leaves the
+/// file and the list as they were.
+#[test]
+fn an_old_native_file_that_cannot_be_read_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-unreadable");
+    let old = home.join("horizon-native-mods/coords_hud.hmod");
+    retired_native(&old);
+    let before = fs::read(&old).unwrap();
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&old)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&old).is_ok() {
+            eprintln!("skipped: permissions don't stop this user (root?)");
+            fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+            fs::remove_dir_all(&home).unwrap();
+            return;
+        }
+    }
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    #[cfg(windows)]
+    drop(held);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&old).unwrap(), before);
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An old entry whose path is a link to a retired native file elsewhere: the install refuses,
+/// and neither the link nor what it points at is removed.
+#[test]
+fn a_linked_old_native_file_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-link");
+    let real = home.join("elsewhere/coords_hud.hmod");
+    retired_native(&real);
+    let before = fs::read(&real).unwrap();
+    let link = home.join("horizon-native-mods/coords_hud.hmod");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&real, &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(&real, &link);
+    if let Err(e) = made {
+        eprintln!("skipped: this account can't make links: {e}");
+        fs::remove_dir_all(&home).unwrap();
+        return;
+    }
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&real).unwrap(), before);
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    let downloads = home.join("mod-browser/downloads");
+    assert_eq!(fs::read_dir(downloads).map_or(0, |d| d.count()), 0);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An old entry whose path is not a regular file (here a folder; a pipe is never opened) isn't
+/// taken for a retired archive: the install refuses and the folder stays as it was.
+#[test]
+fn an_old_native_path_that_is_not_a_file_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-folder");
+    let old = home.join("horizon-native-mods/coords_hud.hmod");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("horizon-native.json"), b"{}").unwrap();
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(old.join("horizon-native.json")).unwrap(), b"{}");
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    fs::remove_dir_all(&home).unwrap();
 }

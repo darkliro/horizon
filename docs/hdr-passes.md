@@ -40,6 +40,13 @@ Each frame without a shader pack (`Renderer::render` in `gfx.rs`), in order:
 
 Under a shader pack its post passes take step 2's place. A 0.2 pack's `[tonemap]` runs at their end and takes step
 4's, so the post effects after it get a tone-mapped picture.
+A 0.2 pack without `[[post]]` whose frame holds gamma light (not `blend = "linear"` on the float frame) keeps step
+2's FXAA or TAA (their blends are made for gamma light, rule 3). TAA upscales and sharpens as without a pack where the
+pack's `[tonemap]`, if it has one, never reads `previous` (`Capabilities::engine_upscale`); elsewhere it runs at the
+world's size, its upscaling and sharpening off. `world_post` resolves the world in the frame's encoding, FXAA onto a
+target of the world's size and TAA into its history, which it sharpens onto a target of the history's size where it
+upscales, and the pack's output decodes that in the world's place (`WorldOutput::resolved`), before the `[tonemap]`.
+Under any other pack TAA is off.
 
 A pass on the world's light belongs in steps 2 and 3, before the tone curve, and never sees the HUD. After the tone
 curve the frame is what the display will show, so no pass there treats it as light. Frame generation interpolates
@@ -58,7 +65,7 @@ curve, the HUD's layer and the last pass as the real one does.
    10 to 18 PQ code values, for 1 to 6% more detail inside lit textures.
 3. **Blend linear light tone-weighted, gamma light as stored.** What counts is the encoding of the values a pass
    accumulates, not the frame's format. Linear light is what a 0.2 pack's post passes read (`color`, `previous`,
-   `history`, under either `[frame] blend`) and what the world's frame holds under `blend = "linear"`. There TAA, a
+   kept resources, under either `[frame] blend`) and what the world's frame holds under `blend = "linear"`. There TAA, a
    temporal upscaler and anything else that keeps a history blends `c / (1 + m)`, where `m` is the largest of `c`'s
    channels, clamps the history in that space too, and turns the result back with `c / (1 - m)`. Raw linear light
    lets a few very bright pixels win the history: torches and the sun's edge sparkle, and smear when the camera

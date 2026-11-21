@@ -1,5 +1,5 @@
 RemotePlayer.shouldRenderAtSqrDistance	port	crates/horizon-client/src/game/interface/entity_culling/mod.rs::entity_view_scale	every entity's draw distance is scaled by the view scale and the limit, remote players included
-RemotePlayer.aiStep	inline	crates/horizon-client/src/game/network/remote/mod.rs::Game::tick_remote_entities	gap: minor: the head yaws over its lerp steps; the smoothed delta movement and the push step are not ported
+RemotePlayer.aiStep	inline	crates/horizon-client/src/game/network/remote/tick_entities.rs::Game::tick_remote_entities_body	gap: minor: the head yaws over its lerp steps; the smoothed delta movement and the push step are not ported
 RemotePlayer.lerpMotion	missing		unsure: no lerp of received remote-player motion found in game/network/remote/mod.rs
 Hotbar.storeFrom	port	crates/horizon-client/src/game/items/creative_hotbar.rs::Game::hotbar_load_or_save	save copies the nine slots into the hotbar.nbt row
 Hotbar.isEmpty	inline	crates/horizon-client/src/game/items/creative_hotbar.rs::Game::refresh_saved_hotbars	the empty creative hotbar row carries the inventory.hotbarInfo hint
@@ -23,7 +23,7 @@ SuffixArray.print	skip:debug		suffix array debug dump
 SuffixArray.getString	skip:debug		suffix array debug text
 SuffixArray.compare	skip:java		binary-search helper of the suffix array
 SuffixArray.search	port	crates/horizon-client/src/creative.rs::Creative::search_results	substring match by linear scan, same matches in tab order
-IntegratedPlayerList.canPlayerLogin	inline	crates/horizon-client/src/lan/mod.rs::Shared::try_admit	gap: minor: no owner-name check; duplicate logins are matched by uuid
+IntegratedPlayerList.canPlayerLogin	inline	crates/horizon-client/src/lan/mod.rs::Shared::try_admit	the owner-name check (isSingleplayerOwner, case-insensitive) refuses the owner's name while a player of that name is online; a duplicate uuid waits for the old connection to leave (30 s, then slow_login)
 IntegratedServer.processPacketsAndTick	skip:debug		gizmo collector for debug draws
 IntegratedServer.fillServerSystemReport	skip:debug		system report for crash reports
 IntegratedServer.getPersonalGameMode	port	crates/horizon-client/src/game/world/integrated.rs::Game::server_options	owner's game mode, read from the guest record

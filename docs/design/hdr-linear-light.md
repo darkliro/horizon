@@ -2,7 +2,7 @@
 
 A design note, before any code: what a colour means to a shader pack from API 0.2 on, how the frame stores the
 picture, and how HDR output stops reading light from the frame's alpha. Part of [#3125](https://github.com/horizon-rust/horizon/issues/3125)
-and [#1441](https://github.com/horizon-rust/horizon/issues/1441). The shader API is experimental, which needs a
+and [#1441](https://github.com/horizon-rust/horizon/issues/1441). The shader API was experimental when this was written, which needs a
 design note for a new line ([api/stability.md](../api/stability.md)); this is that note.
 
 ## Why
@@ -61,8 +61,8 @@ below); where HDR's settings live (a later note).
   multiplicative, vanilla's lit colour `albedo * tint * lightmap` is the same in linear: decoding the product is the
   product of the decoded terms.
 - **What converts:** `MaterialInput` `albedo`, `tint`, `lightmap` and `colored_light`; `SkyInput.color`;
-  `WeatherInput.color`; `Frame` `sky_color` and `fog_color`; `block_texture` and `block_texture_level`; every
-  colour texture a stage samples (`scene_color`, `previous`, `history`, pack targets, `opaque_color`, `reflection`,
+  `WeatherInput.color`; `Frame` `sky_color` and `fog_color`; `block_texture` and `block_texture_level`; every colour
+  texture a stage samples (`scene_color`, `previous`, pack targets and kept resources, `opaque_color`, `reflection`,
   `shadow_color`, `block_light_colors`). Data stays data: depth, normals, `light` levels, `emission`, and every
   channel of the LabPBR maps (`block_normal_map`, `block_specular_map` and their `_level` forms).
 - **Alpha is coverage only.** The rule to return `input.color.a` goes; a 0.2 post pass's alpha is ignored.
@@ -236,12 +236,12 @@ inputs and gamma values, and the marks its stages passed on in alpha. It is reti
 - Golden Hour's 0.2 port replaced it as the example and test pack;
 - the changelog says so.
 
-The shader API is experimental: it may change in any release without notice, with no deprecation window
+The shader API was experimental then: it could change in any release without notice, with no deprecation window
 ([api/stability.md](../api/stability.md)). Serving 0.1 for longer would have kept its shim, the pipeline variants
 that write marks and the HDR pass's lift from them, only for packs that can move to 0.2.
 
-Later lines follow the same rule while the API is experimental: a line is served until the next one is on by default.
-From preview on, stability.md's deprecation windows apply.
+0.2 is final, at the preview level (2026-11-18): from now stability.md's deprecation windows apply, and a line is
+served beside the next one through its deprecation.
 
 ## `shaders/`-format packs
 
@@ -270,7 +270,8 @@ pack path keeps those features; #16126 lists each as its own step, and the flip 
 
 **One look file, two users.** `hdr_look.wgsl` holds the look's constants (the tiers' windows and gains,
 `HDR_SCENE_PEAK`, `HDR_SUN_CAP`) and pure functions (brightness, the lift's window and gain, `hdr_unshade`, the sun's
-peak from the headroom, the tone curve), with no engine name in it.
+peak from the headroom, the tone curve), with no engine name in it. There is one copy, in the pack's folder
+(`packs/horizon_hdr/hdr_look.wgsl`), which the renderer reads from there.
 
 - Until the flip, the default pipelines compile it in: today's bytes and cost. The compiled-in copy is removed at the
   flip (step 16 of #16126); the file survives in the pack. The display reaches it as `Frame.headroom` does a
@@ -278,16 +279,19 @@ peak from the headroom, the tone curve), with no engine name in it.
   windows and gains, and the duplicated functions in `terrain.wgsl` and `entity.wgsl`, go.
 - `packs/horizon_hdr` (in `horizon-shader-api`, beside Golden Hour) is a real 0.2 pack that lists the same file as
   its shared source: a material stage, an entity stage and a `[tonemap]` with the scene's peak. It is the proof
-  that the API suffices, and the example to copy from. The frame identity harness draws it and holds it to the
-  default path's picture within a stated tolerance (decode and encode rounding, glint).
+  that the API suffices, and the example to copy from. Render tests hold its material and entity stages to the
+  default path's shaders (`gfx/look_pack_tests.rs`); the frame identity harness draws it in the game and holds it to
+  the default path's picture within a step of 255 and two of 1023 (`look_gates`).
 
-**What the API gains**, none of it breaking a 0.2 pack:
+**What the API gained**, none of it breaking a 0.2 pack (each declared only for a pack whose files name it):
 
 | Name | Meaning |
 | --- | --- |
-| `MaterialInput.emission_threshold: f32` | The brightness a texel must reach to be the part that shines (a torch's flame, not its handle); 0 where the whole sprite shines. |
-| `EntityInput.light_source: f32` | The thing's own kind of light, on `MaterialInput.emission`'s scale: light-giving particles, glowing items and sign text, eyes. `emission` stays "drawn at full light". |
-| `Frame.full_light: vec3<f32>` | Vanilla's light colour at full light this frame: white unless Darkness or a wither's bar dims all light. What `hdr_unshade` scales to. |
+| `MaterialInput.light_source_tier: u32`, `light_source_whole: bool` | The look's tier of the block (0 none, 1 low to 4 very bright), from the vertex, and whether the whole sprite shines (a froglight) or only its bright texels. |
+| `MaterialInput.light_source_threshold: f32` | The brightness a texel must reach to be the part that shines (a torch's flame, not its handle), measured from the sprite. |
+| `EntityInput.light_source_tier: u32` | The tier of what an entity or block entity draws (eyes, a magma cube, glowing sign text). |
+| `Frame.full_lightmap: vec3<f32>` | Vanilla's light colour at full light this frame: white unless Darkness or a wither's bar dims all light. What `hdr_unshade` scales to. |
+| `MaterialInput.shaded_tint: vec4<f32>` | The vertex colour with the face's shade and ambient occlusion in it, as vanilla multiplies it, without reading the terrain's looks. |
 
 An `[environment]` stage, for what adds light and is no lit surface (the sun, moon, stars, clouds, lightning,
 additive particles, beams), by `kind`, is step 9 of #16126 (it replaces the earlier `[glow]` idea, and settles that
@@ -428,11 +432,15 @@ Behind `HORIZON_HDR_FRAME=float` until step 5, each a small pull request:
      where a stage takes linear light and returns it, through a decode and an encode. The curve for light of
      unknown range stays in the same function, and the scene's peak reaches it as a run-time value: DX12's compiler
      rounds a split curve, and a constant peak, a step apart in a few pixels.
-   - 7d: `emission_threshold`, `light_source` and `full_light` in the API and its reference, then wired into the
-     material and entity stages.
-   - 7f: `packs/horizon_hdr`, and its session in the frame identity harness, held to the default path. The gate
-     widens as inputs arrive: terrain and entities first, items and particles with the entity stage's later
-     steps, the sky with `[environment]`.
+   - 7d (done, #18410): `light_source_tier`, `light_source_whole`, `light_source_threshold`,
+     `EntityInput.light_source_tier` and `full_lightmap` in the API and its reference, wired into the material and
+     entity stages; the pack draws vanilla's colour from `shaded_tint`.
+   - 7f: `packs/horizon_hdr`, and its session in the frame identity harness, held to the default path. The pack
+     is in (the SDK's, as Golden Hour is: the game doesn't ship or pick it), the look file moved into its folder
+     and the renderer reads it there; render tests hold its material and entity stages to the default path's
+     shaders, and the frame identity harness's sessions to the default path's picture. The gate widens as inputs
+     arrive: terrain and entities first, items and particles with the entity stage's later steps, the sky with
+     `[environment]`.
    - 7e and 7g, in one pull request: light sources lift before fog on both paths, and the lift's 8-bit steps go.
      A change of look and of rounding, with captures. It is step 11 of #16126, after the pack steps 9 and 10.
    - 7b and 7c put the look in `hdr_look.wgsl`, compiled into the engine as preparation; that copy goes at the flip

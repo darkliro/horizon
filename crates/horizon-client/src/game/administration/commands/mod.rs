@@ -2,6 +2,7 @@
 //! entity selectors resolved against the game, vanilla feedback and errors.
 mod admin;
 mod clone_payload;
+mod command_host;
 pub(super) mod compute;
 mod data;
 mod difficulty;
@@ -300,14 +301,10 @@ impl Game<'_> {
             ..Style::default()
         };
         let mut context = Text::empty();
-        if cursor > 10 {
+        if horizon_client::command::java_index(input, cursor) > 10 {
             context.push("...");
         }
-        let start = (0..=cursor.saturating_sub(10))
-            .rev()
-            .find(|&i| input.is_char_boundary(i))
-            .unwrap_or(0);
-        context.push(&input[start..cursor]);
+        context.push(&input[horizon_client::command::context_start(input, cursor)..cursor]);
         if cursor < input.len() {
             context.push(
                 Text::literal(&input[cursor..])
@@ -642,7 +639,10 @@ impl Game<'_> {
             if dim == source_dim {
                 candidates.append(&mut source_candidates);
             }
-            if s.kind != 's' {
+            // EntitySelector.findEntities: a selector without entities (`@a`, `@p`, `@r`, a
+            // players-only token) reads the player list alone, which `player_candidates` gave;
+            // the level's entities would only be typed one by one and dropped.
+            if s.kind != 's' && s.include_entities {
                 if s.kind == 'e' && matches!(s.sort, Sort::Arbitrary) && !s.world_limited() {
                     candidates.extend(self.global_selector_candidates());
                 } else {
@@ -1115,35 +1115,7 @@ impl Game<'_> {
         }
     }
     fn cmd_help(&mut self, ctx: &Context) -> R<i32> {
-        let d = self.ui.dispatcher.0.clone();
-        let level = self.ui.registries.permission;
-        match ctx.get("command") {
-            None => {
-                let usage = d.smart_usage(0, level);
-                let n = usage.len() as i32;
-                for (_, line) in usage {
-                    self.feedback_unbroadcast(Text::literal(format!("/{line}")));
-                }
-                Ok(n)
-            }
-            Some(Arg::Str(command)) => {
-                let parse = d.parse(command, &self.ui.registries);
-                if parse.context.nodes.is_empty() {
-                    return Err(err("commands.help.failed", &[]));
-                }
-                let last = parse.context.nodes.last().map(|n| n.0).unwrap_or(0);
-                let usage = d.smart_usage(last, level);
-                let prefix = &command[..parse.context.range.1.min(command.len())];
-                for (_, line) in &usage {
-                    self.feedback_unbroadcast(Text::literal(format!("/{prefix} {line}")));
-                }
-                if usage.is_empty() {
-                    self.feedback_unbroadcast(Text::literal(format!("/{prefix}")));
-                }
-                Ok(usage.len().max(1) as i32)
-            }
-            _ => Ok(0),
-        }
+        horizon_gameplay::commands::help::help(self, ctx)
     }
     pub(super) fn set_game_mode(&mut self, mut mode: GameMode) -> bool {
         if self.mode == mode {
@@ -1239,11 +1211,12 @@ impl Game<'_> {
         {
             // `CompassItem.getName`: a lodestone tracker names it, over `item_name`.
             Text::translate("item.minecraft.lodestone_compass", &[])
-        } else if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
+        } else if let Some(name) = s.item_name_text() {
             // `ItemStack.getItemName`: the `item_name` component wins over the
             // item's own name (`Item.getName`), so a datapack's or a server's
-            // renaming shows here as it does on the tooltip's first line.
-            horizon_client::component::name_text(name)
+            // renaming shows here as it does on the tooltip's first line, and
+            // a content mod's default name for its item as well.
+            name
         } else if let Some(title) = s
             .data()
             .and_then(|d| d.written.as_ref())
@@ -1309,7 +1282,9 @@ impl Game<'_> {
             .as_deref()
             .map(horizon_client::item_data::command_components)
         {
-            Some(Ok(tag)) => horizon_client::item_data::decode_components(Some(&tag)),
+            Some(Ok(tag)) => {
+                horizon_client::item_data::decode_components_for_item(&id, Some(&tag))
+            }
             Some(Err(e)) => return Err(CommandError::new(Text::literal(e))),
             None => (0, None),
         };
@@ -1432,6 +1407,23 @@ impl Game<'_> {
                 e.set_on_ground(true);
             });
         });
+    }
+    /// Writes `rotation` to the saved compound of an entity whose model has no slot for it (a cloud, a
+    /// cushion's pitch): where `/data get` and the save read it.
+    fn write_raw_rotation(&mut self, id: u32, rotation: [f32; 2]) {
+        use horizon_core::nbt::{Compound, JavaString, Tag};
+        let float = |v: f32| Tag::Float(if v == 0.0 { 0 } else { v.to_bits() });
+        if let Tag::Compound(raw) = self
+            .persist
+            .raw
+            .entry(id)
+            .or_insert_with(|| Tag::Compound(Compound::new()))
+        {
+            raw.insert(
+                JavaString::from("Rotation"),
+                Tag::List(vec![float(rotation[0]), float(rotation[1])]),
+            );
+        }
     }
     pub(in crate::game) fn teleport_to(
         &mut self,
@@ -1700,6 +1692,8 @@ impl Game<'_> {
                     c.pos = [v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32];
                     if let Some(r) = rotation {
                         c.yaw = r[0];
+                        // The cushion keeps its pitch in its saved compound, which a save writes back.
+                        self.write_raw_rotation(id, r);
                     }
                 }
             }
@@ -1744,6 +1738,11 @@ impl Game<'_> {
                     self.breath_clouds.update(i, |c| {
                         c.at = pos;
                     });
+                    // The cloud keeps its rotation in its saved compound: a teleport that sets one
+                    // writes it there, where `/data get` and the save read it.
+                    if let Some(r) = rotation {
+                        self.write_raw_rotation(id, r);
+                    }
                 }
             }
             // Wall-mounted entities do not move; a hook follows its own tick and a
@@ -2071,192 +2070,10 @@ impl Game<'_> {
     /// `TimeCommand.getDefaultClock`: explicit registered clocks and dimension defaults are
     /// separate; built-in timelines and markers belong only to Overworld.
     fn cmd_time(&mut self, id: &str, ctx: &Context) -> R<i32> {
-        if id == "time.query.gametime" {
-            let t = self.world.game_time;
-            self.feedback_unbroadcast(Text::tr("commands.time.query.gametime", &[&t]));
-            return Ok((t % i64::from(i32::MAX)) as i32);
-        }
-        // `time of <clock>` names the clock; otherwise the dimension's default clock.
-        let clock = match ctx.get("clock") {
-            Some(Arg::Resource(c)) => c.clone(),
-            _ => match self.dimension_type().default_clock.clone() {
-                Some(clock) => clock,
-                None => return Err(err("commands.time.no_default_clock", &[&self.dim.id()])),
-            },
-        };
-        let total = self.command_clock_time(&clock);
-        match id {
-            "time.set" => {
-                let t = i64::from(Self::int(ctx, "time").unwrap_or(0));
-                if total == t {
-                    return Err(err("commands.time.set.already_at_time", &[&clock, &t]));
-                }
-                let mut cancel = false;
-                self.native_time_skip(self.dim.id(), total, t, "command", &mut cancel);
-                if !cancel {
-                    self.set_command_clock_time(&clock, t);
-                    self.command_clock_state(&clock).partial = 0.0;
-                }
-                self.feedback(Text::tr("commands.time.set.absolute", &[&clock, &t]));
-                Ok(t as i32)
-            }
-            "time.set.marker" => {
-                let Some(Arg::Resource(marker)) = ctx.get("timemarker").cloned() else {
-                    return Ok(0);
-                };
-                let Some((m, target)) = (clock == "minecraft:overworld")
-                    .then(|| self.ui.markers.get(&marker).copied())
-                    .flatten()
-                    .and_then(|m| Some((m, m.resolve(total)?)))
-                else {
-                    return Err(err(
-                        "commands.time.no_time_marker_found",
-                        &[&marker, &clock],
-                    ));
-                };
-                if m.occurs_at(total) {
-                    return Err(err(
-                        "commands.time.set.already_at_time_marker",
-                        &[&clock, &marker],
-                    ));
-                }
-                let mut cancel = false;
-                self.native_time_skip(self.dim.id(), total, target, "command", &mut cancel);
-                if !cancel {
-                    self.set_command_clock_time(&clock, target);
-                    self.command_clock_state(&clock).partial = 0.0;
-                }
-                self.feedback(Text::tr(
-                    "commands.time.set.time_marker",
-                    &[&clock, &marker],
-                ));
-                Ok((self.command_clock_time(&clock) % i64::from(i32::MAX)) as i32)
-            }
-            "time.add" => {
-                let t = i64::from(Self::int(ctx, "time").unwrap_or(0));
-                let target = (total + t).max(0);
-                let mut cancel = false;
-                self.native_time_skip(self.dim.id(), total, target, "command", &mut cancel);
-                if !cancel {
-                    self.set_command_clock_time(&clock, target);
-                }
-                let now = self.command_clock_time(&clock);
-                self.feedback(Text::tr("commands.time.set.absolute", &[&clock, &now]));
-                Ok((now % i64::from(i32::MAX)) as i32)
-            }
-            "time.pause" | "time.resume" => {
-                let pause = id == "time.pause";
-                if self.command_clock_state(&clock).paused == pause {
-                    return Err(err(
-                        if pause {
-                            "commands.time.pause.already_paused"
-                        } else {
-                            "commands.time.pause.already_running"
-                        },
-                        &[&clock],
-                    ));
-                }
-                self.command_clock_state(&clock).paused = pause;
-                self.feedback(Text::tr(
-                    if pause {
-                        "commands.time.pause"
-                    } else {
-                        "commands.time.resume"
-                    },
-                    &[&clock],
-                ));
-                Ok(1)
-            }
-            "time.rate" => {
-                let rate = match ctx.get("rate") {
-                    Some(Arg::Float(r)) => *r,
-                    _ => 1.0,
-                };
-                if self.command_clock_state(&clock).rate == rate {
-                    return Err(err(
-                        "commands.time.rate.already_same",
-                        &[&clock, &float_to_string(rate)],
-                    ));
-                }
-                self.command_clock_state(&clock).rate = rate;
-                self.feedback(Text::tr(
-                    "commands.time.rate",
-                    &[&clock, &float_to_string(rate)],
-                ));
-                Ok(1)
-            }
-            "time.query.time" => {
-                self.feedback_unbroadcast(Text::tr(
-                    "commands.time.query.absolute",
-                    &[&clock, &total],
-                ));
-                Ok((total % i64::from(i32::MAX)) as i32)
-            }
-            "time.query.timeline" | "time.query.repetition" => {
-                let Some(Arg::Resource(timeline)) = ctx.get("timeline").cloned() else {
-                    return Ok(0);
-                };
-                let Some(period) = (clock == "minecraft:overworld")
-                    .then(|| self.ui.timelines.get(&timeline).copied())
-                    .flatten()
-                else {
-                    return Err(err(
-                        "commands.time.wrong_timeline_for_clock",
-                        &[&timeline, &clock],
-                    ));
-                };
-                if id == "time.query.timeline" {
-                    let ticks = period.map_or(total, |p| total.rem_euclid(p));
-                    self.feedback_unbroadcast(Text::tr(
-                        "commands.time.query.timeline",
-                        &[&timeline, &ticks],
-                    ));
-                    Ok(ticks as i32)
-                } else {
-                    let reps = period.map_or(0, |p| total / p);
-                    self.feedback_unbroadcast(Text::tr(
-                        "commands.time.query.timeline.repetitions",
-                        &[&timeline, &reps],
-                    ));
-                    Ok(reps as i32)
-                }
-            }
-            _ => Ok(0),
-        }
+        horizon_gameplay::commands::time::time(self, id, ctx)
     }
     fn cmd_weather(&mut self, ctx: &Context) -> R<i32> {
-        let duration = Self::int(ctx, "duration");
-        let sample = |min: i32, max: i32, r: &mut horizon_core::random::LegacyRandom| {
-            min + r.next_int_bound(max - min + 1).unwrap_or(0)
-        };
-        let (key, clear, time, raining, thundering) = if ctx.has("clear") {
-            (
-                "commands.weather.set.clear",
-                duration.unwrap_or_else(|| sample(12_000, 180_000, &mut self.world.random)),
-                0,
-                false,
-                false,
-            )
-        } else if ctx.has("rain") {
-            (
-                "commands.weather.set.rain",
-                0,
-                duration.unwrap_or_else(|| sample(12_000, 24_000, &mut self.world.random)),
-                true,
-                false,
-            )
-        } else {
-            (
-                "commands.weather.set.thunder",
-                0,
-                duration.unwrap_or_else(|| sample(3_600, 15_600, &mut self.world.random)),
-                true,
-                true,
-            )
-        };
-        self.set_weather_parameters(clear, time, raining, thundering);
-        self.feedback(Text::translate(key, &[]));
-        Ok(duration.unwrap_or(-1))
+        horizon_gameplay::commands::weather::weather(self, ctx)
     }
     pub(super) fn kill_target(&mut self, t: Target) {
         // An entity in another level is killed in the level that holds it.
@@ -3429,51 +3246,7 @@ impl Game<'_> {
         }
     }
     fn cmd_gamerule(&mut self, ctx: &Context) -> R<i32> {
-        let Some(name) = ctx.literals.get(1).cloned() else {
-            return Ok(0);
-        };
-        let Some(rule) = self.ui.rules.rule(&name).cloned() else {
-            return Ok(0);
-        };
-        // GameRule.id(): only the default namespace is omitted in messages.
-        let rule_id = rule.name.strip_prefix("minecraft:").unwrap_or(&rule.name);
-        let current = self.ui.rules.get(&rule.name).unwrap_or(rule.default);
-        let value = match ctx.get("value") {
-            Some(Arg::Bool(b)) => Value::Bool(*b),
-            Some(Arg::Int(i)) => Value::Int(*i),
-            _ => {
-                self.feedback_unbroadcast(Text::tr(
-                    "commands.gamerule.query",
-                    &[&rule_id, &current],
-                ));
-                return Ok(match current {
-                    Value::Bool(b) => i32::from(b),
-                    Value::Int(i) => i,
-                });
-            }
-        };
-        if current == value {
-            return Err(err("commands.gamerule.not_set", &[&rule_id, &value]));
-        }
-        let name = self.lan_acting_name.clone();
-        let actor = match (
-            self.lan_acting_uuid,
-            self.lan_acting_entity,
-            name.as_deref(),
-        ) {
-            (Some(uuid), Some(entity_id), Some(name)) => Some(mod_api::GameRuleActor {
-                uuid,
-                entity_id: entity_id as i32,
-                name,
-            }),
-            _ => None,
-        };
-        self.set_game_rule(&rule, value, actor.as_ref());
-        self.feedback(Text::tr("commands.gamerule.set", &[&rule_id, &value]));
-        Ok(match value {
-            Value::Bool(b) => i32::from(b),
-            Value::Int(i) => i,
-        })
+        horizon_gameplay::commands::gamerule::gamerule(self, ctx)
     }
     fn cmd_spawnpoint(&mut self, ctx: &Context) -> R<i32> {
         let targets = if ctx.get("targets").is_some() {
@@ -3543,10 +3316,16 @@ impl Game<'_> {
         let rot = [wrap_degrees(yaw), pitch.clamp(-90.0, 90.0)];
         let previous_point = self.world_spawn_position().map(|v| v.floor() as i32);
         let old_angle = self.level.world_spawn_angle;
+        let moved_level = self.level.spawn_dimension() != level.id();
         let old = self.level.world_spawn.replace(pos);
         self.level.world_spawn_angle = rot;
         self.level.world_spawn_dimension = Some(level.id().to_string());
-        if previous_point != pos || old_angle.map(f32::to_bits) != rot.map(f32::to_bits) {
+        // MinecraftServer.setRespawnData compares the whole RespawnData, its
+        // dimension too.
+        if previous_point != pos
+            || old_angle.map(f32::to_bits) != rot.map(f32::to_bits)
+            || moved_level
+        {
             self.lan_broadcast_world_spawn();
         }
         self.native_spawn_change(pos, rot);
@@ -4912,210 +4691,8 @@ mod selector_bounds_tests {
 }
 
 #[cfg(test)]
-mod local_coordinate_command_tests {
-    use super::*;
-    use crate::game::native_entity_refs::tests::with_game;
-    use horizon_core::nbt::Tag;
-    use horizon_core::position::BlockPos;
-
-    fn pos_bits(tag: &Tag) -> [u64; 3] {
-        let Some(Tag::List(pos)) = tag.get("Pos") else {
-            panic!("actual saved Double position missing")
-        };
-        assert_eq!(pos.len(), 3);
-        std::array::from_fn(|i| match &pos[i] {
-            Tag::Double(bits) => *bits,
-            other => panic!("actual Pos must be Double: {other:?}"),
-        })
-    }
-    #[test]
-    #[ignore = "daily"]
-    fn h149_actual_registered_local_commands_preserve_exact_saved_positions() {
-        with_game(|game| {
-            game.build_registries();
-            game.set_allow_commands(true);
-            game.world.chunks.insert(
-                (0, 0),
-                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
-            );
-            game.block_ticks
-                .add_empty_chunk(BlockPos::new(0, 0, 0).chunk())
-                .unwrap();
-            assert!(game.run_command("forceload add 0 0"));
-            assert!(game.run_command("fill 0 199 0 15 199 15 stone"));
-            assert!(game.run_command("scoreboard objectives add h149 dummy"));
-            let clock = game.world.game_time;
-            let mut failures = Vec::new();
-            let cases = [
-                (
-                    "south",
-                    "execute positioned 8.5 202.25 8.5 rotated 0.0 0.0 run tp 00000095-0000-0001-0000-000000000001 ^0.75 ^0.5 ^1.25",
-                    [
-                        0x4022800000000000u64,
-                        0x4069580000000000u64,
-                        0x4023800000000000u64,
-                    ],
-                    false,
-                ),
-                (
-                    "west",
-                    "execute positioned 8.5 202.25 8.5 rotated 90.0 0.0 run tp 00000095-0000-0001-0000-000000000002 ^0.75 ^0.5 ^1.25",
-                    [
-                        0x401d000000000000u64,
-                        0x4069580000000000u64,
-                        0x4022800000000000u64,
-                    ],
-                    false,
-                ),
-                (
-                    "north",
-                    "execute positioned 8.5 202.25 8.5 rotated 180.0 0.0 run tp 00000095-0000-0001-0000-000000000003 ^0.75 ^0.5 ^1.25",
-                    [
-                        0x401f000000000000u64,
-                        0x4069580000000000u64,
-                        0x401d000000000000u64,
-                    ],
-                    false,
-                ),
-                (
-                    "east",
-                    "execute positioned 8.5 202.25 8.5 rotated 270.0 0.0 run tp 00000095-0000-0001-0000-000000000004 ^0.75 ^0.5 ^1.25",
-                    [
-                        0x4023800000000000u64,
-                        0x4069580000000000u64,
-                        0x401f000000000000u64,
-                    ],
-                    false,
-                ),
-                (
-                    "oblique",
-                    "execute positioned 8.5 202.25 8.5 rotated 37.5 -22.25 run tp 00000095-0000-0001-0000-000000000005 ^0.1 ^0.1 ^0.1",
-                    [
-                        0x402117934a6314b9u64,
-                        0x40694c2c5ee98f58u64,
-                        0x40213562572e889au64,
-                    ],
-                    false,
-                ),
-                (
-                    "positioned_oblique",
-                    "execute positioned 8.5 202.25 8.5 rotated 123.75 47.125 positioned ^0.1 ^0.1 ^0.1 run tp 00000095-0000-0001-0000-000000000006 ~ ~ ~",
-                    [
-                        0x4020a7648c7aa86bu64,
-                        0x406947d514129374u64,
-                        0x4021025e8b180036u64,
-                    ],
-                    false,
-                ),
-                (
-                    "world",
-                    "execute positioned 8.5 202.25 8.5 rotated 37.5 -22.25 run tp 00000095-0000-0001-0000-000000000007 9.25 202.75 9.75",
-                    [
-                        0x4022800000000000u64,
-                        0x4069580000000000u64,
-                        0x4023800000000000u64,
-                    ],
-                    true,
-                ),
-                (
-                    "relative_eyes",
-                    "execute positioned 8.5 202.25 8.5 rotated 37.5 -22.25 anchored eyes run tp 00000095-0000-0001-0000-000000000008 ~0.75 ~0.5 ~1.25",
-                    [
-                        0x4022800000000000u64,
-                        0x4069580000000000u64,
-                        0x4023800000000000u64,
-                    ],
-                    true,
-                ),
-                (
-                    "feet",
-                    "execute as 00000095-0000-0001-0000-000000000009 at @s anchored feet rotated 37.5 -22.25 run tp @s ^ ^ ^",
-                    [
-                        0x4012000000000000u64,
-                        0x4069000000000000u64,
-                        0x4012000000000000u64,
-                    ],
-                    true,
-                ),
-                (
-                    "eyes",
-                    "execute as 00000095-0000-0001-0000-00000000000a at @s anchored eyes rotated 37.5 -22.25 run tp @s ^ ^ ^",
-                    [
-                        0x4012000000000000u64,
-                        0x4069187ae1400000u64,
-                        0x4012000000000000u64,
-                    ],
-                    true,
-                ),
-            ];
-            for (i, (name, command, want, control)) in cases.into_iter().enumerate() {
-                let number = i as i32 + 1;
-                let actor = format!("00000095-0000-0001-0000-{number:012x}");
-                let uuid = [149, 1, 0, number];
-                assert!(game.run_command(&format!(r#"summon pig 4.5 200 4.5 {{UUID:[I;149,1,0,{number}],Tags:["h149"],Health:10f,NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b,Motion:[0d,0d,0d],Rotation:[11f,7f]}}"#)));
-                let id = *game
-                    .persist
-                    .uuids
-                    .iter()
-                    .find(|(_, u)| **u == uuid)
-                    .unwrap()
-                    .0;
-                assert!(game.mobs.iter().any(|m| m.id == id));
-                assert!(game.run_command(&format!("execute if entity @e[type=pig,nbt={{UUID:[I;149,1,0,{number}],Health:10f,NoAI:1b,NoGravity:1b,Pos:[4.5d,200d,4.5d],Motion:[0d,0d,0d],Rotation:[11f,7f]}}]")));
-                assert!(game.world.loaded(4, 4));
-                let before = game.command_target_nbt(Target::Mob(id)).unwrap();
-                assert_eq!(pos_bits(&before), [4.5f64, 200.0, 4.5].map(f64::to_bits));
-                assert_eq!(before.get("UUID"), Some(&Tag::IntArray(uuid.to_vec())));
-                assert_eq!(before.get("Health"), Some(&Tag::Float(10f32.to_bits())));
-                // Discard retained raw input: only actual modeled position may prove this.
-                game.persist.raw.remove(&id);
-                assert!(game.run_command("scoreboard players set #r h149 91"));
-                assert!(game.run_command("scoreboard players set #s h149 17"));
-                assert!(
-                game.run_command(&format!(
-                    "execute store result score #r h149 store success score #s h149 run {command}"
-                )),
-                "actual command accepted: {name}"
-            );
-                assert_eq!(game.score.board.score("#r", "h149").unwrap().value, 1);
-                assert_eq!(game.score.board.score("#s", "h149").unwrap().value, 1);
-                let model = game.mobs.iter().find(|m| m.id == id).unwrap();
-                let model_bits =
-                    [model.position.x, model.position.y, model.position.z].map(f64::to_bits);
-                let saved = game.command_target_nbt(Target::Mob(id)).unwrap();
-                let got = pos_bits(&saved);
-                assert_eq!(
-                    model_bits, got,
-                    "actual model and typed canonical save agree: {name}"
-                );
-                assert_eq!(saved.get("UUID"), before.get("UUID"));
-                for key in ["Health", "NoAI", "NoGravity", "Rotation", "Motion"] {
-                    assert_eq!(saved.get(key), before.get(key), "unchanged {key}: {name}");
-                }
-                assert!(
-                    game.run_command(&format!("execute as {actor} at @s if block ~ 199 ~ stone"))
-                );
-                assert!(game.world.loaded(
-                    f64::from_bits(got[0]).floor() as i32,
-                    f64::from_bits(got[2]).floor() as i32,
-                ));
-                if control {
-                    assert_eq!(
-                        got, want,
-                        "independent world/relative/anchor control {name}"
-                    );
-                } else if got != want {
-                    failures.push((name, got, want));
-                }
-                assert_eq!(game.world.game_time, clock, "zero observation ticks");
-            }
-            assert!(
-                failures.is_empty(),
-                "actual registered local-coordinate bit mismatches: {failures:#?}"
-            );
-        });
-    }
-}
+#[path = "local_coordinate_command_tests.rs"]
+mod local_coordinate_command_tests;
 
 #[cfg(test)]
 mod query_feedback_tests {

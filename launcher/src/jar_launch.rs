@@ -12,13 +12,30 @@ use std::{
     sync::mpsc::{self, Sender},
 };
 
-pub fn client(mut command: Command, launch: Launch, run: Option<String>, tx: Sender<Msg>) {
+/// `profile` turns the command into the instance's first, on the thread too: a modpack's carried
+/// mods are read whole for it, tens of thousands of files in a large pack (#18074).
+pub fn client(
+    mut command: Command,
+    profile: impl FnOnce(&mut Command) -> Result<(), String> + Send + 'static,
+    launch: Launch,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    run: Option<String>,
+    tx: Sender<Msg>,
+) {
     std::thread::spawn(move || {
-        let prepared = with_consent(&tx, |permission| {
-            jars::prepare_launch(&mut command, &launch, permission)
-        })
-        .map(|()| launch::wrap(command, &launch))
-        .map_err(|error| error.to_string());
+        let say = |stderr: &str, shown: &str| crate::play_step::say(&tx, stderr, shown.into());
+        say(
+            "applying the instance's profile",
+            tr("Applying the instance's profile…"),
+        );
+        let prepared = profile(&mut command).and_then(|()| {
+            say("preparing Java jars", tr("Preparing Java jars…"));
+            with_consent(&tx, |permission| {
+                jars::prepare_launch(&mut command, &launch, permission)
+            })
+            .map_err(|error| error.to_string())
+            .and_then(|()| launch::wrap_stoppable(command, &launch, &stop))
+        });
         let _ = tx.send(Msg::JarClient {
             run,
             prepared: Box::new(prepared),
@@ -75,5 +92,45 @@ pub fn consent(
         Err(_) => {
             let _ = reply.send(false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Play turns the command into the instance's on the launch's thread, never the window's: a
+    /// modpack's carried mods are read whole there (#18074). Its error ends the start like any
+    /// other, as the message the window shows.
+    #[test]
+    fn the_profile_is_applied_off_the_calling_thread() {
+        let (tx, rx) = mpsc::channel();
+        let window = std::thread::current().id();
+        let profile = move |_: &mut Command| -> Result<(), String> {
+            match std::thread::current().id() == window {
+                true => Err("on the window's thread".into()),
+                false => Err("port the pack first".into()),
+            }
+        };
+        let run = Some("port:big".to_owned());
+        client(
+            Command::new("game"),
+            profile,
+            Launch::default(),
+            Default::default(),
+            run,
+            tx,
+        );
+        let wait = std::time::Duration::from_secs(30);
+        // It says its step first, then ends.
+        let Msg::PlayStep(step) = rx.recv_timeout(wait).unwrap() else {
+            panic!("no step said");
+        };
+        assert_eq!(step, tr("Applying the instance's profile…"));
+        let Msg::JarClient { run, prepared } = rx.recv_timeout(wait).unwrap() else {
+            panic!("not the start's end");
+        };
+        assert_eq!(run.as_deref(), Some("port:big"));
+        assert_eq!((*prepared).unwrap_err(), "port the pack first");
     }
 }

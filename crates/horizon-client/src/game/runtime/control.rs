@@ -171,7 +171,7 @@ impl Game<'_> {
     }
 
     fn add_async_occlusion_stats(&self, summary: &mut Value) {
-        if let Some(culler) = &self.async_occlusion_culler {
+        if let Some(culler) = self.occlusion.asynchronous() {
             summary["async_occlusion_culling"] = culler.stats_value();
         }
     }
@@ -195,7 +195,7 @@ impl Game<'_> {
     }
     fn reset_frame_stats(&mut self) {
         self.frame_stats.reset();
-        if let Some(culler) = &self.async_occlusion_culler {
+        if let Some(culler) = self.occlusion.asynchronous() {
             culler.reset_stats();
         }
     }
@@ -1551,6 +1551,8 @@ impl Game<'_> {
                 "backend": format!("{:?}", r.info.backend),
                 "size": [r.config.width, r.config.height],
                 "present_mode": format!("{:?}", r.config.present_mode),
+                "msaa_requested": r.msaa_requested(),
+                "msaa_samples": r.msaa_samples(),
                 "drawn_sections": r.drawn_sections,
                 "section_draws": r.section_draws,
                 "section_draw_calls": r.section_draw_calls,

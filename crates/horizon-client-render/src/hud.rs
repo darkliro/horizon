@@ -12,7 +12,8 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use model_reducing::reducible_model_sprites;
+pub use model_reducing::set_mod_namespaces;
+use model_reducing::{full_size_sprites, mod_namespaces, reducible_model_sprites};
 
 mod animate;
 pub mod cit_glint;
@@ -289,14 +290,10 @@ pub fn decode_image_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
 
 /// A PNG in memory as RGBA pixels.
 pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
-    decoder.ignore_checksums(true);
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info()?;
-    let mut bytes = vec![0; reader.output_buffer_size().ok_or("image too large")?];
+    let (mut reader, mut bytes) = read_png(data)?;
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
-    let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+    let mut rgba = Vec::with_capacity(info.width as usize * info.height as usize * 4);
     for p in bytes[..info.buffer_size()].chunks_exact(channels) {
         rgba.extend(match channels {
             4 => [p[0], p[1], p[2], p[3]],
@@ -307,20 +304,24 @@ pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     }
     Ok((info.width, info.height, rgba))
 }
-/// The most texels of OptiFine random entity variants the entity atlas packs: 2048 rows of
-/// its 4096, which keeps the default atlas (4096x5120) under the 8192 rows many GPUs take.
+/// The most texels of OptiFine random entity variants and custom entity models' textures the
+/// entity atlas packs: 2048 rows of its 4096, which keeps the default atlas (4096x5120) under
+/// the 8192 rows many GPUs take.
 const RANDOM_TEXELS: u64 = 4096 * 2048;
-/// The variant images (and `overlays`) the atlas packs: every variant before any overlay, by
-/// name, while their sizes add up to at most `budget` texels. A full budget drops glows before
-/// looks.
+/// The images beside the textures the atlas walks (random variants, custom entity models'
+/// textures) and their `overlays` the atlas packs: random variants first, then the custom
+/// entity models' textures (`cem`), then every overlay, by name within each, while their sizes
+/// add up to at most `budget` texels. A full budget drops glows before looks, and a model's
+/// texture before a variant that already drew.
 fn budgeted<'a>(
     source: &ResourceSource,
     files: impl Iterator<Item = &'a String>,
     overlays: &HashSet<String>,
+    cem: &HashSet<String>,
     budget: u64,
 ) -> HashSet<String> {
     let mut files: Vec<&String> = files.collect();
-    files.sort_by_key(|p| (overlays.contains(*p), *p));
+    files.sort_by_key(|p| (overlays.contains(*p), cem.contains(*p), *p));
     within_budget(source, &files, budget)
 }
 /// The `files` (in order) whose sizes add up to at most `budget` texels.
@@ -346,6 +347,92 @@ pub fn png_bytes_size(data: &[u8]) -> Option<(u32, u32)> {
     let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap_or_default());
     Some((field(16), field(20)))
 }
+/// A pack PNG's reader, set to give 8-bit samples, and the zeroed buffer its `next_frame` fills;
+/// an error when the header claims more pixels than any texture it could fill. The PNG reader
+/// trusts the header and leaves this buffer to its caller, so a pack file of a few dozen bytes
+/// could otherwise ask for gigabytes and end the game. The header is checked before `read_info`,
+/// whose own row-size arithmetic trusts it too. Only the pixel count is bounded, by a full
+/// [`MAX_ATLAS_SIZE`] atlas (1 GiB of RGBA): a sheet may be far longer than any texture side
+/// (an animation strip of small frames), so sides are checked on what is cut from it.
+pub(crate) fn read_png<B: AsRef<[u8]>>(
+    bytes: B,
+) -> std::result::Result<(png::Reader<std::io::Cursor<B>>, Vec<u8>), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // As stb_image, which never checks chunk CRCs: packs ship PNGs with wrong ones.
+    decoder.ignore_checksums(true);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let (width, height) = decoder
+        .read_header_info()
+        .map_err(|e| e.to_string())?
+        .size();
+    check_png_size(width, height)?;
+    let reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("a {width}x{height} PNG exceeds the decoder's limits"))?;
+    Ok((reader, vec![0; size]))
+}
+fn check_png_size(width: u32, height: u32) -> std::result::Result<(), String> {
+    let atlas = u64::from(MAX_ATLAS_SIZE);
+    if u64::from(width) * u64::from(height) > atlas * atlas {
+        return Err(format!(
+            "a {width}x{height} PNG is larger than any texture it could fill"
+        ));
+    }
+    Ok(())
+}
+/// A PNG whose header claims `width` x `height` RGBA pixels and whose image data is empty: a
+/// few dozen bytes that ask a decoder to reserve memory for every claimed pixel.
+#[cfg(test)]
+pub(crate) fn claimed_size_png(width: u32, height: u32) -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut ihdr = [0; 13];
+    ihdr[..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    // 8 bits a channel, RGBA, no interlace.
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    chunk(b"IHDR", &ihdr);
+    // An empty zlib stream.
+    chunk(b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    chunk(b"IEND", &[]);
+    png
+}
+/// A real `width` x `height` RGBA PNG, every pixel opaque grey.
+#[cfg(test)]
+pub(crate) fn grey_png(width: u32, height: u32) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let pixels = [128, 128, 128, 255].repeat(width as usize * height as usize);
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    encoded
+}
 /// A PNG's width and height, from its header alone.
 fn png_size(source: &ResourceSource, path: &str) -> Option<(u32, u32)> {
     png_bytes_size(&source.read_head(path, 24).ok()?)
@@ -368,7 +455,7 @@ type PackedImage = (String, u32, u32, Vec<u8>);
 /// for the world's sprite arrays.
 fn strip_frame(pixels: &[u8], stride: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
     let side = w.max(h);
-    let mut out = Vec::with_capacity((side * side * 4) as usize);
+    let mut out = Vec::with_capacity(side as usize * side as usize * 4);
     for row in 0..side {
         let source_row = y + row * h / side;
         for column in 0..side {
@@ -394,8 +481,15 @@ fn first_frame(
         meta.frame_size(w as i32, h as i32)
     });
     match (u32::try_from(fw), u32::try_from(fh)) {
+        // A frame whose square no atlas holds keeps the whole image, as frame metadata that
+        // doesn't fit does, rather than ask for gigabytes.
         (Ok(fw), Ok(fh))
-            if fw > 0 && fh > 0 && w % fw == 0 && h % fh == 0 && (fw, fh) != (w, h) =>
+            if fw > 0
+                && fh > 0
+                && w % fw == 0
+                && h % fh == 0
+                && (fw, fh) != (w, h)
+                && crate::sprites::check_frames(fw.max(fh), 1).is_ok() =>
         {
             let side = fw.max(fh);
             (side, side, strip_frame(&pixels, w, 0, 0, fw, fh))
@@ -1145,8 +1239,8 @@ impl HudAtlas {
             }
         }
         files.retain(|p| !menu_pictures::menu_picture_only(p));
-        // OptiFine random entity variants, under the names their scan gives them (those
-        // outside `textures/` are `<ns>:optifine/random/...`).
+        // OptiFine random entity variants and custom entity models' textures, under the names
+        // their scans give them (those outside `textures/` are `<ns>:optifine/...`).
         let random_textures = if folders.contains(&"entity") {
             horizon_optifine::random_textures::RandomTextures::scan(root)
         } else {
@@ -1172,20 +1266,29 @@ impl HudAtlas {
         for (file, name) in extra {
             named.insert(file.to_owned(), name.to_owned());
         }
+        // The PNGs beside a `.jem` under `optifine/cem/` or `emf/cem/`: no `textures/` walk
+        // reaches them, and a model's own texture is one the atlas has to pack.
+        let mut cem_textures: HashSet<String> = HashSet::new();
+        if folders.contains(&"entity") {
+            let textures = horizon_optifine::cem::files::texture_files(root);
+            cem_textures = textures.iter().map(|(path, _)| path.clone()).collect();
+            named.extend(textures);
+        }
         if !named.is_empty() {
-            // A pack's variants can't grow the shared atlas past what a GPU takes: every variant
-            // (those beside their texture too) counts, in name order, and those past the budget
-            // stay out (their mobs wear the texture itself), not the whole pack.
-            // Overlays and blink frames only after every variant.
+            // A pack's variants and model textures can't grow the shared atlas past what a GPU
+            // takes: every one (those beside their texture too) counts, the random variants
+            // before the model textures and both before overlays and blink frames, by name
+            // within each; those past the budget stay out (their mobs wear the texture itself),
+            // not the whole pack.
             let overlays: HashSet<String> = emissive
                 .files()
                 .chain(blinks.files())
                 .map(|(f, _)| f.to_owned())
                 .collect();
-            let kept = budgeted(root, named.keys(), &overlays, RANDOM_TEXELS);
+            let kept = budgeted(root, named.keys(), &overlays, &cem_textures, RANDOM_TEXELS);
             if kept.len() < named.len() {
                 log::warn!(
-                    "{} random entity textures left out of the atlas: past its budget",
+                    "{} entity textures left out of the atlas: past its budget",
                     named.len() - kept.len()
                 );
             }
@@ -1435,12 +1538,29 @@ impl HudAtlas {
             Self::layout_leaving_out(&mut images, &mut animated, &cit_names, MAX_ATLAS_SIZE)
                 .or_else(|error| -> Result<_> {
                     let models = reducible_model_sprites(root, &images, &bordered);
-                    let layout = Self::layout_reducing_models(
+                    let reduced = Self::layout_reducing_models(
                         &mut images,
                         &mut gui_sizes,
                         &models,
                         MAX_ATLAS_SIZE,
-                    )?;
+                    );
+                    let layout = match reduced {
+                        Ok(layout) => layout,
+                        Err(_) => {
+                            let keep = full_size_sprites(root, &images, &bordered);
+                            let layout = Self::layout_capping_mod_textures(
+                                &mut images,
+                                &mut gui_sizes,
+                                &keep,
+                                &mod_namespaces(),
+                                MAX_ATLAS_SIZE,
+                            )?;
+                            log::warn!(
+                                "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
+                            );
+                            return Ok(layout);
+                        }
+                    };
                     log::warn!(
                         "reduced HUD model texture resolution to keep the resource pack: {error}"
                     );
@@ -3279,6 +3399,51 @@ mod tests {
         assert!(decode_bytes(webp).is_err());
     }
 
+    /// A pack PNG of a few dozen bytes whose header claims one row more than a full atlas would
+    /// make the decoder reserve 1 GiB; it is refused from its header, with nothing reserved.
+    #[test]
+    fn decode_bytes_refuses_a_png_claiming_a_huge_size() {
+        let error = decode_bytes(&claimed_size_png(16_385, 16_384)).unwrap_err();
+        assert!(
+            error.to_string().contains("16385x16384 PNG is larger"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn png_sizes_are_bounded_by_a_full_atlas() {
+        let texels = MAX_ATLAS_SIZE * MAX_ATLAS_SIZE;
+        assert_eq!(check_png_size(MAX_ATLAS_SIZE, MAX_ATLAS_SIZE), Ok(()));
+        assert_eq!(check_png_size(16, texels / 16), Ok(()));
+        assert_eq!(check_png_size(texels, 1), Ok(()));
+        assert!(check_png_size(MAX_ATLAS_SIZE + 1, MAX_ATLAS_SIZE).is_err());
+        assert!(check_png_size(texels + 1, 1).is_err());
+        assert!(check_png_size(u32::MAX, u32::MAX).is_err());
+    }
+
+    /// A strip of 16x16 frames longer than any texture side holds about 2 MiB and loads.
+    #[test]
+    fn decode_bytes_reads_a_strip_longer_than_any_texture_side() {
+        let height = crate::atlas_sources::MAX_SPRITE_SIDE as u32 + 16;
+        let (width, read_height, rgba) = decode_bytes(&grey_png(16, height)).unwrap();
+        assert_eq!((width, read_height), (16, height));
+        assert_eq!(rgba.len(), 16 * height as usize * 4);
+        assert_eq!(rgba[..4], [128, 128, 128, 255]);
+    }
+
+    /// A HUD sprite's first frame whose square no atlas holds keeps the whole image, as frame
+    /// metadata that doesn't fit does; an ordinary strip gives its first square frame.
+    #[test]
+    fn a_first_frame_too_large_to_square_keeps_the_image() {
+        let wide = AnimationMetadata::from_json(r#"{"width":16385,"height":1}"#).unwrap();
+        let image = (16_385, 2, vec![7; 16_385 * 2 * 4]);
+        let (w, h, pixels) = first_frame(image, Some(&wide));
+        assert_eq!((w, h, pixels.len()), (16_385, 2, 16_385 * 2 * 4));
+        let strip = AnimationMetadata::from_json("{}").unwrap();
+        let (w, h, pixels) = first_frame((16, 32, vec![7; 16 * 32 * 4]), Some(&strip));
+        assert_eq!((w, h, pixels.len()), (16, 16, 16 * 16 * 4));
+    }
+
     #[test]
     fn decode_bytes_ignores_crc_checksum_error() {
         let mut encoded = Vec::new();
@@ -3709,6 +3874,20 @@ mod tests {
         assert!(atlas.random_textures.get("entity/pig/pig").is_some());
         fs::remove_dir_all(&root).unwrap();
     }
+    /// A custom entity model's texture beside its model, outside `textures/`, packs under the
+    /// name `atlas_name` gives it, so the model draws with it.
+    #[test]
+    fn cem_texture_beside_its_model_packs_under_its_atlas_name() {
+        let root = std::env::temp_dir().join(format!("horizon-atlas-cem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cem = root.join("assets/minecraft/optifine/cem");
+        fs::create_dir_all(&cem).unwrap();
+        write_strip(&cem.join("zombie2.png"), 64, 32, &[[0, 200, 0, 255]], None);
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let rect = atlas.sprites["minecraft:optifine/cem/zombie2"];
+        assert_eq!(texel_at(&atlas, rect, 0, 0), [0, 200, 0, 255]);
+        fs::remove_dir_all(&root).unwrap();
+    }
     /// A random variant's emissive overlay packs beside the variant, under its name.
     #[test]
     fn variant_overlays_pack_under_their_names() {
@@ -3786,8 +3965,36 @@ mod tests {
         write_strip(&dir.join(&overlay), 16, 16, &[[1, 2, 3, 255]], None);
         let overlays: HashSet<String> = [overlay.clone()].into();
         let all = [&files[0], &overlay, &files[1]];
-        let kept = budgeted(&source, all.into_iter(), &overlays, 600);
+        let kept = budgeted(&source, all.into_iter(), &overlays, &HashSet::new(), 600);
         assert_eq!(kept, [files[0].clone(), files[1].clone()].into());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    /// A budget that holds one image keeps the random variant that already drew and drops the
+    /// custom entity model's texture, though its path sorts first.
+    #[test]
+    fn a_models_texture_leaves_the_budget_after_a_random_variant() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-atlas-cem-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let source = ResourceSource::directory(dir.clone());
+        let cem = "assets/minecraft/optifine/cem/zombie2.png".to_owned();
+        let variant = "assets/minecraft/optifine/random/entity/zombie/zombie2.png".to_owned();
+        for path in [&cem, &variant] {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            write_strip(&file, 16, 16, &[[1, 2, 3, 255]], None);
+        }
+        // 256 texels each: 256 holds the variant alone.
+        let models: HashSet<String> = [cem.clone()].into();
+        let kept = budgeted(
+            &source,
+            [&cem, &variant].into_iter(),
+            &HashSet::new(),
+            &models,
+            256,
+        );
+        assert_eq!(kept, [variant].into());
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
@@ -4682,6 +4889,92 @@ texture=wide",
         let slot = images.iter().find(|i| i.0 == "horizon/map").unwrap();
         assert_eq!((slot.1, slot.2), (128, 128));
         assert!(slot.3.is_empty());
+    }
+    /// Past the models, a mod's other textures lose resolution, the largest
+    /// first and keeping their logical size and shape; vanilla's, the kept
+    /// ones (font sheets) and run-time slots don't.
+    #[test]
+    fn overflowing_mod_textures_are_capped_largest_first() {
+        let mut images = vec![
+            (
+                "big:gui/book".into(),
+                1024,
+                512,
+                [1, 2, 3, 255].repeat(1024 * 512),
+            ),
+            (
+                "gui/panel".into(),
+                512,
+                256,
+                [7, 8, 9, 255].repeat(512 * 256),
+            ),
+            (
+                "big:font/glyphs".into(),
+                256,
+                256,
+                [5, 5, 5, 255].repeat(256 * 256),
+            ),
+            (
+                "big:entity/boss".into(),
+                128,
+                128,
+                [4, 5, 6, 255].repeat(128 * 128),
+            ),
+            ("big:gui/slot".into(), 128, 128, Vec::new()),
+        ];
+        let keep = HashSet::from(["big:font/glyphs".to_owned()]);
+        let mods = HashSet::from(["big".to_owned()]);
+        let mut sizes = HashMap::new();
+        assert!(HudAtlas::layout(&images, 1024).is_err());
+        let (width, placements, free) =
+            HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &keep, &mods, 1024)
+                .unwrap();
+        assert_inside(&images, width, &placements, free);
+        let find = |name: &str| images.iter().find(|i| i.0 == name).unwrap().clone();
+        let book = find("big:gui/book");
+        assert_eq!((book.1, book.2), (256, 128));
+        assert_eq!(book.3, [1, 2, 3, 255].repeat(256 * 128));
+        assert_eq!(sizes["big:gui/book"], (1024, 512));
+        // Smaller than the cap that was enough: left as it was.
+        let boss = find("big:entity/boss");
+        assert_eq!((boss.1, boss.2), (128, 128));
+        assert!(!sizes.contains_key("big:entity/boss"));
+        for (name, w, h) in [
+            ("gui/panel", 512, 256),
+            ("big:font/glyphs", 256, 256),
+            ("big:gui/slot", 128, 128),
+        ] {
+            let image = find(name);
+            assert_eq!((image.1, image.2), (w, h), "{name}");
+        }
+    }
+    /// The last cap tried is 16 texels, also when halving would pass below it;
+    /// a namespace no mod owns is never capped.
+    #[test]
+    fn mod_textures_are_capped_down_to_16_texels() {
+        let mut images = vec![
+            (
+                "gui/wide".into(),
+                1000,
+                490,
+                [1, 1, 1, 255].repeat(1000 * 490),
+            ),
+            ("m:gui/dot".into(), 31, 31, [2, 2, 2, 255].repeat(31 * 31)),
+        ];
+        assert!(HudAtlas::layout(&images, 1024).is_err());
+        let mut sizes = HashMap::new();
+        // `m` is no mod's (a resource pack's own namespace): its texture stays whole.
+        let none = HashSet::new();
+        assert!(
+            HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &none, &none, 1024)
+                .is_err()
+        );
+        assert!(sizes.is_empty());
+        let mods = HashSet::from(["m".to_owned()]);
+        HudAtlas::layout_capping_mod_textures(&mut images, &mut sizes, &none, &mods, 1024).unwrap();
+        let dot = images.iter().find(|i| i.0 == "m:gui/dot").unwrap();
+        assert_eq!((dot.1, dot.2), (16, 16));
+        assert_eq!(sizes["m:gui/dot"], (31, 31));
     }
     #[test]
     fn fitting_models_keep_their_pixels_and_existing_logical_sizes() {

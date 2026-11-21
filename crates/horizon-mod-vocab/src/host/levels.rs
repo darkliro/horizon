@@ -61,6 +61,32 @@ pub trait LevelsBackend {
         structure: &str,
         parameters: StructureSearch,
     ) -> Option<StructureSearchResult>;
+    /// Side: server.
+    /// `StructureManager.getStructureAt` and `getStructureWithPieceAt` in one read: every
+    /// structure the chunk at `pos` refers to whose start's box or one of whose pieces, as
+    /// placed, holds `pos`, with which of the two (`in_box`, `in_piece`). Reads the level in place or
+    /// parked from the starts the generator holds: loads no chunk and builds no start. Empty
+    /// for a chunk that refers to no structure there; None on a client, for a stale or
+    /// unavailable level, for a chunk that isn't loaded and for one whose references the level
+    /// can't resolve now (a level without generated terrain, or starts the generator no longer
+    /// holds).
+    #[access(WorldOnly)]
+    fn level_structures_at(&self, level: LevelRef, pos: [i32; 3]) -> Option<Vec<StructureAt>>;
+    /// Side: server.
+    /// The block entities in the box from `min` to `max`, maxima exclusive, in the chunks of it
+    /// that are loaded (`LevelChunk.getBlockEntities` over those chunks; Paper's
+    /// `Chunk.getTileEntities`): each one's position and type id, sorted by position (x, then y,
+    /// then z). Reads the level in place or parked and loads nothing; a block entity out for its
+    /// own tick is not listed during that tick. None on a client, for a stale or unavailable
+    /// level, for an empty box (a minimum not below its maximum), for one wholly outside the
+    /// level's height and for one over more than 64 chunks.
+    #[access(WorldOnly)]
+    fn level_block_entities(
+        &self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Option<Vec<BlockEntityAt>>;
     /// Side: both.
     /// `Level.getSkyDarken`: the sky-light reduction from dimension, time and weather.
     /// Reads any loaded server level, including parked levels, or the current client level.
@@ -345,9 +371,10 @@ pub trait LevelsBackend {
     /// (`ClientLevel.hasChunkAt`). API 381.
     #[access(WorldOnly)]
     fn level_is_loaded(&self, level: LevelRef, pos: [i32; 3]) -> bool;
-    /// Side: server.
+    /// Side: both.
     /// The stored light of one layer at `pos` (`BlockAndLightGetter.getBrightness`), 0 to 15.
-    /// None as for `block_state`: a position that isn't loaded has no light to read.
+    /// None as for `block_state`: a position that isn't loaded has no light to read. On a client,
+    /// the level it shows or a level opened for viewing, the light the server sent.
     #[access(WorldOnly)]
     fn level_brightness(&self, level: LevelRef, layer: LightLayer, pos: [i32; 3]) -> Option<i32>;
     /// Side: both.
@@ -764,6 +791,14 @@ pub trait LevelsBackend {
     /// height. Constant time, no allocation.
     #[access(WorldOnly)]
     fn level_capability_generation(&self, level: LevelRef, pos: [i32; 3]) -> Option<u64>;
+    /// Side: server.
+    /// `BlockState.isRedstoneConductor(level, pos)` for the block at `pos`: whether it passes
+    /// strong power on to its neighbours (stone and soul sand do; glass, single slabs and
+    /// leaves don't), answered by the game's redstone engine. The engine reads the state
+    /// alone, so today a block entity's live shape is ignored: an open shulker box still
+    /// conducts. None for a position that isn't loaded, and as for `signal`.
+    #[access(WorldOnly)]
+    fn level_is_redstone_conductor(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool>;
 }
 /// The handles' writes of the `levels` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

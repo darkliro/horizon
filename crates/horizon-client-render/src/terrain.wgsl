@@ -205,7 +205,7 @@ struct TerrainOut {
     color: vec4<f32>,
     spherical: f32,
     cylindrical: f32,
-    // How the face shines in HDR output (mesher.rs's `EMISSION_BITS`): 0 not
+    // How the face shines in HDR output (mesher.rs's `TIER_BITS`): 0 not
     // at all, 1 to 4 the tier with its bright parts, 5 to 8 the tier all over.
     emission: u32,
     // Block and sky light over 16.
@@ -698,7 +698,7 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     if globals.colored_count.x > 0u {
         out.color = vec4(min(out.color.rgb + color.rgb * native_colored_light(pos), vec3(1.0)), out.color.a);
     }
-    out.emission = 15u - (u32(round(color.a * 255.0)) & 15u);
+    out.emission = 7u - (u32(round(color.a * 255.0)) & 7u);
     out.height = pos.y;
     let eye = pos - globals.view_origin.xyz;
     out.spherical = length(eye);
@@ -723,6 +723,27 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     let in = from_wire(wire);
     return solid_color(in);
 }
+// Shader alpha-to-coverage leaves colour alpha available for HDR's light codes.
+// Smooth the cutout threshold over its pixel footprint, then retain 0..4 samples.
+fn cutout_coverage(alpha: f32, opaque: bool) -> u32 {
+    let width = max(fwidth(alpha), 0.0001);
+    let coverage = clamp((alpha - 0.5) / width + 0.5, 0.0, 1.0);
+    // Masks 0, 1, 5, 13, 15 in four bits each, without a dynamically indexed private
+    // constant array (some Adreno Vulkan compilers cannot link those; see `faded`).
+    let mask = (0xfd510u >> (u32(round(coverage * 4.0)) * 4u)) & 15u;
+    return select(mask, 15u, opaque);
+}
+struct TerrainMsaa {
+    @location(0) color: vec4<f32>,
+    @builtin(sample_mask) coverage: u32,
+}
+// 4x MSAA's solid terrain (gfx/msaa.rs): `solid_color` with its cutout as sample coverage.
+@fragment fn fs_solid_msaa(wire: TerrainWire) -> TerrainMsaa {
+    let in = from_wire(wire);
+    let s = solid_uncut(in);
+    let mask = cutout_coverage(s.color.a, (in.layer & 0x8000u) != 0u);
+    return TerrainMsaa(solid_finish(in, s.texel, s.color), mask);
+}
 // `fs_solid` for the opaque pass (`opaque_quad`): no fade, no cutout, no discard.
 @fragment fn fs_opaque(wire: TerrainWire) -> @location(0) vec4<f32> {
     let in = from_wire(wire);
@@ -739,16 +760,26 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     return solid_color(in);
 }
 fn solid_color(in: TerrainOut) -> vec4<f32> {
+    let s = solid_uncut(in);
+    // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
+    if s.color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
+    return solid_finish(in, s.texel, s.color);
+}
+// A solid pixel's sprite texel and colour before its cutout, which `solid_color` discards
+// below half alpha and `fs_solid_msaa` turns into coverage.
+struct SolidUncut {
+    texel: vec4<f32>,
+    color: vec4<f32>,
+}
+fn solid_uncut(in: TerrainOut) -> SolidUncut {
     let dx = dpdx(in.local);
     let dy = dpdy(in.local);
     if faded(in.fade, in.local, dx, dy) { discard; }
-    // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     let texel = sprite(in.uv, in.layer & 0x7fffu);
     var color = texel * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
-    if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
-    return solid_finish(in, texel, color);
+    return SolidUncut(texel, color);
 }
 // The rest of a solid pixel's colour once it is kept: emission and fog.
 fn solid_finish(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>) -> vec4<f32> {
@@ -850,7 +881,7 @@ struct NativeFluidOut {
 @fragment fn fs_native_fluid(in: NativeFluidOut) -> @location(0) vec4<f32> {
     // The source translucent shader has no alpha discard; transparent texels write depth too.
     let color = sprite_grad(in.uv, in.sprite, dpdx(in.uv), dpdy(in.uv)) * in.color;
-    return apply_fog(color, in.spherical, in.cylindrical);
+    return frame_stored(apply_fog(color, in.spherical, in.cylindrical));
 }
 
 // Native terrain models retain floating-point transformed normals. Fullbright still receives
@@ -890,7 +921,7 @@ struct NativeModelOut {
         color = vec4(color.rgb * shade, color.a);
     }
     let finished = apply_fog(color, in.spherical, in.cylindrical);
-    return vec4(finished.rgb, select(finished.a, 1.0, HDR_WRITE_LIGHT));
+    return frame_stored(vec4(finished.rgb, select(finished.a, 1.0, HDR_WRITE_LIGHT)));
 }
 
 // Sky (SkyRenderer): the 10-vertex sky disc fan at y = 16 (radius 512) in

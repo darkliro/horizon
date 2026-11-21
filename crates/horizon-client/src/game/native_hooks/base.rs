@@ -127,6 +127,21 @@ impl GameLevel<'_> {
         self.fire_dragon_egg_form(dimension, pos, cancel);
     }
 
+    /// The Ender Dragon fight is won, on every win: `pos` is where its egg forms, `won_before`
+    /// whether the fight was won before, `forms` whether an egg forms unless a mod answers.
+    /// A mod's answer in `egg` places one or leaves the block. Server-side.
+    #[inline(always)]
+    pub(in crate::game) fn native_dragon_fight_won(
+        &self,
+        dimension: LevelDimension,
+        pos: BlockPos,
+        won_before: bool,
+        forms: bool,
+        egg: &mut Option<bool>,
+    ) {
+        self.fire_dragon_fight_won(dimension, pos, won_before, forms, egg);
+    }
+
     /// An authoritative server is about to deliver `neighborChanged`.
     /// State and block IDs are valid in this level's registries for this call.
     /// The host is the level with its ticks, as vanilla's `neighborChanged` gets the
@@ -742,13 +757,14 @@ impl Game<'_> {
     /// Only the client's own consuming answer stops its hand loop.
     pub(in crate::game) fn native_entity_interact(
         &mut self,
+        dimension: &str,
         hand: Hand,
         entity: i32,
         kind: &str,
         stack: Option<&ItemStack>,
         result: &mut Option<mod_api::InteractionResult>,
     ) {
-        self.fire_entity_interact(hand, entity, kind, stack, result);
+        self.fire_entity_interact(dimension, hand, entity, kind, stack, result);
     }
     /// A player left-clicks the block `state` at `pos`, `face` the face hit
     /// (`[0, 1, 0]` is the top): where `ServerPlayerGameMode.handleBlockBreakAction`
@@ -1858,12 +1874,13 @@ impl Game<'_> {
     /// is `/kill`.
     pub(in crate::game) fn native_hanging_break(
         &mut self,
+        dimension: &str,
         player: Option<u128>,
         kind: &str,
         pos: [i32; 3],
         cancel: &mut bool,
     ) {
-        self.fire_hanging_break(player, kind, pos, cancel);
+        self.fire_hanging_break(dimension, player, kind, pos, cancel);
     }
     /// A server player empties a bucket at `pos` (`fluid`: `minecraft:water`,
     /// `minecraft:lava`, `minecraft:powder_snow`; a fish or axolotl bucket
@@ -3548,12 +3565,13 @@ impl Game<'_> {
     /// the world (`native_acting_player` says who).
     pub(in crate::game) fn native_attack_entity(
         &mut self,
+        dimension: &str,
         entity: i32,
         kind: &str,
         pos: [f64; 3],
         canceled: &mut bool,
     ) {
-        self.fire_attack_entity(entity, kind, pos, canceled);
+        self.fire_attack_entity(dimension, entity, kind, pos, canceled);
     }
     /// `dimension`'s level opened on the server (NeoForge's `LevelEvent.Load`,
     /// posted in `MinecraftServer.createLevels`): before any of its chunks

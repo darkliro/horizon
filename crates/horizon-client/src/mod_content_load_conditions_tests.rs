@@ -7,6 +7,20 @@ fn worldgen_entry_reads_the_feature_folder() {
         worldgen_entry("data/zinc/worldgen/feature/ore_zinc.json"),
         Some(("worldgen/features.json", "zinc:ore_zinc".to_owned()))
     );
+    assert_eq!(
+        worldgen_entry("data/zinc/worldgen/biome/foo.json"),
+        Some(("worldgen/biomes.json", "zinc:foo".to_owned()))
+    );
+    // Vanilla's biomes are not read from mods.
+    assert_eq!(
+        worldgen_entry("data/minecraft/worldgen/biome/plains.json"),
+        None
+    );
+    // A NeoForge data map on biomes is not a biome.
+    assert_eq!(
+        worldgen_entry("data/zinc/data_maps/worldgen/biome/map_color.json"),
+        None
+    );
     for folder in ["configured_feature", "nope"] {
         assert_eq!(
             worldgen_entry(&format!("data/zinc/worldgen/{folder}/ore_zinc.json")),

@@ -3094,6 +3094,11 @@ pub fn write_dat_durable(path: &Path, tag: Tag) -> Result<()> {
 /// `bytes` written to `path` through `<name>_new` and a rename, synced to the disk as
 /// [`write_dat_durable`] syncs: never a half-written file in place.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    Ok(write_durable_io(path, bytes)?)
+}
+
+/// [`write_durable`], keeping the operating system's error (its kind and code).
+pub fn write_durable_io(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -3101,8 +3106,7 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_file_name(format!("{file}_new"));
     write_synced(&temporary, bytes)?;
     fs::rename(&temporary, path)?;
-    sync_folder(path)?;
-    Ok(())
+    sync_folder(path)
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -3117,6 +3121,12 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn sync_folder(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(dir) = path.parent() {
+        // A bare file name's parent is "": the working directory.
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
         fs::File::open(dir)?.sync_all()?;
     }
     #[cfg(not(unix))]
@@ -3536,6 +3546,45 @@ pub struct Level {
     /// that file, not their own.
     pub singleplayer_file: bool,
 }
+
+/// Whether the player file can hold a stack's saved compound, warning about the
+/// stack it leaves out: the writer refuses a list or compound at
+/// `Limits::saved().max_depth` (`Writer::payload`), and the player compound is
+/// depth 0, so an `Inventory` or `EnderItems` element and an `equipment` value
+/// sit at depth 2. [`nbt::within_writer_depth`] applies the writer's own rule,
+/// including the synthetic layer it puts around a mixed-type list's elements.
+fn stack_fits_the_file(kind: &str, tag: &Tag) -> bool {
+    if nbt::within_writer_depth(tag, Limits::saved().max_depth - 2) {
+        return true;
+    }
+    log::warn!(
+        "Horizon: dropping {} from {kind} slot {} in the player save: its saved data nests past the NBT depth limit; the rest of the player is saved",
+        text(tag.get("id")).unwrap_or_default(),
+        number(tag.get("Slot")).unwrap_or(0),
+    );
+    false
+}
+
+/// A saved item list without the stacks the writer cannot hold. Vanilla writes
+/// such a stack without complaint (`Inventory.save` writes each non-empty slot
+/// through `ItemStackWithSlot.CODEC`, and `TagValueOutput.TypedListWrapper.add`
+/// skips an element whose codec fails, reporting it to the `ProblemReporter`),
+/// then `NbtAccounter.pushDepth` refuses the file on load and
+/// `PlayerDataStorage.load` rolls the player back to `.dat_old`. Dropping the
+/// one stack is what vanilla's list codec does, and the rest of the player
+/// survives instead of being lost whole (#18384).
+fn keep_writable(kind: &str, tag: Tag) -> Tag {
+    match tag {
+        Tag::List(elements) => Tag::List(
+            elements
+                .into_iter()
+                .filter(|element| stack_fits_the_file(kind, element))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 impl Level {
     /// `PrimaryLevelData.setDifficulty`: the level data holds the world's
     /// difficulty, so the game and the file follow each other and a world
@@ -3763,7 +3812,8 @@ impl Level {
         self.player_fall_particles = None;
         let n = |k: &str| number(p.get(k));
         let f = |k: &str| float(p.get(k));
-        self.position = read_doubles::<3>(p.get("Pos"));
+        self.position =
+            read_doubles::<3>(p.get("Pos")).map(crate::entity_nbt::clamp_loaded_position);
         if let Some(r) = read_doubles::<2>(p.get("Rotation")) {
             self.rotation = [r[0] as f32, r[1] as f32];
         }
@@ -3930,7 +3980,13 @@ impl Level {
                         .iter()
                         .find(|(_, saved)| saved == slot)
                     {
-                        equipment.set(*ordinal, Some(stack));
+                        // The compound `equipment.write` builds, for the check
+                        // alone: a stack past the bound leaves its slot empty.
+                        let mut entries = vec![("Slot", Tag::Byte(*slot as i8))];
+                        entries.extend(encode_item(&stack));
+                        if stack_fits_the_file("equipment", &Tag::compound(entries)) {
+                            equipment.set(*ordinal, Some(stack));
+                        }
                     }
                 }
             }
@@ -4045,8 +4101,14 @@ impl Level {
                 ),
             ),
             ("playerGameType", Tag::Int(self.mode())),
-            ("Inventory", Tag::List(inventory)),
-            ("EnderItems", encode_items(&self.ender_items)),
+            (
+                "Inventory",
+                keep_writable("inventory", Tag::List(inventory)),
+            ),
+            (
+                "EnderItems",
+                keep_writable("ender chest", encode_items(&self.ender_items)),
+            ),
             ("recipeBook", self.recipe_book.write()),
             ("abilities", abilities),
             (
@@ -4153,11 +4215,16 @@ impl Level {
     }
     /// Write every file; a world without a player UUID gets a random one.
     pub fn write(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, true, false)
+        self.write_internal(dir, true, false, false)
     }
     /// Dedicated servers save connected players separately.
     pub fn write_without_player(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, false, false)
+        self.write_internal(dir, false, false, false)
+    }
+    /// A crash's save that must leave the player as last saved: no player file, and a legacy
+    /// `Data.Player` stays, since before the first normal save it is the owner's only copy.
+    pub fn write_keeping_player(&mut self, dir: &Path) -> Result<()> {
+        self.write_internal(dir, false, false, true)
     }
     /// The temporary world a Realms upload packs
     /// (`RealmsCreateWorldFlow.createTemporaryWorldFolder`): level.dat as
@@ -4165,7 +4232,7 @@ impl Level {
     /// generation and game rules, and no player file or weather/clocks the server makes
     /// on its own. The caller writes the data packs and removes the folder.
     pub fn write_upload(&mut self, dir: &Path) -> Result<()> {
-        self.write_internal(dir, false, true)
+        self.write_internal(dir, false, true, false)
     }
 
     /// The player's file alone, `players/data/<singleplayer_uuid>.dat`
@@ -4180,7 +4247,13 @@ impl Level {
         write_dat(&player_file, self.player_tag())
     }
 
-    fn write_internal(&mut self, dir: &Path, write_player: bool, upload: bool) -> Result<()> {
+    fn write_internal(
+        &mut self,
+        dir: &Path,
+        write_player: bool,
+        upload: bool,
+        keep_legacy_player: bool,
+    ) -> Result<()> {
         fs::create_dir_all(dir)?;
         restore_level_dat(dir);
         let mut root = compound_or_empty(read_dat(&dir.join("level.dat")));
@@ -4224,6 +4297,9 @@ impl Level {
                 "CustomBossEvents",
                 "DragonFight",
             ] {
+                if keep_legacy_player && key == "Player" {
+                    continue;
+                }
                 map.remove(&JavaString::from(key));
             }
         }
@@ -5101,6 +5177,13 @@ fn effect_details(e: &crate::effects::SavedEffect) -> Vec<(&'static str, Tag)> {
 mod tests {
     use crate::mobs::spawner::SpawnDataExt;
 
+    /// A bare file name lives in the working directory: syncing its folder syncs `.`, not the
+    /// empty path, so a durable write there that renamed its file into place also succeeds.
+    #[test]
+    fn a_bare_file_name_syncs_the_working_directory() {
+        super::sync_folder(std::path::Path::new("level-not-written.json")).unwrap();
+    }
+
     #[test]
     fn saved_preset_editor_stems_supply_shapes_and_facts_below_pack_stems() {
         use super::*;
@@ -5657,6 +5740,365 @@ mod tests {
             .expect("referenced saved start");
         assert_eq!(restored.save(), original.save());
         assert_eq!(format!("{restored:?}"), format!("{original:?}"));
+    }
+
+    /// The three scattered-feature starts (desert pyramid, jungle temple,
+    /// buried treasure) are generated by the worldgen code, written through
+    /// the level's own chunk writer, read back with its reader, and the
+    /// generation that continues from them places the same chests, traps and
+    /// loot tables. A saved start that loses its state would regenerate the
+    /// loot or the buried-treasure search.
+    #[test]
+    fn saved_scattered_starts_reload_chests_traps_and_continue_placement() {
+        use super::*;
+        use crate::streaming::Proto;
+        use crate::vanillagen::{TerrainResources, VanillaTerrain};
+        use horizon_world::native_load_context::DataLoadOrigin;
+        let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        if !root.join("worldgen/world_presets.json").exists() {
+            eprintln!("skipping: no worldgen bundle at {}", root.display());
+            return;
+        }
+        let assets = Arc::new(crate::assets::Assets::load(&root).expect("assets"));
+        let biomes = Arc::new(
+            Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.clone(),
+            ))
+            .expect("biomes"),
+        );
+        let item_data = crate::test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad)
+            .expect("item data");
+        let worldgen = root.join("worldgen");
+        let resources = TerrainResources {
+            data: None,
+            dir: &worldgen,
+            registry: assets.registry,
+            biomes: &biomes,
+            item_data: &item_data,
+        };
+        // The names, their placed loot, and the chest/trap flags a placed
+        // start carries.
+        let specs: [(&str, &[(&str, usize)], &[&str]); 3] = [
+            (
+                "minecraft:desert_pyramid",
+                &[("minecraft:chests/desert_pyramid", 4)],
+                &[
+                    "hasPlacedChest0",
+                    "hasPlacedChest1",
+                    "hasPlacedChest2",
+                    "hasPlacedChest3",
+                ],
+            ),
+            (
+                "minecraft:jungle_pyramid",
+                &[
+                    ("minecraft:chests/jungle_temple", 2),
+                    ("minecraft:chests/jungle_temple_dispenser", 2),
+                ],
+                &[
+                    "placedMainChest",
+                    "placedHiddenChest",
+                    "placedTrap1",
+                    "placedTrap2",
+                ],
+            ),
+            (
+                "minecraft:buried_treasure",
+                &[("minecraft:chests/buried_treasure", 1)],
+                &[],
+            ),
+        ];
+        let inner = Arc::new(VanillaTerrain::new(resources, 1234).expect("terrain"));
+        let start_chunk = |name: &str| -> ChunkPos {
+            let names = [name.to_owned()];
+            // A placement-set start, as `/locate structure` and an exploration
+            // map find one: generated by the worldgen code, not written here.
+            for radius in [64, 256, 1024] {
+                if let Some((found, at)) = inner.locate(&names, [0, 64, 0], radius) {
+                    assert_eq!(found, name);
+                    return ChunkPos::new(at[0] >> 4, at[2] >> 4);
+                }
+            }
+            panic!("no {name} start near the origin");
+        };
+        let loot_table = |tag: &Tag| -> Option<String> {
+            let Tag::Compound(map) = tag else { return None };
+            let Tag::String(table) = map.get(&"LootTable".into())? else {
+                return None;
+            };
+            Some(table.to_string_lossy())
+        };
+        let entities = |list: &[Tag], table: &str| -> Vec<Tag> {
+            list.iter()
+                .filter(|tag| loot_table(tag).as_deref() == Some(table))
+                .cloned()
+                .collect()
+        };
+        let flag = |tag: &Compound, key: &str| -> bool {
+            matches!(tag.get(&key.into()), Some(Tag::Byte(v)) if *v != 0)
+        };
+        // The dimensions, settled height and chest/trap flags are the first
+        // piece's fields, not the start's.
+        fn piece_tag(start: &Compound) -> &Compound {
+            match start.get(&"Children".into()) {
+                Some(Tag::List(children)) => match children.first() {
+                    Some(Tag::Compound(piece)) => piece,
+                    _ => panic!("start has a piece"),
+                },
+                _ => panic!("start has children"),
+            }
+        }
+        let raw_start = |proto: &SavedProto, name: &str| -> Compound {
+            match proto
+                .column
+                .saved_structure_starts()
+                .and_then(|starts| starts.get(&name.into()).cloned())
+            {
+                Some(Tag::Compound(map)) => map,
+                other => panic!("{name}: no saved start: {other:?}"),
+            }
+        };
+        let typed_start = |proto: &SavedProto, name: &str| -> Compound {
+            match proto
+                .column
+                .structure_starts
+                .iter()
+                .find(|start| start.name == name)
+                .and_then(|start| start.save())
+            {
+                Some(Tag::Compound(map)) => map,
+                other => panic!("{name}: no generated start: {other:?}"),
+            }
+        };
+        let save_dir = |which: &str, index: usize| -> PathBuf {
+            std::env::temp_dir().join(format!(
+                "horizon-saved-scattered-{which}-{}-{index}",
+                std::process::id()
+            ))
+        };
+        let write_protos = |dir: &Path, protos: Vec<SavedProto>| {
+            let save = SaveDir::new(dir.to_path_buf(), LevelShape::OVERWORLD);
+            let _ = save.tables.set(Arc::new(SaveTables::new(&assets)));
+            save.save_protos(protos, assets.registry, &biomes)
+                .expect("save proto chunks");
+            save.flush().expect("flush");
+        };
+        for (index, (name, loot, flags)) in specs.into_iter().enumerate() {
+            let at = start_chunk(name);
+            let (sx, sz) = (at.x, at.z);
+            // The region at STATUS terrain: generation has made the start,
+            // nothing has been placed yet.
+            let mut worker = inner.worker();
+            let terrain: [Proto; 9] = std::array::from_fn(|i| {
+                inner.proto(&mut worker, sx + i as i32 % 3 - 1, sz + i as i32 / 3 - 1)
+            });
+            let before_region: Vec<SavedProto> = terrain
+                .iter()
+                .map(|proto| inner.saved_proto(proto).expect("proto"))
+                .collect();
+            let before = typed_start(&before_region[4], name);
+            let start = before_region[4]
+                .column
+                .structure_starts
+                .iter()
+                .find(|start| start.name == name)
+                .unwrap_or_else(|| panic!("{name} is the start of its chunk"));
+            let bounds = start
+                .pieces
+                .iter()
+                .map(|piece| piece.bounding_box())
+                .reduce(|mut a, b| {
+                    a.encapsulate(&b);
+                    a
+                })
+                .expect("pieces");
+            // Save the proto chunks and read the same record back. The
+            // start is marked referenced as an exploration map that found it
+            // would: a regenerated start has no references, a loaded one does.
+            let mut before = before;
+            before.insert("references".into(), Tag::Int(1));
+            let first = save_dir("first", index);
+            let save = SaveDir::new(first.clone(), LevelShape::OVERWORLD);
+            let _ = save.tables.set(Arc::new(SaveTables::new(&assets)));
+            let tables = save.tables.get().cloned().expect("save tables");
+            let mut records = Vec::new();
+            for (i, proto) in before_region.iter().enumerate() {
+                let mut root = encode_proto(
+                    proto,
+                    assets.registry,
+                    &biomes,
+                    Some(tables.as_ref()),
+                    LevelShape::OVERWORLD,
+                );
+                if i == 4 {
+                    let Tag::Compound(root) = &mut root.tag else {
+                        panic!("{name}: root")
+                    };
+                    let Tag::Compound(structures) =
+                        root.get_mut(&"structures".into()).expect("structures")
+                    else {
+                        panic!("{name}: structures")
+                    };
+                    let Tag::Compound(starts) =
+                        structures.get_mut(&"starts".into()).expect("starts")
+                    else {
+                        panic!("{name}: starts")
+                    };
+                    let Tag::Compound(start) = starts.get_mut(&name.into()).expect("start") else {
+                        panic!("{name}: start")
+                    };
+                    start.insert("references".into(), Tag::Int(1));
+                }
+                records.push(((proto.column.x, proto.column.z), Some(root)));
+            }
+            save.write_records("region", records, true)
+                .expect("write saved proto chunks");
+            drop(save);
+            let reader = SaveDir::new(first.clone(), LevelShape::OVERWORLD);
+            let _ = reader.tables.set(Arc::new(SaveTables::new(&assets)));
+            let loaded = reader
+                .load_proto(sx, sz, assets.registry, &biomes)
+                .expect("saved proto chunk");
+            assert!(!loaded.decorated, "{name}: saved before decoration");
+            assert_eq!(
+                raw_start(&loaded, name),
+                before,
+                "{name}: the saved start reads back before generation continues"
+            );
+            // A fresh generator over the save continues the statuses: the
+            // saved start is loaded and its pieces place chests and traps.
+            let reopened = Arc::new(VanillaTerrain::new(resources, 1234).expect("terrain"));
+            let generator = Persistent {
+                inner: reopened.clone(),
+                save: Arc::new(reader),
+                registry: assets.clone(),
+                biomes: biomes.clone(),
+            };
+            let mut worker = generator.worker();
+            let mut region: [Proto; 9] = std::array::from_fn(|i| {
+                generator.proto(&mut worker, sx + i as i32 % 3 - 1, sz + i as i32 / 3 - 1)
+            });
+            generator.decorate(&mut worker, &mut region);
+            let placed = reopened
+                .saved_proto(&region[4])
+                .unwrap_or_else(|| panic!("{name}: decorated proto chunk"));
+            assert!(placed.decorated, "{name}: generation continued");
+            let placed_start = typed_start(&placed, name);
+            for &(table, count) in loot {
+                let found = entities(&placed.block_entities, table);
+                assert_eq!(
+                    found.len(),
+                    count,
+                    "{name}: {table} placed after loading the saved start"
+                );
+                for entity in &found {
+                    let Tag::Compound(map) = entity else {
+                        unreachable!()
+                    };
+                    let pos = ["x", "y", "z"].map(|key| match map.get(&key.into()) {
+                        Some(Tag::Int(v)) => *v,
+                        other => panic!("{name}: {table} has {key}: {other:?}"),
+                    });
+                    // Chests and traps sit inside the piece's footprint;
+                    // some (the pyramid cellars) are below its saved box.
+                    assert!(
+                        bounds.min[0] <= pos[0]
+                            && pos[0] <= bounds.max[0]
+                            && bounds.min[2] <= pos[2]
+                            && pos[2] <= bounds.max[2],
+                        "{name}: {table} at {pos:?} outside its pieces' footprint {bounds:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                placed_start.get(&"references".into()),
+                Some(&Tag::Int(1)),
+                "{name}: placement uses the loaded start's references"
+            );
+            for &key in flags {
+                assert!(
+                    flag(piece_tag(&placed_start), key),
+                    "{name}: {key} after placement"
+                );
+            }
+            // The dimensions survive placement; the settled height is read
+            // only after placement, and compared across the second save below.
+            let before_piece = piece_tag(&before);
+            let placed_piece = piece_tag(&placed_start);
+            for key in ["Width", "Height", "Depth"] {
+                assert_eq!(
+                    placed_piece.get(&key.into()),
+                    before_piece.get(&key.into()),
+                    "{name}: {key} survives save, load and placement"
+                );
+            }
+            if name != "minecraft:buried_treasure" {
+                assert!(
+                    matches!(placed_piece.get(&"HPos".into()), Some(Tag::Int(h)) if *h >= 0),
+                    "{name}: placement settled the height it saves"
+                );
+            }
+            // Save the decorated proto chunks: block entities carry the loot
+            // table and its seed, so a regenerated chest would differ.
+            let decorated: Vec<SavedProto> = region
+                .iter()
+                .map(|proto| reopened.saved_proto(proto).expect("decorated proto"))
+                .collect();
+            let center_entities = decorated[4].block_entities.clone();
+            let second = save_dir("second", index);
+            write_protos(&second, decorated);
+            let reader = SaveDir::new(second.clone(), LevelShape::OVERWORLD);
+            let _ = reader.tables.set(Arc::new(SaveTables::new(&assets)));
+            let loaded = reader
+                .load_proto(sx, sz, assets.registry, &biomes)
+                .expect("saved decorated proto chunk");
+            assert!(loaded.decorated, "{name}: chests saved with features");
+            assert_eq!(
+                loaded.block_entities, center_entities,
+                "{name}: chests, traps and loot tables survive the save"
+            );
+            assert_eq!(
+                raw_start(&loaded, name),
+                placed_start,
+                "{name}: the placed start survives the save"
+            );
+            for &(table, count) in loot {
+                assert_eq!(
+                    entities(&loaded.block_entities, table).len(),
+                    count,
+                    "{name}: {table} kept by the reader"
+                );
+            }
+            // And the next worker starts from the same saved state: generating
+            // the saved chunk again restores its block entities rather than
+            // placing new loot.
+            let reopened = Arc::new(VanillaTerrain::new(resources, 1234).expect("terrain"));
+            let generator = Persistent {
+                inner: reopened.clone(),
+                save: Arc::new(reader),
+                registry: assets.clone(),
+                biomes: biomes.clone(),
+            };
+            let mut worker = generator.worker();
+            let restored = generator.proto(&mut worker, sx, sz);
+            let restored = reopened
+                .saved_proto(&restored)
+                .expect("restored proto chunk");
+            assert_eq!(
+                restored.block_entities, center_entities,
+                "{name}: a restored chunk keeps its chests, traps and loot seeds"
+            );
+            assert_eq!(
+                typed_start(&restored, name),
+                placed_start,
+                "{name}: a restored chunk keeps its start"
+            );
+            let _ = std::fs::remove_dir_all(&first);
+            let _ = std::fs::remove_dir_all(&second);
+        }
     }
 
     #[test]
@@ -7987,6 +8429,45 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A crash's save before the first normal one keeps a legacy owner's only copy (#18117).
+    #[test]
+    fn a_crash_save_keeps_a_legacy_level_dat_player() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-crash-legacy-player-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            inventory: vec![(0, "minecraft:diamond".into(), 7, 0)],
+            ..Level::default()
+        };
+        level.write(&dir).unwrap();
+        // The owner's file moves into level.dat's Data.Player, as an older world keeps it.
+        let player_file = dir
+            .join("players")
+            .join("data")
+            .join(format!("{}.dat", uuid_text(level.player_uuid.unwrap())));
+        let player = read_dat(&player_file).unwrap();
+        fs::remove_file(&player_file).unwrap();
+        let mut root = read_dat(&dir.join("level.dat")).unwrap();
+        if let Some(data) = root.get_mut("Data") {
+            put(data, "Player", player);
+        }
+        write_dat(&dir.join("level.dat"), root).unwrap();
+
+        let mut crashed = Level::read(&dir).unwrap();
+        crashed.inventory.clear();
+        crashed.write_keeping_player(&dir).unwrap();
+
+        let reopened = Level::read(&dir).unwrap();
+        assert_eq!(
+            reopened.inventory,
+            vec![(0, "minecraft:diamond".to_owned(), 7, 0)]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_ends_clock_keeps_its_own_time() {
         let dir = std::env::temp_dir().join(format!("horizon-end-clock-{}", std::process::id()));
@@ -8130,6 +8611,53 @@ mod tests {
         assert!(dead.inventory_components.is_empty());
         assert!(dead.player_extra.unwrap().get("equipment").is_none());
         assert!(dir.join("data/minecraft/world_gen_settings.dat").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An item nested past the writer's depth bound (a mod's component or an
+    /// `/item ... custom_data`): the player file keeps the rest of the player
+    /// instead of failing whole (#18384).
+    #[test]
+    fn an_item_past_the_save_depth_limit_is_dropped_from_the_player_file() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-deep-item-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // One compound per level, nested here by a loop: the item's depth is
+        // this test's own, and only the bound it passes comes from `Limits`.
+        let mut deep = Tag::compound([("bottom", Tag::Int(1))]);
+        for _ in 0..Limits::saved().max_depth {
+            deep = Tag::compound([("nested", deep)]);
+        }
+        let mut lost = crate::items::ItemStack::new("minecraft:stone", 1);
+        lost.data_mut()
+            .other
+            .push(("minecraft:custom_data".into(), deep));
+        let mut ender = vec![None; 27];
+        ender[0] = Some(lost);
+        ender[1] = Some(crate::items::ItemStack::new("minecraft:diamond", 2));
+        let mut level = Level {
+            inventory: vec![(0, "minecraft:torch".into(), 4, 0)],
+            ender_items: ender,
+            ..Level::default()
+        };
+        level.write_player(&dir).unwrap();
+
+        let file = dir
+            .join("players")
+            .join("data")
+            .join(format!("{}.dat", uuid_text(level.player_uuid.unwrap())));
+        let saved = read_dat(&file).unwrap();
+        let ender = decode_items(saved.get("EnderItems"), 27);
+        assert_eq!(ender[0], None);
+        assert_eq!(
+            ender[1].as_ref().map(|s| (&*s.item, s.count)),
+            Some(("minecraft:diamond", 2))
+        );
+        let inventory = decode_items(saved.get("Inventory"), 36);
+        assert_eq!(
+            inventory[0].as_ref().map(|s| (&*s.item, s.count)),
+            Some(("minecraft:torch", 4))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

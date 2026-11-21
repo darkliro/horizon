@@ -8,7 +8,10 @@ use loading_screen::{
     App, Loading, leave_fullscreen_after, missing_resources, run_event_loop, unclean_start_recovery,
 };
 use motion_ids::{motion_at, motion_block_entity};
-use resource_load::{Progress, launch_world, load_resources, named_scope, synchronous_startup};
+use resource_load::{
+    Progress, launch_world, load_resources, named_scope, owns_device_loss_marker,
+    synchronous_startup,
+};
 /// The content tables the world plays with, as field-level borrows: the
 /// world's data packs' over the game's own. The `Game::items`/`recipes`/
 /// `stations` methods read the same tables, but taking `&self` blocks a
@@ -122,6 +125,7 @@ use resource_loader::{
     EntityModels, GameCpuResources, Loaded, LoaderMsg, PendingWorldEntry, WorldRestLoader,
     run_loading, write_report,
 };
+use window_handler::ClientQuit;
 // `Action` here is the title screen's buttons (`title::Action`).
 use self::api_values::TryIntoApi;
 pub(crate) use api_values::{block_jump_factor, block_speed_factor, is_ladder};
@@ -684,6 +688,8 @@ fn falling_block_visible(state: BlockStateId, cell: BlockStateId) -> bool {
 pub struct Resources {
     core: WorldCore,
     rest: std::sync::OnceLock<WorldRest>,
+    /// Immutable reach flags share the lifetime of these facts, including across a resource reload.
+    block_entity_reach: std::sync::OnceLock<Arc<[u8]>>,
 }
 
 struct WorldCore {
@@ -1150,6 +1156,8 @@ struct Game<'a> {
     renderer: Option<Renderer>,
     /// Avoid an endless rebuild loop if the new device is lost as well.
     last_device_recovery: Option<Instant>,
+    /// Whether this run wrote a device-loss marker, and when it may go (`gfx::safe_start`).
+    safe_start_proof: horizon_client::gfx::safe_start::Proof,
     /// CPU geometry storage retained across frames, including empty/title frames.
     entity_vertices: Vec<Vertex>,
     /// Horizon Extras' dynamic lights this frame (`dynamic_lights.rs`), and how brightly each
@@ -1360,6 +1368,9 @@ struct Game<'a> {
     /// Duration of the last frame in ticks (GUI easing).
     frame_ticks: f32,
     title: Option<Title>,
+    /// The save a native mod asked the title to open (`request_world`), taken by the title's next frame, which
+    /// asks the player first.
+    native_world_request: Option<native_world_request::Request>,
     /// Armor slots: head, chest, legs, feet.
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
@@ -1714,17 +1725,8 @@ struct Game<'a> {
     upload_pace: upload_pace::UploadPace,
     /// This frame's view frustum, for culling entities and block entities.
     view_frustum: Option<horizon_client::gfx::JoinedFrusta>,
-    /// Whether the renderer's section-occlusion graph is active for this view.
-    entity_section_visibility_valid: bool,
-    /// The camera section in the current world layout.
-    entity_section_camera: Option<(i32, i32, i32)>,
-    sync_occlusion_culler: Option<horizon_client::voxel_occlusion::Culler>,
-    async_occlusion_culler: Option<Box<occlusion_culling::AsyncOcclusionCuller>>,
-    async_occlusion_culling_failed: bool,
+    occlusion: entity_culling::EntityOcclusion,
     async_particle_culler: RefCell<particle_culling::ParticleAsyncState>,
-    /// `Renderer::pack_shadow_casters` for this frame's entities: (keep what the culler hides,
-    /// build the player's model in first person); (false, false) without a shader pack.
-    pack_shadow_casters: (bool, bool),
     /// A scripted flight from the control socket (`fly`).
     flight: Option<control::Flight>,
     /// The running agent action from the control socket (game/runtime/agent/mod.rs).
@@ -1850,6 +1852,8 @@ struct Game<'a> {
     text_selection: horizon_client::clipboard::AppendSelection,
     /// The world was saved for the application ending (`save_for_exit`).
     saved_for_exit: bool,
+    /// A mod's read-only screen hook can queue the primary client's quit.
+    client_quit: std::cell::Cell<ClientQuit>,
     pending_save: Option<saving::ClosingSave>,
     /// Scheduled end of the server tick (`MinecraftServer.haveTime`).
     server_tick_deadline: Option<Instant>,
@@ -1932,6 +1936,14 @@ struct Game<'a> {
     save_after_guest_turn: bool,
     /// Guests whose records are displaced by nested player swaps, outer first.
     lan_guest_swaps: Vec<u32>,
+    /// Guests whose last turn a panic ended after their state was written back and the outer
+    /// player restored (`as_guest_at`, `as_guest_messaged`, `leave_guest`), which hides the turn
+    /// from `lan_acting`: crash teardown keeps their last saved file (`keep_interrupted_players`).
+    /// Cleared as each server tick starts: a panic something caught leaves a game that carried on.
+    lan_interrupted_turns: Vec<u32>,
+    /// Crash teardown left the integrated server's owner unplaced, or lost the hub: the save keeps
+    /// the owner's player file, stats and advancements as last saved (`save_game_metadata`).
+    keep_owner_files: bool,
     /// Live attachments and original snapshots retained during player replacement.
     player_state: original_player::PlayerState,
     /// The block the acting player is breaking (`break_block`): its destroy
@@ -2039,119 +2051,7 @@ struct Game<'a> {
     block_entity_tick_items: Option<Box<block_entity_tick_items::Scope>>,
     wasm_dispatch_failures: std::rc::Rc<std::cell::Cell<u64>>,
 }
-/// The open world's dimensions past vanilla's three. One per process, as a window
-/// and its server thread name the same dimensions.
-static EXTRA_DIMS: std::sync::RwLock<Vec<mod_api::DimensionKey>> =
-    std::sync::RwLock::new(Vec::new());
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Dim {
-    Overworld,
-    Nether,
-    End,
-    /// A dimension past vanilla's three, from a data pack or a mod.
-    Extra(mod_api::DimensionKey),
-}
-impl Dim {
-    /// The level as block behaviour and the mods name it.
-    fn level(self) -> LevelDimension {
-        match self {
-            Self::Overworld => LevelDimension::Overworld,
-            Self::Nether => LevelDimension::Nether,
-            Self::End => LevelDimension::End,
-            Self::Extra(_) => LevelDimension::of_level(
-                horizon_core::LevelKey::parse(self.id())
-                    .unwrap_or(horizon_core::LevelKey::OVERWORLD),
-            ),
-        }
-    }
-    fn id(self) -> &'static str {
-        match self {
-            Self::Overworld => "minecraft:overworld",
-            Self::Nether => "minecraft:the_nether",
-            Self::End => "minecraft:the_end",
-            Self::Extra(key) => {
-                mod_api::__private::dimension_id(key).expect("the game's table made the key")
-            }
-        }
-    }
-    fn from_id(id: &str) -> Self {
-        match id {
-            "minecraft:overworld" => Self::Overworld,
-            "minecraft:the_nether" => Self::Nether,
-            "minecraft:the_end" => Self::End,
-            _ => Self::extra(id).unwrap_or(Self::Overworld),
-        }
-    }
-    /// `Level.getSeaLevel` of the level: the sea level its noise settings give a mod's level, else
-    /// the built-in level's.
-    fn sea_level(self) -> i32 {
-        Self::sea_level_of_id(self.id())
-    }
-    /// [`Self::sea_level`] of the level `id` names.
-    fn sea_level_of_id(id: &str) -> i32 {
-        horizon_core::LevelKey::parse(id).map_or(63, horizon_world::level::sea_level_of)
-    }
-    /// The open world's dimension `id` past vanilla's three.
-    fn extra(id: &str) -> Option<Self> {
-        let extra = EXTRA_DIMS.read().unwrap();
-        let key = extra
-            .iter()
-            .find(|key| mod_api::__private::dimension_id(**key) == Some(id))?;
-        Some(Self::Extra(*key))
-    }
-    fn is_vanilla(id: &str) -> bool {
-        matches!(
-            id,
-            "minecraft:overworld" | "minecraft:the_nether" | "minecraft:the_end"
-        )
-    }
-    /// Whether the open world has the dimension `id`.
-    fn exists(id: &str) -> bool {
-        Self::is_vanilla(id) || Self::extra(id).is_some()
-    }
-    /// The open world's dimensions, in the order its server ticks them.
-    fn all() -> Vec<Self> {
-        let extra = EXTRA_DIMS.read().unwrap();
-        [Self::Overworld, Self::Nether, Self::End]
-            .into_iter()
-            .chain(extra.iter().copied().map(Self::Extra))
-            .collect()
-    }
-    /// The dimensions past vanilla's three of the world being opened.
-    fn set_extra<'a>(ids: impl Iterator<Item = &'a str>) {
-        *EXTRA_DIMS.write().unwrap() = ids.map(mod_api::__private::dimension_key).collect();
-    }
-    /// Adds the dimension `id` a remote server sent, which no local world told of, so that
-    /// [`Self::from_id`] finds it.
-    fn add_extra(id: &str) {
-        if !Self::exists(id) {
-            EXTRA_DIMS
-                .write()
-                .unwrap()
-                .push(mod_api::__private::dimension_key(id));
-        }
-    }
-    /// The dimension as mods' level handles name it.
-    fn key(self) -> mod_api::DimensionKey {
-        match self {
-            Self::Overworld => mod_api::DimensionKey::OVERWORLD,
-            Self::Nether => mod_api::DimensionKey::NETHER,
-            Self::End => mod_api::DimensionKey::END,
-            Self::Extra(key) => key,
-        }
-    }
-    /// The level's shape in a world of vanilla's dimension types.
-    fn shape(self) -> horizon_client::save::LevelShape {
-        use horizon_client::save::LevelShape;
-        match self {
-            Self::Overworld => LevelShape::OVERWORLD,
-            Self::Nether => LevelShape::NETHER,
-            Self::End => LevelShape::END,
-            Self::Extra(_) => LevelShape::OVERWORLD,
-        }
-    }
-}
+use horizon_gameplay::dim::Dim;
 /// `Inventory.add` on a player's 36 slots (hotbar first) and off hand,
 /// `max` the stack's own maximum: onto equal stacks first
 /// (`getSlotWithRemainingSpace`: the selected slot, the off hand, then the
@@ -4488,95 +4388,15 @@ impl Game<'_> {
             return Ok(());
         }
         self.abort_open_transactions();
-        // `Player.entityInteractionRange`/`blockInteractionRange` for the tick's
-        // picks: the attribute carries creative's and a server's modifiers.
-        self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
-        self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
-        self.tick_debug_keys()?;
-        self.tick_debug_charts();
-        self.tick_tutorial();
-        if self.screen == Screen::Creative {
-            self.refresh_creative_tabs();
-            // CreativeModeInventoryScreen.containerTick: a player without
-            // infinite materials gets the survival inventory instead.
-            if !self.creative {
-                if let Some(c) = self.carried.take() {
-                    let _ = self.add_stack_to_inventory(c);
-                }
-                self.set_screen(Screen::Inventory);
+        self.update_interaction_ranges();
+        // A logical server has no window to lead and never follows another server.
+        if !self.is_logical_server() {
+            self.tick_client_lead()?;
+            if self.remote.is_some() {
+                return self.with_residency_tick(Self::tick_remote);
             }
         }
-        if self.remote.is_some() {
-            return self.with_residency_tick(Self::tick_remote);
-        }
-        // Only a server ticks its own world from here: its players are guests, swapped in for
-        // their turns (`as_guest`), and the window's player is a client of it.
-        self.ticks += 1;
-        self.repro_tick();
-        self.track_experience_display();
-        self.tick_enchanting_book();
-        // `/tick freeze` stops the world but not the player.
-        let running = match self.level_pass.running {
-            Some(running) => running,
-            None => self.clock.world_runs(),
-        };
-        // GameRenderer.tick: a wither's bar darkens the world, then fades;
-        // the activated item counts down.
-        self.boss_overlay.tick_darken(running);
-        self.tick_item_activation();
-        span("mods_inventory_ticks", || self.native_inventory_ticks());
-        if running {
-            // `MinecraftServer.tickChildren`: `commandFunctions` runs before
-            // any level ticks, so a tick function reads the game time and the
-            // day clock from before this tick. Vanilla's SavedData is loaded
-            // long before this point; the lazy scoreboard/storage read has to
-            // be done by then too, or a load tag writes over what it restores.
-            self.load_scoreboard();
-            span("tick_functions", || self.tick_functions());
-            self.world.game_time += 1;
-            if self
-                .ui
-                .rules
-                .bool_at(horizon_client::gamerules::vanilla::ADVANCE_WEATHER)
-            {
-                self.world.weather.tick_timers(&mut self.world.random);
-            }
-            self.world.weather.tick_levels();
-        } else if self.clock.still() {
-            // Under `HORIZON_STILL` a frozen world's rain and thunder sit at their levels, as a
-            // shader pack's smoothed values do, so `/weather rain` shows full rain without
-            // stepping the world (and its mobs) through the fade.
-            self.world.weather.settle_levels();
-        }
-        // ClientLevel.tick: the sky flash fades in a frozen level too.
-        self.tick_weather_effects();
-        let _ = span("player_autosaves", || self.finish_player_autosaves(false));
-        // MinecraftServer.tickServer's countdown, then autoSave: three
-        // hundred seconds of ticks at the rate the server runs at now.
-        self.ticks_until_autosave -= 1;
-        self.autosaving = self.ticks_until_autosave <= 0;
-        if let Some(serving) = &self.serving {
-            serving.set_saving(self.autosaving);
-        }
-        if self.autosaving {
-            span("autosave", || self.save_game_with(false))?;
-            self.ticks_until_autosave = self.next_autosave_interval();
-            if let Some(serving) = &self.serving {
-                serving.set_saving(false);
-            }
-        }
-        if running {
-            self.advance_clock();
-            // `ServerLevel.tickTime`, once the clock has moved on.
-            span("scheduled_functions", || self.run_scheduled_functions());
-        }
-        if self.use_delay > 0 {
-            self.use_delay -= 1;
-        }
-        self.tick_totem();
-        self.update_totem_ready();
-        span("tick_command_extras", || self.tick_command_extras());
-        self.tick_world(running)
+        self.tick_first_level()
     }
     /// What the tick runs after the local player's own update: effects, the
     /// world's entities and blocks, and the network hub.
@@ -4592,14 +4412,20 @@ impl Game<'_> {
         self.update_chunk_tickets();
         self.score_destroyed_entities();
         horizon_client::spans::time("tick_effects", || self.tick_effects(running));
-        self.tick_sign_editor();
+        // The window's own ticks: a game that is not a logical server runs them, as it always did.
+        let window = !self.is_logical_server();
+        if window {
+            self.tick_sign_editor();
+        }
         // Player.tick's ItemCooldowns.tick for the window's player (a
         // server's players count theirs down in `tick_guests`).
         self.shield_cooldown = self.shield_cooldown.saturating_sub(1);
         self.cooldowns.tick();
         horizon_client::spans::time("tick_using", || self.tick_using());
-        self.tick_bundle_hover();
-        horizon_client::spans::time("tick_hud", || self.tick_hud());
+        if window {
+            self.tick_bundle_hover();
+            horizon_client::spans::time("tick_hud", || self.tick_hud());
+        }
         // The player's digging comes in with its packets, before the level
         // ticks; ServerLevel.tick then runs the scheduled and random block
         // ticks before any entity, so what they drop or spawn (dispensed
@@ -4720,7 +4546,9 @@ impl Game<'_> {
             log.extend(held);
         }
         span("tick_friends", || self.tick_friends());
-        horizon_client::spans::time("tick_hand", || self.tick_hand());
+        if window {
+            horizon_client::spans::time("tick_hand", || self.tick_hand());
+        }
         horizon_client::spans::time("tick_sleep", || self.tick_sleep());
         span("sleep_status", || self.announce_sleep_status());
         span("sleep_status", || self.free_left_beds());
@@ -4748,21 +4576,32 @@ impl Game<'_> {
             horizon_client::spans::time("tick_sculk_blocks", || self.tick_sculk_blocks())?;
         }
         if running {
-            // ClientLevel.tickBlockEntities (not while paused or frozen):
-            // chest lids, books, shulker boxes, bells, conduits, heads.
-            horizon_client::spans::time("tick_block_entity_anims", || {
-                self.tick_block_entity_anims()
-            });
+            if window {
+                // ClientLevel.tickBlockEntities (not while paused or frozen):
+                // chest lids, books, shulker boxes, bells, conduits, heads.
+                horizon_client::spans::time("tick_block_entity_anims", || {
+                    self.tick_block_entity_anims()
+                });
+            } else {
+                // The bells' and conduits' server tickers (not while paused or frozen).
+                horizon_client::spans::time("tick_block_entity_servers", || {
+                    self.tick_block_entity_servers()
+                });
+            }
             // A conduit's hurt teleports an enderman now (`Enderman.hurtServer`).
             span("settle_hurt_teleports", || self.settle_hurt_teleports())?;
             horizon_client::spans::time("tick_particles", || self.tick_particles());
-            span("tick_client_ambient", || self.tick_client_ambient());
+            if window {
+                span("tick_client_ambient", || self.tick_client_ambient());
+            }
         }
         // ServerLevel.tick's `entityManager.tick()`, frozen or not, after every
         // block entity ticker (the bells, conduits and gateways above too): the
         // chunks loaded before this pass have their entities loaded from the next.
         self.world.entities_pending.clear();
-        span("tick_frame_visuals", || self.tick_frame_visuals(running));
+        if window {
+            span("tick_frame_visuals", || self.tick_frame_visuals(running));
+        }
         if running {
             // MinecraftServer.tickServer: GameTestTicker.SINGLETON.tick().
             span("tick_game_tests", || self.tick_game_tests());
@@ -4771,7 +4610,8 @@ impl Game<'_> {
         span("publish_boss_bars", || self.publish_boss_bars());
         // Minecraft.handleKeybinds: held use repeats only while no item is in
         // use (a raised shield or a drawn bow places and uses nothing).
-        if self.right
+        if window
+            && self.right
             && self.use_delay == 0
             && self.using.is_none()
             && self.screen == Screen::Playing
@@ -5670,18 +5510,13 @@ impl Game<'_> {
             let view = self.view_frustum;
             // Beams and structure outlines reach far outside their block
             // (BlockEntityRenderer.shouldRenderOffScreen): never culled.
+            // Both flags are one byte per state, worked out once (`block_entity_reach`): a frame
+            // asks them of every block entity within 256 blocks.
+            let reach = block_entity_reach(&self.res);
             let off_screen = |state: u32| {
-                let name = &*self.res.facts().get(BlockStateId(state)).name;
-                matches!(
-                    name,
-                    "minecraft:beacon"
-                        | "minecraft:end_gateway"
-                        | "minecraft:structure_block"
-                        | "minecraft:test_instance_block"
-                )
-            };
-            let long_range = |state: u32| {
-                &*self.res.facts().get(BlockStateId(state)).name == "minecraft:end_gateway"
+                reach
+                    .get(state as usize)
+                    .is_some_and(|flags| flags & 1 != 0)
             };
             let in_view = |p: &[i32; 3]| {
                 view.is_none_or(|v| {
@@ -5696,8 +5531,7 @@ impl Game<'_> {
                     self.settings.chunk_fade,
                     camera,
                     view,
-                    &off_screen,
-                    long_range,
+                    Some(&reach),
                 )
                 .filter(|(block, section_inside)| {
                     let (pos, state) = **block;
@@ -5710,7 +5544,7 @@ impl Game<'_> {
             // in the view or not (`Renderer::shadow_pass_block_entities`, #8464): those the
             // view leaves out go in hidden from the camera.
             let shadow_only: Vec<&([i32; 3], u32)> =
-                if self.pack_ids.is_some() && self.pack_shadow_casters.0 {
+                if self.pack_ids.is_some() && self.occlusion.shadow_casters.0 {
                     let listed: HashSet<[i32; 3]> = camera_list.iter().map(|b| b.0).collect();
                     r.shadow_pass_block_entities(camera)
                         .filter(|(pos, state)| {
@@ -5735,7 +5569,7 @@ impl Game<'_> {
                 }
                 let name = &*self.res.facts().get(BlockStateId(state)).name;
                 if self.settings.horizon.entity_culling == EntityCullingMode::Off
-                    || self.pack_shadow_casters.0
+                    || self.occlusion.shadow_casters.0
                     || name == "minecraft:end_portal"
                     || name == "minecraft:end_gateway"
                     || hi.y - lo.y > 2.0
@@ -5818,13 +5652,7 @@ impl Game<'_> {
                     );
             } else {
                 let cache_candidates = r
-                    .visible_block_entities_in_frustum(
-                        self.settings.chunk_fade,
-                        camera,
-                        None,
-                        |_| false,
-                        |_| false,
-                    )
+                    .visible_block_entities_in_frustum(self.settings.chunk_fade, camera, None, None)
                     .filter(|(block, _)| self.live_block_entity_render(block.0, block.1))
                     .map(|(block, _)| block);
                 (
@@ -6519,7 +6347,7 @@ impl Game<'_> {
         self.spawn_spiral = Default::default();
         self.player_spawn = None;
         self.creatures.reset_trader();
-        self.creatures.cat_tick = 0;
+        self.creatures.cat = Default::default();
         self.creatures.custom_spawners.clear();
         self.portals = Default::default();
         self.experience = Experience {
@@ -7382,6 +7210,16 @@ impl Game<'_> {
         if self.options.paced_by_split {
             return Err("the graphics device was lost during split-screen play".into());
         }
+        // Before anything that can fail or panic on the lost device: the next start finds it
+        // unless this run proves healthy (`gfx::safe_start`).
+        if owns_device_loss_marker(&self.options)
+            && let Some(renderer) = &self.renderer
+            && renderer.mark_device_lost(
+                &Self::options_path().with_file_name(horizon_client::gfx::safe_start::MARKER),
+            )
+        {
+            self.safe_start_proof.lost();
+        }
         let now = Instant::now();
         if self
             .last_device_recovery
@@ -7431,6 +7269,7 @@ impl Game<'_> {
         )?;
         (renderer.screenshot, renderer.screenshot_result) = (screenshot, screenshot_result);
         self.adopt_renderer(renderer);
+        self.safe_start_proof.recovered(Instant::now());
         log::info!("Horizon: graphics device recovered; rebuilding world meshes");
         Ok(())
     }
@@ -8034,6 +7873,9 @@ impl Game<'_> {
             result => result?,
         };
         self.finish_render_frame(elapsed);
+        if rendered && self.safe_start_proof.presented(Instant::now()) {
+            horizon_client::gfx::safe_start::clear(&Self::options_path());
+        }
         if rendered {
             // The submit thread may still hold the frame: a listener hears it after the
             // present, and with none the next frame keeps overlapping it.
@@ -9212,6 +9054,7 @@ impl Game<'_> {
                         return;
                     }
                     self.pending_save.as_mut().unwrap().quit = true;
+                    self.client_quit.set(ClientQuit::ShuttingDown);
                 }
                 WindowEvent::Focused(focused) => {
                     self.focused = focused;
@@ -10301,6 +10144,9 @@ impl Game<'_> {
                     self.report_activity();
                     let target = self.tick_target_millis();
                     let steps = self.clock.advance(elapsed, target);
+                    // Once per frame, whatever `steps` is: `tick` never runs on the title, and a frame with
+                    // no client tick would leave a queued `request_world` waiting. The title draws after this.
+                    self.drain_native_world_request()?;
                     self.client_tick_steps(steps, Some(event_loop))?;
                     self.extras_frame(elapsed);
                     self.extras_retry()?;
@@ -10482,6 +10328,7 @@ impl Game<'_> {
                                 .world_frames
                                 .is_some_and(|f| self.world_frames >= f)
                         {
+                            self.client_quit.set(ClientQuit::ShuttingDown);
                             event_loop.exit();
                         }
                     }
@@ -10722,6 +10569,7 @@ impl<'a> Game<'a> {
             resize_state: None,
             renderer: None,
             last_device_recovery: None,
+            safe_start_proof: Default::default(),
             entity_vertices: Vec::new(),
             dynamic_lights: Vec::new(),
             luminance: Default::default(),
@@ -10839,6 +10687,7 @@ impl<'a> Game<'a> {
             scope_scale: 0.5,
             frame_ticks: 0.0,
             title: None,
+            native_world_request: None,
             armor: [None, None, None, None],
             offhand: None,
             equipment: Default::default(),
@@ -11030,13 +10879,8 @@ impl<'a> Game<'a> {
             tick_script: tick_script::TickScript::from_env(),
             agent: agent::Agent::default(),
             view_frustum: None,
-            entity_section_visibility_valid: false,
-            entity_section_camera: None,
-            sync_occlusion_culler: None,
-            async_occlusion_culler: None,
-            async_occlusion_culling_failed: false,
+            occlusion: Default::default(),
             async_particle_culler: RefCell::new(Default::default()),
-            pack_shadow_casters: (false, false),
             pending_uploads: Vec::new(),
             upload_pace: Default::default(),
             frame_graph: Default::default(),
@@ -11112,6 +10956,7 @@ impl<'a> Game<'a> {
             user_input: Default::default(),
             text_selection: Default::default(),
             saved_for_exit: false,
+            client_quit: std::cell::Cell::new(ClientQuit::Running),
             pending_save: None,
             server_tick_deadline: None,
             frame_drawn: true,
@@ -11146,6 +10991,8 @@ impl<'a> Game<'a> {
             lan_building_boxes: Default::default(),
             save_after_guest_turn: false,
             lan_guest_swaps: Vec::new(),
+            lan_interrupted_turns: Vec::new(),
+            keep_owner_files: false,
             player_state: Default::default(),
             lan_break_pos: None,
             break_collect: None,
@@ -11312,7 +11159,16 @@ pub(crate) fn run_with(
         }
         return Err(error.into());
     }
+    // A window's start takes the last one's graphics device loss into its settings
+    // (`gfx::safe_start`); held in memory too, for a hold its settings file didn't keep.
+    let device_loss_hold = Game::options_path()
+        .parent()
+        .filter(|_| owns_device_loss_marker(&options))
+        .and_then(horizon_client::gfx::safe_start::take);
     let mut early_settings = Settings::load(&Game::options_path());
+    if device_loss_hold.is_some() {
+        early_settings.horizon.safe_start = device_loss_hold;
+    }
     options
         .mods
         .capture_code_switches(&early_settings.mods.disabled);
@@ -11349,9 +11205,11 @@ pub(crate) fn run_with(
     {
         log::warn!("Mod dimensions already installed; keeping the first table");
     }
-    // Their chunk generators and biome sources, which those levels' and the packs' stems name.
+    // Their chunk generators and biome sources, which those levels' and the packs' stems name,
+    // and density function types, which the packs' density JSON names.
     native_chunk_generator::install();
     native_biome_source::install();
+    native_density_function::install();
     mods::register_components(&vanilla_root)?;
     mods::register_standalone_models(options.execution_role);
     mods::register_layer_definitions(options.execution_role, &vanilla_root);
@@ -11734,3 +11592,26 @@ mod sign_chain_tests;
 #[cfg(test)]
 #[path = "game/interface/tests/sign_use_tests.rs"]
 mod sign_use_tests;
+
+/// For each block state, whether its block entity draws off screen (1: beacons, end gateways,
+/// structure and test instance blocks, `BlockEntityRenderer.shouldRenderOffScreen`) and far
+/// (2: end gateways), by its name. Worked out once for these facts and reused while they live.
+fn block_entity_reach(resources: &Resources) -> Arc<[u8]> {
+    resources
+        .block_entity_reach
+        .get_or_init(|| {
+            resources
+                .facts()
+                .states
+                .iter()
+                .map(|state| match &*state.name {
+                    "minecraft:end_gateway" => 3,
+                    "minecraft:beacon"
+                    | "minecraft:structure_block"
+                    | "minecraft:test_instance_block" => 1,
+                    _ => 0,
+                })
+                .collect()
+        })
+        .clone()
+}

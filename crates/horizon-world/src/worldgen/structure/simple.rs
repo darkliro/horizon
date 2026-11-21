@@ -24,6 +24,17 @@ pub struct BuriedTreasurePiece {
     /// Where the chest went: the box vanilla saves once placed.
     pub found: Mutex<Option<[i32; 3]>>,
 }
+impl BuriedTreasurePiece {
+    /// `BuriedTreasurePiece(StructurePieceType, CompoundTag)`: only the box is
+    /// saved, at the chest post-process found; loading starts the piece there.
+    pub(crate) fn from_saved(frame: PieceFrame) -> Self {
+        let at = frame.bounding_box.min;
+        Self {
+            position: at,
+            found: Mutex::new(Some(at)),
+        }
+    }
+}
 impl LegacyPiece for BuriedTreasurePiece {
     fn bounding_box(&self) -> BoundingBox {
         BoundingBox::new(self.position, self.position)
@@ -209,18 +220,28 @@ pub fn shipwreck_too_big(template: &StructureTemplate) -> bool {
 }
 
 impl TemplatePiece {
+    /// The height a shipwreck, an ocean ruin or an igloo settled on once placed; None before
+    /// placement and for other pieces.
+    fn settled_y(&self) -> Option<i32> {
+        match self.handler {
+            TemplateHandler::Shipwreck { .. }
+            | TemplateHandler::OceanRuin { .. }
+            | TemplateHandler::Igloo => *self.state.lock().unwrap(),
+            _ => None,
+        }
+    }
+    /// How far placement moved a piece that settles on the terrain: 0 before placement and for
+    /// other pieces.
+    fn settled_dy(&self) -> i32 {
+        self.settled_y().map_or(0, |y| y - self.position[1])
+    }
     /// `TemplateStructurePiece.addAdditionalSaveData` and its subclasses',
     /// with the height a shipwreck settled on once placed.
     pub fn saved(&self) -> horizon_core::nbt::Compound {
         use horizon_core::nbt::Tag;
         let flag = |b: bool| Tag::Byte(i8::from(b));
-        let adjusted = match self.handler {
-            TemplateHandler::Shipwreck { .. }
-            | TemplateHandler::OceanRuin { .. }
-            | TemplateHandler::Igloo => *self.state.lock().unwrap(),
-            _ => None,
-        };
-        let dy = adjusted.map_or(0, |y| y - self.position[1]);
+        let adjusted = self.settled_y();
+        let dy = self.settled_dy();
         let template_dy = if matches!(self.handler, TemplateHandler::Igloo) {
             0
         } else {
@@ -285,6 +306,9 @@ impl TemplatePiece {
 impl LegacyPiece for TemplatePiece {
     fn bounding_box(&self) -> BoundingBox {
         self.bounding_box
+    }
+    fn placed_bounding_box(&self) -> BoundingBox {
+        self.bounding_box.moved([0, self.settled_dy(), 0])
     }
     fn save(&self) -> Option<horizon_core::nbt::Compound> {
         Some(self.saved())
@@ -453,6 +477,18 @@ impl Scattered {
             height_position: Mutex::new(-1),
         }
     }
+    /// `ScatteredFeaturePiece(StructurePieceType, CompoundTag)`: the saved
+    /// box stays as saved; the dimensions and the settled height are read.
+    pub(crate) fn from_saved(tag: &horizon_core::nbt::Tag, frame: PieceFrame) -> Self {
+        let int = |key| super::saved_legacy::int(tag, key);
+        Self {
+            frame: Mutex::new(frame),
+            width: int("Width"),
+            height: int("Height"),
+            depth: int("Depth"),
+            height_position: Mutex::new(int("HPos")),
+        }
+    }
     pub fn frame(&self) -> PieceFrame {
         *self.frame.lock().unwrap()
     }
@@ -546,16 +582,9 @@ impl SwampHutPiece {
     /// witch's and the cat's flags collapse onto this piece's one spawned
     /// flag (vanilla sets both in the same post-process call).
     pub(crate) fn from_saved(tag: &horizon_core::nbt::Tag, frame: PieceFrame) -> Self {
-        let int = |key| super::saved_legacy::int(tag, key);
         let flag = |key| super::saved_legacy::flag(tag, key);
         Self {
-            base: Scattered {
-                frame: Mutex::new(frame),
-                width: int("Width"),
-                height: int("Height"),
-                depth: int("Depth"),
-                height_position: Mutex::new(int("HPos")),
-            },
+            base: Scattered::from_saved(tag, frame),
             spawned: Mutex::new(flag("Witch") || flag("Cat")),
         }
     }
@@ -661,5 +690,47 @@ impl LegacyPiece for SwampHutPiece {
             *self.spawned.lock().unwrap() = true;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod placed_box_tests {
+    use super::*;
+
+    /// `ShipwreckPiece.postProcess` moves the template to the height it settles on, and
+    /// `TemplateStructurePiece.postProcess` moves the piece's box with it, the box
+    /// `structureHasPieceAt` reads: a block above the placed wreck is in no piece.
+    #[test]
+    fn a_settled_shipwreck_holds_the_blocks_where_it_was_placed() {
+        let mut template = StructureTemplate::empty();
+        template.size = [9, 7, 13];
+        let wreck = TemplatePiece::new(
+            "minecraft:shipwreck",
+            "minecraft:shipwreck/with_mast",
+            Arc::new(template),
+            [100, 90, 200],
+            Rotation::None,
+            Mirror::None,
+            [4, 0, 15],
+            empty_processors(),
+            true,
+            Vec::new(),
+            TemplateHandler::Shipwreck { beached: false },
+        );
+        let height = |b: BoundingBox| (b.min[1], b.max[1]);
+        assert_eq!(
+            height(wreck.placed_bounding_box()),
+            (90, 96),
+            "not placed yet"
+        );
+        *wreck.state.lock().unwrap() = Some(60);
+        assert_eq!(height(wreck.placed_bounding_box()), (60, 66));
+        assert_eq!(
+            height(wreck.bounding_box()),
+            (90, 96),
+            "generation keeps the box it made"
+        );
+        let above = [100, 90, 200];
+        assert!(!wreck.placed_bounding_box().is_inside(above));
     }
 }

@@ -140,13 +140,17 @@ pub fn horizon_label(version: &str) -> String {
 
 /// Enabled wasm packages that need the patchable engine, never native compilation.
 pub fn wasm_points(home: &Path) -> Vec<horizon_platform::mod_package::index::native::Bundle> {
-    use std::io::Read;
+    use horizon_platform::mod_package::manifest::{Package, WASM};
+    use std::io::{BufReader, Read};
     wasm_hmods(home)
         .into_iter()
         .filter_map(|path| {
             let file = fs::File::open(&path).ok()?;
-            let mut zip = zip::ZipArchive::new(file).ok()?;
-            let package = horizon_platform::mod_package::Package::read_zip(&mut zip).ok()?;
+            let mut zip = zip::ZipArchive::new(BufReader::new(file)).ok()?;
+            // Home also asks for this status. Packages without a wasm module cannot
+            // contribute listeners, so avoid opening and validating every resource entry.
+            zip.index_for_name(WASM)?;
+            let package = Package::read_zip(&mut zip).ok()?;
             if package.manifest.wasm.is_none()
                 || package.manifest.inject.is_empty()
                 || !java::is_enabled(home, &package.manifest.id)
@@ -174,7 +178,8 @@ pub fn wasm_points(home: &Path) -> Vec<horizon_platform::mod_package::index::nat
 
 /// The native mods turned on in game folder `home`, read from their `.hmod`s. One that can't be
 /// read always counts, with its file name and no version, so it needs a build (which says why):
-/// the on/off list is keyed by the manifest id, which an unreadable file can't give.
+/// the on/off list is keyed by the manifest id, which an unreadable file can't give. One in the
+/// format from before the SDK never counts: no build can take it (`native_mods::stage_installed`).
 pub fn enabled(home: &Path) -> Vec<Mod> {
     let mut out = Vec::new();
     for path in hmods(home) {
@@ -186,6 +191,7 @@ pub fn enabled(home: &Path) -> Vec<Mod> {
                     out.push((b.manifest.id, b.manifest.version, Some(digest)));
                 }
             }
+            Err(_) if legacy_format(&path) => {}
             Err(_) => out.push((stem(&path), String::new(), None)),
         }
     }
@@ -233,16 +239,92 @@ pub struct Installed {
     pub origin: Option<crate::github_mods::Origin>,
     /// The validated package icon, or the package error (the file remains removable).
     pub icon: Result<Option<Arc<horizon_platform::mod_package::icon::Icon>>, String>,
+    /// Whether its row may switch `mod.<id>`. Not when the manifest can't be read (the id is
+    /// only the file name), nor for a `horizon-mods/` copy whose id another mod has: either
+    /// would switch that other mod. The file stays removable.
+    pub switch: bool,
+    /// Whether it is a native mod in the format from before the `.hmod` SDK
+    /// ([`legacy_format`]): it stays installed but no build takes it.
+    pub legacy: bool,
+}
+
+impl Installed {
+    /// A `.hnmod` launchers before 0.2.70 installed (#17934). It can't load: its row offers only
+    /// Remove, since its on/off key is its file name and could switch an installed mod of that id.
+    pub fn retired(&self) -> bool {
+        self.file.ends_with(".hnmod")
+    }
+
+    /// Why the file can't load, shown instead of where it came from.
+    pub fn note(&self) -> Option<&'static str> {
+        if self.retired() {
+            return Some(crate::i18n::tr(
+                "Old format (.hnmod): ask its author to republish it as .hmod",
+            ));
+        }
+        self.legacy.then(legacy_note)
+    }
+
+    /// Whether the file is in `horizon-native-mods/`; one in `horizon-mods/` is a wasm or
+    /// content mod, which needs no build and no native permission.
+    pub fn native(&self) -> bool {
+        self.file
+            .strip_prefix(native_mods::INSTALLED)
+            .is_some_and(|rest| rest.starts_with('/'))
+    }
+}
+
+/// Whether `files` hold a native mod the build card is for; a retired file is not one.
+pub fn asks_for_build<'a>(files: impl IntoIterator<Item = &'a Installed>) -> bool {
+    files
+        .into_iter()
+        .any(|file| file.native() && !file.retired() && !file.legacy)
+}
+
+/// Whether the native `.hmod` at `path` is in the format from before the `.hmod` SDK.
+pub fn legacy_format(path: &Path) -> bool {
+    horizon_platform::mod_package::index::native::legacy_format(path)
+}
+
+/// Whether the browser-tracked `file` (relative to the game folder `home`) is a native mod that
+/// asks for a build: a native `.hmod` not in the format from before the SDK. Reads the archive.
+pub fn tracked_asks_for_build(home: &Path, file: &str) -> bool {
+    is_native_file(file) && !legacy_format(&home.join(file))
+}
+
+/// What the Mods page says of a native mod in the format from before the `.hmod` SDK.
+pub fn legacy_note() -> &'static str {
+    crate::i18n::tr(
+        "Made for the old native mod format: Play leaves it out. It needs a version made for the new SDK.",
+    )
 }
 
 /// Discover the actual files, not just GitHub sidecars. Registry files already have a row.
+/// Besides native files, an `.hmod` copied by hand into `horizon-mods/` is listed too (#18301).
 pub fn untracked(home: &Path) -> Vec<Installed> {
     let tracked = crate::browser::installed::Installed::load(home);
-    hmods(home)
+    let native = listed(home)
         .into_iter()
-        .filter_map(|path| {
-            let file = format!("{}/{}", native_mods::INSTALLED, path.file_name()?.to_str()?);
-            if !path.is_file() || tracked.entries.iter().any(|e| e.file == file) {
+        .map(|path| (native_mods::INSTALLED, path));
+    let wasm = wasm_hmods(home)
+        .into_iter()
+        .map(|path| (horizon_platform::mod_package::mod_list::DIR, path));
+    // A tracked `ruby.hmod` renamed `Ruby.hmod` on a folder that ignores case is still that file:
+    // both names resolve to the same entry. On a case-sensitive one they stay two files.
+    let tracked_paths: Vec<_> = tracked
+        .entries
+        .iter()
+        .map(|e| (e.file.as_str(), fs::canonicalize(home.join(&e.file)).ok()))
+        .collect();
+    let mut rows: Vec<Installed> = native
+        .chain(wasm)
+        .filter_map(|(folder, path)| {
+            let file = format!("{folder}/{}", path.file_name()?.to_str()?);
+            let canonical = fs::canonicalize(&path).ok();
+            let is_tracked = tracked_paths
+                .iter()
+                .any(|(f, c)| *f == file || (c.is_some() && *c == canonical));
+            if !path.is_file() || is_tracked {
                 return None;
             }
             let package = horizon_platform::mod_package::manifest::Package::read(&path);
@@ -250,7 +332,11 @@ pub fn untracked(home: &Path) -> Vec<Installed> {
                 .as_ref()
                 .map(|p| (p.manifest.id.clone(), p.manifest.version.clone()))
                 .unwrap_or_else(|_| (stem(&path), String::new()));
-            let origin = (path.file_stem()?.to_str()? == id)
+            // A GitHub install's Remove deletes `<id>.hmod`: an old `.hnmod` is removed as a file.
+            // GitHub installs only go into the native folder.
+            let hmod = path.extension().is_some_and(|e| e == "hmod");
+            let github = folder == native_mods::INSTALLED;
+            let origin = (github && hmod && path.file_stem()?.to_str()? == id)
                 .then(|| crate::github_mods::origin(home, &id))
                 .flatten();
             let internals = package
@@ -263,10 +349,34 @@ pub fn untracked(home: &Path) -> Vec<Installed> {
                 version,
                 internals,
                 origin,
+                // A retired `.hnmod` never switches the live mod, even when the archive reads.
+                switch: hmod && package.is_ok(),
+                legacy: github && package.is_err() && legacy_format(&path),
                 icon: package.map(|p| p.icon.map(Arc::new)),
             })
         })
-        .collect()
+        .collect();
+    let tracked_ids: Vec<&str> = tracked
+        .entries
+        .iter()
+        .filter_map(crate::browser::horizon::mod_id)
+        .collect();
+    // Only ids read from a manifest: an unreadable file's name says nothing about its id.
+    let ids: Vec<Option<String>> = rows
+        .iter()
+        .map(|r| r.switch.then(|| r.id.clone()))
+        .collect();
+    for (i, row) in rows.iter_mut().enumerate() {
+        let shared = tracked_ids.contains(&row.id.as_str())
+            || ids
+                .iter()
+                .enumerate()
+                .any(|(j, id)| j != i && id.as_ref() == Some(&row.id));
+        if !row.native() && shared {
+            row.switch = false;
+        }
+    }
+    rows
 }
 
 /// The mods installed version `version` was built with, or None when it isn't a native build
@@ -328,7 +438,7 @@ pub fn fingerprint(home: &Path, version: Option<&str>) -> String {
     let mut out = format!("{}\n{version:?}\n", home.display());
     // The on/off list (`browser::java::is_enabled`).
     out += &fs::read_to_string(home.join("horizon-mods.txt")).unwrap_or_default();
-    for path in hmods(home)
+    for path in listed(home)
         .into_iter()
         .chain(wasm_hmods(home))
         .flat_map(|p| [p.clone(), p.with_extension("origin.json")])
@@ -354,10 +464,23 @@ fn wasm_hmods(home: &Path) -> Vec<std::path::PathBuf> {
 }
 
 fn hmods(home: &Path) -> Vec<std::path::PathBuf> {
+    native_files(home, &["hmod"])
+}
+
+/// [`hmods`] and the `.hnmod`s launchers before 0.2.70 installed (#17934). Those can't be read
+/// or built any more, but the Mods page lists them, with why, so they can be removed.
+fn listed(home: &Path) -> Vec<std::path::PathBuf> {
+    native_files(home, &["hmod", "hnmod"])
+}
+
+fn native_files(home: &Path, extensions: &[&str]) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(home.join(native_mods::INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| p.extension().is_some_and(|e| e == "hmod"));
+    paths.retain(|p| {
+        p.extension()
+            .is_some_and(|e| extensions.iter().any(|x| e == *x))
+    });
     paths.sort();
     paths
 }
@@ -637,6 +760,216 @@ mod tests {
         );
         assert!(files[0].icon.is_err(), "a refusal is not an absent icon");
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_copy_has_no_switch_and_a_renamed_tracked_file_no_second_row() {
+        use crate::browser::installed;
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let folder = home
+            .path()
+            .join(horizon_platform::mod_package::mod_list::DIR);
+        fs::create_dir_all(&folder).unwrap();
+        // Its id would be only its file name, which could be another mod's.
+        fs::write(folder.join("ruby.hmod"), b"corrupt").unwrap();
+        fs::write(folder.join("Gem.hmod"), b"corrupt").unwrap();
+        // A valid copy whose id is the corrupt file's name keeps its switch.
+        let mut zip = zip::ZipWriter::new(fs::File::create(folder.join("my-build.hmod")).unwrap());
+        zip.start_file("horizon-mod.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            b"id = 'ruby'
+name = 'Ruby'
+version = '1'
+api = '0.2'
+capabilities = ['registries']
+",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let entry: installed::Entry = serde_json::from_value(serde_json::json!({"source":"horizon","project":"gem","slug":"gem","title":"Gem","kind":"mod","version":"1","number":"1","file":"horizon-mods/gem.hmod","checksum":"","page":""})).unwrap();
+        installed::Installed {
+            entries: vec![entry],
+        }
+        .save(home.path())
+        .unwrap();
+        let files = untracked(home.path());
+        let seen: Vec<_> = files.iter().map(|f| (f.file.as_str(), f.switch)).collect();
+        // A folder that ignores case: `Gem.hmod` is the tracked `gem.hmod` renamed, not a second
+        // mod. A case-sensitive one holds two files.
+        let renamed = folder.join("gem.hmod").exists();
+        let mut expected = vec![
+            ("horizon-mods/my-build.hmod", true),
+            ("horizon-mods/ruby.hmod", false),
+        ];
+        if !renamed {
+            expected.insert(0, ("horizon-mods/Gem.hmod", false));
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn a_retired_hnmod_is_listed_to_remove_but_never_built() {
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(native_mods::INSTALLED);
+        fs::create_dir_all(&folder).unwrap();
+        let before = fingerprint(home.path(), None);
+        // As launchers before 0.2.70 installed them (#17934): `horizon-native.json` and
+        // `mixins/<id>/`, which today's package reader refuses.
+        for name in ["teem_client-0.1.0.hnmod", "zoom.hnmod"] {
+            let mut zip = zip::ZipWriter::new(fs::File::create(folder.join(name)).unwrap());
+            zip.start_file(
+                "horizon-native.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"{\"schema\": 1}").unwrap();
+            zip.finish().unwrap();
+        }
+        let record = crate::github_mods::Origin {
+            id: "zoom".into(),
+            version: "1.0".into(),
+            owner: "example".into(),
+            repo: "zoom".into(),
+            tag: None,
+            commit: "a".repeat(40),
+            asset: None,
+            sha256: "ab".repeat(32),
+        };
+        fs::write(
+            folder.join("zoom.origin.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(
+            before,
+            fingerprint(home.path(), None),
+            "the Mods page reads the folder again"
+        );
+        let files = untracked(home.path());
+        let seen: Vec<_> = files.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(
+            seen,
+            [
+                "horizon-native-mods/teem_client-0.1.0.hnmod",
+                "horizon-native-mods/zoom.hnmod"
+            ]
+        );
+        assert!(
+            files.iter().all(|m| m.icon.is_err()),
+            "each row says why it doesn't load"
+        );
+        assert!(
+            files[1].origin.is_none(),
+            "Remove deletes the file itself, not a GitHub install's .hmod"
+        );
+        for file in &files {
+            java::set_enabled(home.path(), &file.id, true).unwrap();
+        }
+        assert!(enabled(home.path()).is_empty(), "nothing to build");
+        assert!(bundles_on(home.path()).is_empty());
+    }
+
+    #[test]
+    fn an_old_format_hmod_says_it_needs_a_new_sdk_version_and_asks_for_no_build() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(native_mods::INSTALLED);
+        fs::create_dir_all(&folder).unwrap();
+        let mut zip =
+            zip::ZipWriter::new(fs::File::create(folder.join("fullbright.hmod")).unwrap());
+        zip.start_file(
+            "horizon-native.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut zip, b"{\"schema\": 1}").unwrap();
+        zip.finish().unwrap();
+        let files = untracked(home.path());
+        assert!(files[0].legacy && !files[0].retired());
+        assert_eq!(files[0].note(), Some(legacy_note()));
+        assert!(!asks_for_build(&files));
+        assert!(enabled(home.path()).is_empty());
+    }
+
+    #[test]
+    fn a_retired_hnmod_offers_only_remove_and_asks_for_no_build() {
+        use std::io::Write;
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(native_mods::INSTALLED);
+        fs::create_dir_all(&folder).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(folder.join("zoom.hnmod")).unwrap());
+        zip.start_file(
+            "horizon-native.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"{\"schema\": 1}").unwrap();
+        zip.finish().unwrap();
+        let files = untracked(home.path());
+        assert!(files[0].retired());
+        assert_eq!(
+            files[0].note(),
+            Some("Old format (.hnmod): ask its author to republish it as .hmod"),
+            "the row says why, not the package reader's refusal"
+        );
+        assert!(!asks_for_build(&files), "no build card for it alone");
+
+        // A supported mod with the id the retired file's name gives: only it has a switch, so
+        // switching the retired row can't turn `zoom` on or off.
+        let pin = "a".repeat(40);
+        let mut zip = zip::ZipWriter::new(fs::File::create(folder.join("zoom.hmod")).unwrap());
+        let manifest = format!(
+            "id = 'zoom'\nname = 'zoom'\nversion = '1.0'\napi = '0.2'\ncapabilities = ['registries']\n[native]\ngame = '26.3'\nhorizon = '{pin}'\nmixins = '{pin}'\n"
+        );
+        for (name, bytes) in [
+            ("horizon-mod.toml", manifest.as_str()),
+            (
+                "Cargo.toml",
+                "[package]\nname = 'zoom'\nversion = '1.0.0'\n",
+            ),
+            ("src/lib.rs", "pub fn hooks() {}\n"),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(bytes.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let files = untracked(home.path());
+        let rows: Vec<_> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.file.as_str(),
+                    f.id.as_str(),
+                    f.retired(),
+                    f.note().is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("horizon-native-mods/zoom.hmod", "zoom", false, false),
+                ("horizon-native-mods/zoom.hnmod", "zoom", true, true)
+            ]
+        );
+        assert!(asks_for_build(&files));
+
+        // A readable backup of the live mod saved as `.hnmod` still never switches `zoom`.
+        fs::copy(folder.join("zoom.hmod"), folder.join("zoom.hnmod")).unwrap();
+        let switches: Vec<_> = untracked(home.path())
+            .iter()
+            .map(|f| (f.file.clone(), f.switch))
+            .collect();
+        assert_eq!(
+            switches,
+            [
+                ("horizon-native-mods/zoom.hmod".to_owned(), true),
+                ("horizon-native-mods/zoom.hnmod".to_owned(), false)
+            ]
+        );
     }
 
     #[test]

@@ -65,7 +65,38 @@ toolchain = "1.99.1 <commit>"     # every mod linked together needs the same one
 my_library = "…"
 ```
 
+Build with a `cargo-horizon-mod` from the game build your mod is made for. A tool installed
+before November 2026's fix for std symbol names (#18261) names std differently from the game's
+std member, so the game refuses the mod even when the Rust version matches. Reinstall the tool
+from the commit in your `[package.metadata.horizon] sdk`, then rebuild the mod and every library
+mod it depends on. An existing `.hmod` keeps its old imports until it's rebuilt:
+
+```sh
+cargo install --locked --git https://github.com/horizon-rust/horizon --rev <sdk commit> cargo-horizon-mod
+```
+
 A mod carries native code or wasm code, not both. A wasm mod has no `[native]` table.
+
+The game checks a `mod.wasm` when it loads it; the build promises no range of games. It refuses
+the mod when:
+
+- its core transport layout differs from the game's ("built for another version of the mod API's
+  transport");
+- a call it imports is missing from the game, or has another signature or layout there;
+- a hook it answers (an export row in its call table) is missing from the game or changed. A hook
+  the game added after the mod's build is fine: the mod just doesn't answer it;
+- its mod points layout, when it carries one, differs from the game's.
+
+A newer SDK can bring calls an older game lacks, so build for the oldest Nightly you support and
+test the build on each Nightly you support. As reported for the November 2026 Nightlies, the
+transport changed between the 2026-11-18 Nightly (`dd67b76`) and the 2026-11-19 Nightly
+(`5ef7734`): a mod built for `dd67b76` was refused on later games, one built for `5ef7734` loaded
+on the 2026-11-20 game, and players of the 18 November Nightly needed a build of their own.
+
+`mod.wasm` is a build output and stays out of Git, so in the
+[horizon-mods](https://github.com/horizon-rust/horizon-mods) registry a wasm mod's source sits under
+`native/` beside the native mods. Its `horizon-mod.toml` has a `[wasm]` table and no `[native]` one,
+and its registry entry's kind is `mod`, not `native-mod`.
 
 A mod with `[[inject]]` listeners builds against the game's staged point catalog. Pass
 `--catalog path/to/points.json`, or set `HORIZON_WASM_STD` to the toolchain's std member
@@ -102,7 +133,9 @@ symbol interposition: duplicate definitions are refused, rather than overriding 
 Each member records its compiler, target, settings,
 rlib digest and dependency artifact identities in `horizon.build` metadata covered by its module
 hash. Mod crate disambiguators use the mod ID, version and resolved Cargo features rather than
-the temporary workspace path. A shared crate disambiguator alone is not an ABI guarantee:
+the temporary workspace path. Std crate disambiguators use only the pinned toolchain, the crate
+and its features, so a mod built on Windows, macOS or Linux links against the game's one std
+member, as long as the tool has that rule ([Build](#build) says how to reinstall it). A shared crate disambiguator alone is not an ABI guarantee:
 the loader checks the exact dependency build recorded in `[wasm.linked]`, including when the
 library and its consumers were built separately. Changing a library's source, toolchain,
 features or settings requires rebuilding its consumers.
@@ -149,32 +182,46 @@ glue or another Rust interface.
 Pointers and lengths below are wasm32 `u32` values. The game provides these imports in the
 `horizon` module:
 
-- `host(id, in_ptr, in_len, out_ptr, out_cap) -> u32` invokes a generated import ID. Arguments
-  are Wire values in order. It writes the reply if it fits and returns its length; if the length
-  exceeds `out_cap`, call `host_reply(out_ptr)` after allocating that many bytes to copy the
-  retained reply. Host errors trap the call.
+- `Owner::method#signature(in_ptr, in_len, out_ptr, out_cap) -> u32`: one import per API call
+  (`held-Owner::method#signature` for a method of a handler another mod gave the game).
+  Arguments are Wire values in order. It writes the reply if it fits and returns its length; if
+  the length exceeds `out_cap`, call `host_reply(out_ptr)` after allocating that many bytes to
+  copy the retained reply. Host errors trap the call. `signature` is a hash of the call's
+  receiver, argument and answer types, with the generated shape of each borrowing type. The game
+  links each import by name: one it doesn't have, or has with another signature, refuses the mod,
+  naming the call.
+- `host(id, in_ptr, in_len, out_ptr, out_cap) -> u32`: the same for the reserved IDs
+  `HOST_RELEASE` and `HOST_LOG`.
 - `host_reply(out_ptr)` copies that retained reply.
 
 Each guest exports:
 
-- `horizon_layout() -> u64`: the generated layout hash. A mismatch is refused.
-- `horizon_layout_ext() -> u64`, when `mod_points` is linked: the full point catalog's layout
-  hash. The loader checks it before accepting any listener.
+- `horizon_layout() -> u64`: the hash of what every call shares: the reserved IDs, group state,
+  the prepared ABI and the hand-written codecs. A mismatch is refused.
+- `horizon_layout_ext() -> u64`, when `mod_points` is linked: the point protocol's hash. Each
+  point is checked by name when the mod subscribes to it.
 - `horizon_in(len) -> ptr`: the buffer into which the game writes the next call's input.
-- `horizon_hook(id) -> u64`: runs the generated export ID after the input is written. The high
-  32 bits are the reply pointer and the low 32 bits its length; `u32::MAX` as the length denotes
-  an error, with a Wire string at the pointer. The reply remains valid until the next call at
-  the same depth. A handler call starts its input with the handler's `u64` ID.
+- `horizon_hook(id) -> u64`: runs export `id` after the input is written. An export's ID is a hash
+  of its name (`Owner::method`), the same in every build. The high 32 bits are the reply pointer
+  and the low 32 bits its length; `u32::MAX` as the length denotes an error, with a Wire string at
+  the pointer. The reply remains valid until the next call at the same depth. A handler call
+  starts its input with the handler's `u64` ID.
 
 The reserved IDs are `INIT = 0xFFFF_FF00` (guest package-list initialization),
-`RELEASE = 0xFFFF_FF01` (guest handler IDs to release), and `HOST_RELEASE = 0xFFFF_FF02`
-(host object ID to release), and `HOST_LOG = 0xFFFF_FF03` (a guest panic string, with no reply).
-Other IDs index the generated import or export table. A hook reply
-contains its return value followed by writable arguments in field order.
+`RELEASE = 0xFFFF_FF01` (guest handler IDs to release), `HOST_RELEASE = 0xFFFF_FF02`
+(host object ID to release), `HOST_LOG = 0xFFFF_FF03` (a guest panic string, with no reply) and
+`CALLS = 0xFFFF_FF04`. `CALLS` answers the mod's calls as `(key, hash)` pairs: each import and
+export it was built with, the hash covering its signature and the Wire layout of each type it
+reaches. The game asks for it first and compares each call the mod imports and each export both
+have with its own; one that differs, or an export the game no longer has, refuses the mod, naming
+the call. A hook reply contains its return value followed by writable arguments in
+field order.
 
 Points use that same hook export, call arena and execution budget. Place IDs are
-`0x8000_0000 + place`. The subscription query `0xBFFF_FFFF` returns `(place, injection_id)`
-pairs. Point call input starts with the `u32` subscription index. A `HostSide` point then carries
+`0x8000_0000 + place`, `place` being the guest's own index. The subscription query
+`0xBFFF_FFFF` returns `(place, point name, point hash, injection_id)`: the game finds each point
+by name and refuses one it doesn't have or has with another hash (its host and record
+layout). Point call input starts with the `u32` subscription index. A `HostSide` point then carries
 a server/client boolean, followed by its listener record. Calls reply with unit and the record,
 which the host decodes completely before writing any field back.
 

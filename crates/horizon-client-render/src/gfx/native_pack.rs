@@ -5,20 +5,19 @@ use horizon_shader_api::check::CheckedStage;
 use horizon_shader_api::{Report, StageKind};
 
 use super::displace::Displacement;
-use super::native_entity::NativeEntity;
+use super::external::{
+    Capabilities, FrameStart, TimingSetup, WorldOutput, WorldPost, WorldTargets,
+};
+use super::native_entity::{EntityPipelines, NativeEntity};
 use super::native_material::{DisplacedShape, MaterialPipelines, NativeMaterial, TerrainShape};
+use super::native_post::kept::StageReads;
 use super::native_post::{NativeFrame, NativePost};
 use super::native_shadow::{NativeShadow, ShadowGrid};
 use super::native_sky::NativeSky;
-use super::output::EffectiveOutput;
 use super::pack_timing::PassTiming;
-use super::surface_setup::ray_query::ray_scene::{RayScene, Traced};
-use super::{Frame, SectionKey};
-use crate::fast_hash::FxHashMap;
+use super::rt::scene::{RayScene, Traced};
 
 pub struct NativePack {
-    /// The manifest's `name`.
-    pub name: String,
     pub frame: NativeFrame,
     pub sky: Option<NativeSky>,
     pub material: Option<NativeMaterial>,
@@ -28,22 +27,42 @@ pub struct NativePack {
     /// With a sky stage, what of Minecraft's sky still draws over it (`[sky]`).
     pub vanilla_clouds: bool,
     pub vanilla_sun: bool,
+    pub vanilla_moon: bool,
     pub vanilla_stars: bool,
     pub weather: Option<wgpu::RenderPipeline>,
     /// The draw of the shadow map the stages read, if the pack asks for one.
     pub shadow: Option<NativeShadow>,
     /// `[displacement]`'s grid, while it is on and the resource packs have height maps.
     pub displacement: Option<Displacement>,
+    /// GPU time of each pass, while the renderer asks for it (`pack_timing.rs`).
+    pub timing: Option<PassTiming>,
+    /// It declares `[ray_tracing]`: the renderer keeps a scene for it (`replace_executor`).
+    pub traces: bool,
+    /// Its terrain pipelines bind the arenas' quad looks (`looks::wanted`): sections carry them.
+    pub looks: bool,
+    /// With kept resources, what lets a rebuild keep them (`carry`).
+    kept: Option<super::native_post::kept::Signature>,
+}
+
+/// What the game reads of the running pack's manifest beside its executor
+/// (`Renderer::native_pack_name`, `light_color`, `particle_lights`).
+pub struct Metadata {
+    /// The manifest's `name`.
+    pub name: String,
     /// `[[particle_lights]]`.
     pub particle_lights: Vec<horizon_shader_api::manifest::ParticleLight>,
     /// `[[lights]]`, for the colour of held and dropped items' light.
     pub light_colors: Vec<horizon_shader_api::manifest::LightColor>,
-    /// GPU time of each pass, while the renderer asks for it (`pack_timing.rs`).
-    pub timing: Option<PassTiming>,
-    /// It declares `[ray_tracing]`: the renderer keeps a scene for it (`replace_native`).
-    pub traces: bool,
-    /// With kept resources, what lets a rebuild keep them (`carry`).
-    kept: Option<super::native_post::kept::Signature>,
+}
+
+impl Metadata {
+    pub fn of(report: &Report) -> Self {
+        Self {
+            name: report.manifest.name.clone(),
+            particle_lights: report.manifest.particle_lights.clone(),
+            light_colors: report.manifest.lights.clone(),
+        }
+    }
 }
 
 /// Whether the option `id` (a bool, or a number above 0) is on, or there is none to ask.
@@ -144,7 +163,7 @@ pub(in crate::gfx) fn install_kept(
 
 impl NativePack {
     /// Writes this frame's inputs (`NativeFrame::write`), and for a `[ray_tracing]` pack where
-    /// its passes and material stage trace this frame's `scene` from, once it is built.
+    /// its passes and material and entity stages trace this frame's `scene` from, once it is built.
     pub(in crate::gfx) fn write(
         &mut self,
         queue: &wgpu::Queue,
@@ -156,7 +175,9 @@ impl NativePack {
         let post = self.post.trace(queue, scene);
         let material = self.material.as_ref();
         let terrain = material.and_then(|m| m.trace(queue, scene));
-        self.frame.ray_distance = post.or(terrain);
+        let entity = self.entity.as_ref().and_then(|e| e.scene.as_ref());
+        let entities = entity.and_then(|e| e.trace(queue, scene));
+        self.frame.ray_distance = post.or(terrain).or(entities);
         self.frame.write(queue, frame, size, display);
         if let Some(epochs) = &self.frame.epochs {
             self.post.kept_frame(epochs.current(), size);
@@ -188,50 +209,97 @@ impl NativePack {
         super::native_post::kept::reinstall(device, &mut self.post)
     }
 
-    /// Joins the frame's group with this frame's `scene` from `camera` for a material stage
-    /// that traces: after the frame's group changed for this frame, before the terrain draws.
+    /// Joins the frame's group with this frame's `scene` from `camera` for material and entity stages
+    /// that trace, and with the kept resources they read: after the frame's group changed for
+    /// this frame and the kept resources' frame started (`before_world`), before the world
+    /// draws.
     pub(in crate::gfx) fn bind_scene(
         &mut self,
         device: &wgpu::Device,
         scene: Option<&RayScene>,
         camera: glam::DVec3,
     ) {
-        if let Some(trace) = self.material.as_mut().and_then(|m| m.scene.as_mut()) {
-            let scene = scene.and_then(|s| s.traced(camera));
-            trace.bind(device, &self.frame, scene.as_ref());
+        let scene = scene.and_then(|s| s.traced(camera));
+        self.bind_terrain(device, scene.as_ref());
+    }
+
+    /// `bind_scene` with this frame's `scene` as the camera traces it.
+    pub(in crate::gfx) fn bind_terrain(
+        &mut self,
+        device: &wgpu::Device,
+        scene: Option<&Traced<'_>>,
+    ) {
+        if let Some(m) = &mut self.material {
+            m.bind(device, &self.frame, scene, &self.post);
         }
+        if let Some(entity) = &mut self.entity
+            && let Some(trace) = &mut entity.scene
+        {
+            let reads = entity.kept.as_ref().and_then(|k| k.reads(&self.post));
+            trace.bind(device, &self.frame, scene, reads);
+        }
+        self.bind_kept(device);
     }
 
     /// Whether the pack's rays read the scene's entity layer: its files name `RAY_ENTITY`, and
     /// its stages trace on this device.
     pub(in crate::gfx) fn traces_entities(&self) -> bool {
         let material = self.material.as_ref().and_then(|m| m.scene.as_ref());
-        self.post.traces_entities() || material.is_some_and(|t| t.traces_entities())
+        let entity = self.entity.as_ref().and_then(|e| e.scene.as_ref());
+        self.post.traces_entities()
+            || material.is_some_and(|t| t.traces_entities())
+            || entity.is_some_and(|t| t.traces_entities())
+    }
+
+    /// Whether the pack's rays read the terrain's looks (`Report::ray_looks`), and its stages
+    /// trace on this device.
+    pub(in crate::gfx) fn traces_looks(&self) -> bool {
+        let material = self.material.as_ref().and_then(|m| m.scene.as_ref());
+        let entity = self.entity.as_ref().and_then(|e| e.scene.as_ref());
+        self.post.traces_looks()
+            || material.is_some_and(|t| t.traces_looks())
+            || entity.is_some_and(|t| t.traces_looks())
+    }
+
+    /// The pack's entity stage and the group 3 it draws with this frame.
+    pub(in crate::gfx) fn entities(&self) -> Option<(&EntityPipelines, &wgpu::BindGroup)> {
+        let entity = self.entity.as_ref()?;
+        let kept = entity
+            .kept
+            .as_ref()
+            .and_then(|k| k.group(self.post.parity()));
+        Some(entity.drawn(kept.unwrap_or(&self.frame.group), self.post.parity()))
     }
 
     /// The pipelines the pack's terrain draws with this frame, and its group 3.
     pub(in crate::gfx) fn terrain(&self) -> Option<(&MaterialPipelines, &wgpu::BindGroup)> {
-        Some(self.material.as_ref()?.drawn(&self.frame.group))
+        Some((self.material.as_ref()?).drawn(&self.frame.group, self.post.parity()))
     }
 
     /// The pack of the checked stages `report` with the option values `constants`, drawing
     /// onto the world's targets as `terrain` describes; the sky reads the terrain's group 0.
     /// Also returns its stages' labels, in the order they draw. Errors name the stage wgpu
-    /// refused.
+    /// refused. `lights` holds the `[[lights]]` colours of the block states they name,
+    /// `sources` each listed light source's (`ray_lights::source`), for a pack whose rays read
+    /// them (`[ray_tracing] lights = true`).
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         terrain: &TerrainShape<'_>,
         report: Report,
         constants: &[(String, f64)],
-        lights: super::block_light::LightTable,
+        (lights, sources): (super::block_light::LightTable, super::ray_lights::Sources),
     ) -> Result<(Self, Vec<String>), String> {
         // A backend may refuse a layout or pipeline the pack asks for (a stage's bindings
         // past its sampled-texture limit, say, as OpenGL's 16 was before #10095): the pack
-        // is refused with that error instead of a validation panic in the renderer.
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let built = Self::build(device, queue, terrain, report, constants, lights);
-        let refused = pollster::block_on(scope.pop());
+        // is refused with that error instead of a validation panic in the renderer. A stage
+        // the backend can't translate (OpenGL and a depth `textureLoad`, #18349) is an
+        // internal error, which a validation scope lets through: each scope takes both.
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let built = Self::build(device, queue, terrain, report, constants, (lights, sources));
+        let internal = pollster::block_on(internal.pop());
+        let refused = internal.or(pollster::block_on(validation.pop()));
         match (built, refused) {
             (Ok(built), None) => Ok(built),
             (Ok(_), Some(e)) => Err(e.to_string()),
@@ -245,7 +313,7 @@ impl NativePack {
         terrain: &TerrainShape<'_>,
         report: Report,
         constants: &[(String, f64)],
-        lights: super::block_light::LightTable,
+        (lights, sources): (super::block_light::LightTable, super::ray_lights::Sources),
     ) -> Result<(Self, Vec<String>), String> {
         let (globals, format) = (terrain.globals, terrain.format);
         let kept = super::native_post::kept::Signature::of(&report, constants);
@@ -266,6 +334,12 @@ impl NativePack {
             terrain.pbr,
             terrain.linear,
         );
+        // One buffer of light sources for every stage of a `[ray_tracing] lights = true` pack
+        // whose files name them, on a device that traces: the passes' bind groups take it as
+        // they are made. Its sources and worker wait for a pass that reads them (below).
+        if report.stages.iter().any(CheckedStage::traces_lights) && super::rt::query::on(device) {
+            frame.ray_lights = Some(super::ray_lights::RayLights::new(device));
+        }
         let reach = report.manifest.kept.reach;
         frame.epochs = (kept.as_ref()).map(|_| super::native_post::kept::Epochs::new(reach));
         // `[displacement]`, unless its option is off; nothing to displace without heights.
@@ -290,6 +364,7 @@ impl NativePack {
                     steps,
                     &frame.pbr[0],
                     report.shadow.is_some(),
+                    terrain.looks,
                 )
             });
         let shadow = chosen
@@ -336,6 +411,7 @@ impl NativePack {
         };
         let vanilla_clouds = keeps(|s| s.clouds);
         let vanilla_sun = keeps(|s| s.sun);
+        let vanilla_moon = keeps(|s| s.moon);
         let vanilla_stars = keeps(|s| s.stars);
         let weather = report
             .stages
@@ -368,7 +444,15 @@ impl NativePack {
         let sky = others
             .iter()
             .find(|s| s.kind == StageKind::Sky)
-            .map(|stage| NativeSky::new(device, globals, &frame, stage, constants, format))
+            .map(|stage| {
+                let kept = StageReads::new(
+                    device,
+                    &report.manifest,
+                    report.manifest.sky.as_ref(),
+                    &frame,
+                );
+                NativeSky::new(device, globals, (&frame, kept), stage, constants, format)
+            })
             .transpose()?;
         let mut material = others
             .iter()
@@ -380,6 +464,8 @@ impl NativePack {
                     steps: d.view.steps,
                     layout: &d.draw_layout,
                 });
+                let listed = report.manifest.material.as_ref();
+                let kept = StageReads::new(device, &report.manifest, listed, &frame);
                 NativeMaterial::new(
                     device,
                     terrain,
@@ -390,15 +476,20 @@ impl NativePack {
                     coverage,
                     has_vertex,
                     displaced.as_ref(),
+                    kept,
                 )
             })
             .transpose()?;
-        let entity = others
+        let mut entity = others
             .iter()
             .find(|s| s.kind == StageKind::Entity)
             .map(|stage| {
                 let groups = [terrain.entities, terrain.retained_entities];
                 let manifest = &report.manifest;
+                let listed = manifest.entity.as_ref();
+                let kept = StageReads::new(device, manifest, listed, &frame);
+                let shape = super::native_post::trace::TraceShape::of(terrain, false, None);
+                let stage = (stage, kept, &shape);
                 NativeEntity::new(device, format, groups, &frame, stage, constants, manifest)
             })
             .transpose()?;
@@ -408,27 +499,51 @@ impl NativePack {
         // compute passes keep theirs (`ComputePass::scene`). Whether any of them, compute and
         // before-world passes included, reads the entity layer.
         let entities = post.iter().any(CheckedStage::traces_entities);
+        // The light sources, once for the pack: each pass that reads them binds them.
+        let lights = frame.ray_lights.as_ref().map(|l| l.buffer.clone());
         let scenes: Vec<(String, naga::Module)> = (post.iter_mut())
             .filter(|s| s.kind == StageKind::Post)
             .filter_map(|s| Some((s.label.clone(), s.scene.take()?)))
             .collect();
         let manifest = &report.manifest;
         let mut post = NativePost::new(device, post, manifest, constants, format, &frame, tonemap)?;
-        // One scene for every stage, as `frame.has_ray_tracing` says: where the material stage
-        // traces and the device refuses its pipelines, the post passes keep missing too.
-        let traced = |m: &NativeMaterial| m.scene.is_some();
-        let wanted = |s: &horizon_shader_api::check::CheckedStage| s.scene_source.is_some();
-        let refused = others.iter().any(wanted)
-            && super::surface_setup::ray_query::on(device)
-            && !material.as_ref().is_some_and(traced);
-        let computes = post.computes_trace();
-        if (!scenes.is_empty() || computes) && !refused {
-            let shape = super::native_post::trace::TraceShape::of(terrain, entities);
-            if !post.trace_scene(device, scenes, constants, &shape, &frame.pbr)
-                && let Some(m) = material.as_mut()
-            {
-                m.scene = None;
-            }
+        // One scene for every stage, as `frame.has_ray_tracing` says: where the material or the
+        // entity stage traces and the device refuses its pipelines, the other stages keep
+        // missing too.
+        let wanted = |kind| {
+            let wants = |s: &CheckedStage| s.kind == kind && s.scene_source.is_some();
+            others.iter().any(wants)
+        };
+        let lacks = |kind, built: bool| wanted(kind) && !built;
+        let refused = super::rt::query::on(device)
+            && (lacks(
+                StageKind::Material,
+                material.as_ref().is_some_and(|m| m.scene.is_some()),
+            ) || lacks(
+                StageKind::Entity,
+                entity.as_ref().is_some_and(|e| e.scene.is_some()),
+            ));
+        let tracing = !scenes.is_empty() || post.computes_trace();
+        let posted = tracing && !refused && {
+            let shape = super::native_post::trace::TraceShape::of(terrain, entities, lights);
+            post.trace_scene(device, scenes, constants, &shape, &frame.pbr)
+        };
+        if refused || (tracing && !posted) {
+            material.iter_mut().for_each(|m| m.scene = None);
+            entity.iter_mut().for_each(|e| e.scene = None);
+        }
+        // Nothing is built against the scene that reads them (refused, or past the device's
+        // limits): no list to keep.
+        let terrain_lights = material.as_ref().and_then(|m| m.scene.as_ref());
+        let entity_lights = entity.as_ref().and_then(|e| e.scene.as_ref());
+        if !post.traces_lights()
+            && !terrain_lights.is_some_and(|t| t.traces_lights())
+            && !entity_lights.is_some_and(|t| t.traces_lights())
+        {
+            frame.ray_lights = None;
+        }
+        if let Some(r) = &mut frame.ray_lights {
+            r.start(sources);
         }
         let mut labels: Vec<String> = sky.iter().map(|s| s.label.clone()).collect();
         labels.extend(
@@ -443,10 +558,8 @@ impl NativePack {
         labels.extend(weather_label);
         labels.extend(post.labels().into_iter().map(str::to_owned));
         let pack = Self {
-            name: report.manifest.name.clone(),
-            particle_lights: report.manifest.particle_lights.clone(),
-            light_colors: report.manifest.lights.clone(),
             traces: report.manifest.ray_tracing.is_some(),
+            looks: terrain.looks.is_some(),
             kept,
             frame,
             sky,
@@ -455,6 +568,7 @@ impl NativePack {
             post,
             vanilla_clouds,
             vanilla_sun,
+            vanilla_moon,
             vanilla_stars,
             weather,
             shadow,
@@ -473,17 +587,28 @@ impl NativePack {
             queue,
             frame,
             size,
+            projection,
             output,
             lights,
             light_revision,
+            min_y,
             sky_visible,
             scene,
+            lightmap,
+            jitter,
         } = start;
         let scene = scene.and_then(|s| s.traced(frame.camera));
+        self.frame.full_lightmap = super::native_post::full_lightmap(lightmap);
+        self.frame.jitter = jitter;
+        self.frame.lens = projection;
         self.write(queue, frame, size, output.display(), scene.as_ref());
         self.frame
             .block_light
             .update(queue, frame.camera, lights, light_revision);
+        // Kept only while the passes trace: in a frame without the scene they miss anyway.
+        if let (Some(r), Some(_)) = (&mut self.frame.ray_lights, &scene) {
+            r.update(queue, frame.camera, (lights, min_y), light_revision);
+        }
         let Some(t) = &mut self.timing else {
             return false;
         };
@@ -538,33 +663,66 @@ impl NativePack {
     }
 
     /// The post stage in place of the renderer's own finish of the world: its passes over the
-    /// world's scaled target, the last onto the screen, with the history reset still pending.
+    /// world's scaled target, the last onto its picture of the window's size.
     pub fn run_post(&mut self, post: WorldPost<'_>) {
         let WorldPost {
             device,
             encoder,
             world: (color, depth),
-            screen,
             size,
+            display,
+            window,
             scene,
         } = post;
-        let history_reset = self.frame.take_history_reset();
         let scene = scene.and_then(|(scene, camera)| scene.traced(camera));
-        self.post.run(
+        self.post.run_chain(
             device,
             encoder,
             (color, depth, &self.frame.surface_view),
-            screen,
             size,
-            history_reset,
+            display,
+            window,
             self.timing.as_mut(),
             scene.as_ref(),
         );
     }
 
-    /// Whether the pack's `[tonemap]` takes the place of Horizon's tone curve.
-    pub fn tonemaps(&self) -> bool {
-        self.post.tonemaps()
+    /// The post stage's output after `run_post`: its tonemap onto the screen.
+    pub fn run_output(&mut self, output: WorldOutput<'_>) {
+        let WorldOutput {
+            device,
+            encoder,
+            screen,
+            resolved,
+        } = output;
+        self.post
+            .run_display(device, encoder, screen, resolved, self.timing.as_mut());
+    }
+
+    /// What the pack does in the renderer's place, fixed while it runs: the renderer keeps it
+    /// from the pack's install on (`replace_executor`).
+    pub fn capabilities(&self) -> Capabilities {
+        let engine_resolve = !self.post.chain() && !self.frame.linear;
+        Capabilities {
+            shadow: self.shadow.is_some(),
+            reflection: self.frame.reflects,
+            // GPU culling doesn't list the sections `[displacement]`'s grid takes quads from.
+            displacement: self.displacement.is_some(),
+            material: self.material.is_some(),
+            hides_clouds: !self.vanilla_clouds,
+            // `[sky]`'s sun, moon and stars are left out only where its stage draws its own.
+            hides_sun: self.sky.is_some() && !self.vanilla_sun,
+            hides_moon: self.sky.is_some() && !self.vanilla_moon,
+            hides_stars: self.sky.is_some() && !self.vanilla_stars,
+            tone_curve: self.post.tonemaps(),
+            ray_scene: self.traces,
+            entities: self.entity.is_some(),
+            ray_entities: self.traces_entities(),
+            ray_looks: self.traces_looks(),
+            looks: self.looks,
+            engine_resolve,
+            engine_upscale: engine_resolve && self.post.upscalable(),
+        }
     }
 
     /// Times the pack's passes, or stops, as the renderer's settings say, before its world
@@ -590,63 +748,9 @@ impl NativePack {
     }
 }
 
-/// What the renderer hands the pack's post stage (`NativePack::run_post`).
-pub struct WorldPost<'a> {
-    pub device: &'a wgpu::Device,
-    pub encoder: &'a mut wgpu::CommandEncoder,
-    /// The world's scaled target (colour, depth), of `size`.
-    pub world: (&'a wgpu::TextureView, &'a wgpu::TextureView),
-    /// The window's frame, which the last pass draws.
-    pub screen: &'a wgpu::TextureView,
-    pub size: [u32; 2],
-    /// The ray scene and the camera, when the game traces rays.
-    pub scene: Option<(&'a RayScene, glam::DVec3)>,
-}
-
-/// The renderer's pass timing settings (`NativePack::set_up_timing`).
-pub struct TimingSetup<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
-    /// `set_pass_timing`, `set_pass_timing_gap` and `set_keep_timed_frames`.
-    pub on: bool,
-    pub gap: std::time::Duration,
-    pub keep_frames: bool,
-}
-
-/// What the renderer hands the pack before its world passes (`NativePack::start_frame`).
-pub struct FrameStart<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
-    pub frame: &'a Frame<'a>,
-    /// The world's size this frame: the scaled target's, else the window's.
-    pub size: [u32; 2],
-    /// This frame's output, whose display values a 0.2 pack reads.
-    pub output: &'a EffectiveOutput,
-    /// The light sources the section meshes list, and their revision (`BlockLight::update`).
-    pub lights: &'a FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
-    pub light_revision: u64,
-    /// The sky is open this frame.
-    pub sky_visible: bool,
-    /// The ray scene, when the game traces rays (`NativePack::write`).
-    pub scene: Option<&'a RayScene>,
-}
-
-/// What the renderer hands the pack after the water mirror (`NativePack::prepare_world_targets`).
-pub struct WorldTargets<'a> {
-    pub device: &'a wgpu::Device,
-    pub encoder: &'a mut wgpu::CommandEncoder,
-    /// The water mirror's colour, when one was drawn this frame.
-    pub reflection: Option<wgpu::TextureView>,
-    pub title: bool,
-    /// The world's depth, and its colour where it can be copied (the scaled target, not the
-    /// window's own).
-    pub depth: &'a wgpu::Texture,
-    pub color: Option<&'a wgpu::Texture>,
-}
-
 #[cfg(test)]
 pub(in crate::gfx) mod tests {
-    use super::{NativePack, TerrainShape, chosen_shadow, reads_opaque};
+    use super::{Capabilities, NativePack, TerrainShape, chosen_shadow, reads_opaque};
     use horizon_shader_api::manifest::{OptionKind, PackOption, Shadow};
 
     /// The world before translucent terrain is copied only for a pack whose material, or the
@@ -730,6 +834,191 @@ file = \"material.wgsl\"
         assert!(built.is_err(), "the pack should be refused");
     }
 
+    /// OpenGL can't translate a stage that loads from a depth texture (naga's GLSL writer has
+    /// no `textureLoad` for them): a material that reads `opaque_depth`, and any post stage
+    /// (its entry reads `scene_depth` through `depth_at`), refuse the pack instead of reaching
+    /// the device's panicking handler (#18349).
+    #[test]
+    fn a_stage_opengl_cannot_translate_refuses_the_pack() {
+        use horizon_shader_api::{MANIFEST, Pack, check};
+        // OpenGL, which `test_gpu::instance` leaves out on Windows: WGL instances made on many
+        // test threads at once deadlocked NVIDIA's driver (#5238). The lock keeps this one alone.
+        // CI's `WGPU_BACKEND=dx12` keeps GPU tests off Mesa's software drivers (ci.yml); honour it.
+        if wgpu::Backends::from_env().is_some_and(|b| !b.contains(wgpu::Backends::GL)) {
+            eprintln!("skipped: WGPU_BACKEND leaves out OpenGL");
+            return;
+        }
+        let _gpu = crate::gfx::test_gpu::lock();
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::GL;
+        let instance = wgpu::Instance::new(desc);
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("skipped: no OpenGL adapter");
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))
+        else {
+            eprintln!("skipped: no OpenGL device");
+            return;
+        };
+        eprintln!("OpenGL: {}", adapter.get_info().name);
+        let (globals, empty) = terrain_layouts(&device);
+        let sky = "fn sky(input: SkyInput) -> vec4<f32> { return input.color; }\n";
+        let material = "fn material(input: MaterialInput) -> Surface {
+    return Surface(input.albedo * textureLoad(opaque_depth, vec2<i32>(0), 0));
+}\n";
+        let post = "fn post(input: PostInput) -> vec4<f32> { return input.color; }\n";
+        for (stages, file, text) in [
+            ("[[post]]\nfile = \"post.wgsl\"\n", "post.wgsl", post),
+            (
+                "[material]\nfile = \"material.wgsl\"\n",
+                "material.wgsl",
+                material,
+            ),
+        ] {
+            let manifest = format!(
+                "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
+                 [sky]\nfile = \"sky.wgsl\"\n{stages}"
+            );
+            let files = [
+                (MANIFEST, manifest.as_str()),
+                ("sky.wgsl", sky),
+                (file, text),
+            ]
+            .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+            .into();
+            let report = check(&Pack::from_files(files).unwrap()).unwrap();
+            let shape = terrain_shape(&globals, &empty);
+            let built = NativePack::new(&device, &queue, &shape, report, &[], Default::default());
+            let Err(refused) = built else {
+                panic!("{file}: the pack should be refused");
+            };
+            let refused = refused.to_string();
+            assert!(
+                refused.contains("textureLoad"),
+                "{file}: refused for another reason: {refused}"
+            );
+        }
+    }
+
+    /// What the renderer keeps of a pack from its install on: each answer as its manifest and
+    /// the renderer's resources give it.
+    #[test]
+    fn a_pack_tells_the_renderer_what_it_draws_in_its_place() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let (globals, empty) = terrain_layouts(&device);
+        let does = |stages: &str| {
+            let shape = terrain_shape(&globals, &empty);
+            let built = NativePack::new(
+                &device,
+                &queue,
+                &shape,
+                pack(stages),
+                &[],
+                Default::default(),
+            );
+            built.expect("the pack builds").0.capabilities()
+        };
+        let material = "[material]\nfile = \"material.wgsl\"\n";
+        // Without post passes, a pack whose frame holds gamma light keeps the player's FXAA,
+        // and TAA's upscaling under Horizon's tonemap.
+        let plain = Capabilities {
+            engine_resolve: true,
+            engine_upscale: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(does(""), plain);
+        // FXAA's blend is made for gamma light, not the linear light of `blend = "linear"`.
+        let linear = TerrainShape {
+            linear: true,
+            ..terrain_shape(&globals, &empty)
+        };
+        let built = NativePack::new(&device, &queue, &linear, pack(""), &[], Default::default());
+        let linear = built.expect("the pack builds").0.capabilities();
+        assert_eq!(linear, Capabilities::default());
+        let hides = Capabilities {
+            hides_clouds: true,
+            hides_sun: true,
+            hides_moon: true,
+            hides_stars: true,
+            ..plain
+        };
+        let all = "clouds = false\nsun = false\nmoon = false\nstars = false\n";
+        assert_eq!(does(all), hides);
+        let terrain = Capabilities {
+            material: true,
+            ..plain
+        };
+        assert_eq!(does(material), terrain);
+        // No resource pack's height maps here (`TerrainShape::pbr`): nothing to displace.
+        assert_eq!(does(&format!("{material}[displacement]\n")), terrain);
+        let traces = Capabilities {
+            ray_scene: true,
+            ..terrain
+        };
+        assert_eq!(does(&format!("{material}[ray_tracing]\n")), traces);
+        let tonemap = Capabilities {
+            tone_curve: true,
+            ..plain
+        };
+        assert_eq!(does("[tonemap]\nfile = \"tonemap.wgsl\"\n"), tonemap);
+    }
+
+    /// `[sky] moon = false` reaches the renderer as `hides_moon`, and the celestial pass then
+    /// draws the sun's quad without the moon's; the same sky without the key keeps both.
+    #[test]
+    fn a_pack_sky_without_minecraft_s_moon_leaves_it_out_of_the_celestial_pass() {
+        use crate::mesher::{LOW, VERY_BRIGHT, Vertex};
+        let _gpu = crate::gfx::test_gpu::lock();
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let (globals, empty) = terrain_layouts(&device);
+        let quad = |tier: u8| {
+            let mut v: Vertex = bytemuck::Zeroable::zeroed();
+            v.layer = 2 | u32::from(tier) << 16;
+            [v; 4]
+        };
+        let sun_and_moon = [quad(VERY_BRIGHT), quad(LOW)].concat();
+        let drawn = |stages: &str| {
+            let shape = terrain_shape(&globals, &empty);
+            let built = NativePack::new(
+                &device,
+                &queue,
+                &shape,
+                pack(stages),
+                &[],
+                Default::default(),
+            );
+            let c = built.expect("the pack builds").0.capabilities();
+            (
+                c.hides_moon,
+                super::super::celestial::bodies(&sun_and_moon, c.hides_sun, c.hides_moon),
+            )
+        };
+        assert_eq!(drawn("moon = false\n"), (true, 0..6));
+        assert_eq!(drawn(""), (false, 0..12));
+    }
+
     /// A pack with a sky stage and the manifest's `stages` after it.
     fn pack(stages: &str) -> horizon_shader_api::Report {
         use horizon_shader_api::{MANIFEST, Pack, check};
@@ -755,6 +1044,12 @@ file = \"material.wgsl\"
         );
         if stages.contains("[material]") {
             files.push(("material.wgsl", &material));
+        }
+        if stages.contains("[tonemap]") {
+            files.push((
+                "tonemap.wgsl",
+                "fn tonemap(input: TonemapInput) -> vec3<f32> { return input.color; }\n",
+            ));
         }
         let files = files
             .into_iter()
@@ -823,13 +1118,547 @@ file = \"material.wgsl\"
             sprite_views: &[],
             format: wgpu::TextureFormat::Rgba8Unorm,
             linear: false,
+            msaa: false,
             sprite_tags: &[],
             sprite_materials: &[],
             entities: empty,
             retained_entities: empty,
             weather_groups: [empty, empty],
             pbr: None,
+            looks: None,
         }
+    }
+
+    /// A pack whose terrain takes the quads' looks (`TerrainShape::looks`): its material,
+    /// shadow and `[displacement]` grid pipelines build with the looks' group, and its material
+    /// and shadow terrain draw with a page's looks bound, all under wgpu's validation.
+    #[test]
+    fn a_pack_taking_the_looks_builds_and_draws_its_terrain_with_them() {
+        use wgpu::util::DeviceExt;
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
+            return;
+        };
+        // The adapter's own limits, as the game asks for: a sky and terrain take more sampled
+        // textures than the defaults' 16.
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        let flags = adapter.get_downlevel_capabilities().flags;
+        if !flags.contains(wgpu::DownlevelFlags::VERTEX_STORAGE) {
+            eprintln!("no vertex storage: skipped");
+            return;
+        }
+        let (globals, empty) = terrain_layouts(&device);
+        let looks = super::super::looks::layout(&device);
+        let texture = |format, layers, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let sampled = wgpu::TextureUsages::TEXTURE_BINDING;
+        let rgba = wgpu::TextureFormat::Rgba8Unorm;
+        let pbr = [texture(rgba, 2, sampled), texture(rgba, 2, sampled)];
+        // The shadow pass's entity draw reads the entities' atlas.
+        let entities = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &super::super::entity_binding_entries(),
+        });
+        let shape = TerrainShape {
+            pbr: Some(&pbr),
+            looks: Some(&looks),
+            entities: &entities,
+            ..terrain_shape(&globals, &empty)
+        };
+        let report = pack("[material]\nfile = \"material.wgsl\"\n[shadow]\n[displacement]\n");
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let (pack, _) =
+            NativePack::new(&device, &queue, &shape, report, &[], Default::default()).unwrap();
+        assert!(pack.looks);
+        let layers = pack.terrain_layers().unwrap();
+        let shadow = pack.shadow.as_ref().unwrap();
+        assert!(layers.displaced.is_some() && shadow.displaced.is_some());
+        // The terrain's group 0 (`terrain_layouts`) of blank resources.
+        let array = texture(rgba, 2, sampled).create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let plain = texture(rgba, 1, sampled).create_view(&Default::default());
+        let sampler = device.create_sampler(&Default::default());
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16384,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let resource = |binding: u32| match binding {
+            0 => uniform.as_entire_binding(),
+            2 | 4 => wgpu::BindingResource::Sampler(&sampler),
+            3 | 12 => wgpu::BindingResource::TextureView(&plain),
+            _ => wgpu::BindingResource::TextureView(&array),
+        };
+        let entries: Vec<_> = (0..=12)
+            .map(|binding| wgpu::BindGroupEntry {
+                binding,
+                resource: resource(binding),
+            })
+            .collect();
+        let terrain = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &globals,
+            entries: &entries,
+        });
+        // A page's looks: one quad's, at its four vertices' slots.
+        let look = crate::mesher::QuadLook::new(0x80_c0ff, 0.8, 2, [1.0, 0.8, 0.6, 1.0]);
+        let page_looks = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[look; 4]),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let looks_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &looks,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: page_looks.as_entire_binding(),
+            }],
+        });
+        let corner = |x: f32, y: f32| {
+            crate::mesher::TerrainVertex::new([x, y, -2.0], [x, y], 0, u32::MAX, 0xf0f0)
+        };
+        let vertices = [corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0)];
+        let buffer = |contents: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents,
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let vertices = buffer(bytemuck::cast_slice(&vertices));
+        let origins = buffer(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]));
+        let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let view = |t: wgpu::Texture| t.create_view(&Default::default());
+        let color = view(texture(rgba, 1, attachment));
+        let shadow_color = view(texture(
+            super::super::native_post::INTERMEDIATE,
+            1,
+            attachment,
+        ));
+        let depth = view(texture(wgpu::TextureFormat::Depth32Float, 1, attachment));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        // Each terrain pipeline in a pass of its targets, the page's looks bound.
+        // The shadow's frame group, or the material's (`TerrainLayers::bind`).
+        type Draw<'a> = (
+            &'a wgpu::RenderPipeline,
+            Option<&'a wgpu::TextureView>,
+            Option<&'a wgpu::BindGroup>,
+        );
+        let draws: [Draw<'_>; 4] = [
+            (layers.solid, Some(&color), None),
+            (layers.translucent, Some(&color), None),
+            (&shadow.solid, None, Some(&shadow.group)),
+            (
+                &shadow.translucent,
+                Some(&shadow_color),
+                Some(&shadow.group),
+            ),
+        ];
+        for (pipeline, target, frame) in draws {
+            let colour: Vec<_> = (target.into_iter())
+                .map(|view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Default::default(),
+                    })
+                })
+                .collect();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: colour.as_slice(),
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(Default::default()),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &terrain, &[]);
+            pass.set_bind_group(super::super::looks::GROUP, &looks_group, &[]);
+            match frame {
+                Some(group) => pass.set_bind_group(horizon_shader_api::stages::GROUP, group, &[]),
+                None => layers.bind(&mut pass),
+            }
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_vertex_buffer(1, origins.slice(..));
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            panic!("{e}");
+        }
+    }
+
+    /// The material stage's own `MaterialInput` of a quad with a look, drawn and read back,
+    /// against the ray scene's oracle of it (`rt::scene::looks_tests::material`, which its GPU test
+    /// holds a hit to): a pack that shows three of the fields draws what a pack showing the
+    /// oracle's values as constants draws, through the same wrapper and frame. The corners
+    /// have different ambient occlusion values, so the expected values vary by sample point.
+    #[test]
+    fn the_material_s_looks_are_the_ray_oracle_s() {
+        use wgpu::util::DeviceExt;
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .unwrap();
+        if !(adapter.get_downlevel_capabilities().flags)
+            .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+        {
+            return;
+        }
+        let (globals, empty) = terrain_layouts(&device);
+        let looks = super::super::looks::layout(&device);
+        let texture = |format, layers, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let rgba = wgpu::TextureFormat::Rgba8Unorm;
+        let sampled = wgpu::TextureUsages::TEXTURE_BINDING;
+        let shape = TerrainShape {
+            looks: Some(&looks),
+            ..terrain_shape(&globals, &empty)
+        };
+        // Group 0 with `view_proj` the identity (its first field), the rest blank.
+        let array = texture(rgba, 2, sampled).create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let plain = texture(rgba, 1, sampled).create_view(&Default::default());
+        let sampler = device.create_sampler(&Default::default());
+        let mut words = vec![0.0f32; 4096];
+        for i in 0..4 {
+            words[i * 5] = 1.0;
+        }
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&words),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let resource = |binding: u32| match binding {
+            0 => uniform.as_entire_binding(),
+            2 | 4 => wgpu::BindingResource::Sampler(&sampler),
+            3 | 12 => wgpu::BindingResource::TextureView(&plain),
+            _ => wgpu::BindingResource::TextureView(&array),
+        };
+        let entries: Vec<_> = (0..=12)
+            .map(|binding| wgpu::BindGroupEntry {
+                binding,
+                resource: resource(binding),
+            })
+            .collect();
+        let terrain = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &globals,
+            entries: &entries,
+        });
+        // A tinted look with uneven corner AO, and the fallback to vertex colour and unit
+        // shade and AO. Both draws use the light level in the same vertices.
+        let looked = crate::mesher::QuadLook::new(0x80_c0ff, 0.8, 4, [1.0, 0.2, 0.3, 0.6]);
+        let groups = [looked, crate::mesher::QuadLook::default()].map(|look| {
+            let page_looks = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&[look; 4]),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &looks,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: page_looks.as_entire_binding(),
+                }],
+            });
+            (look, group)
+        });
+        // One quad over the whole target, both its triangles (corners 0, 1, 2 and 0, 2, 3, the
+        // corner `vertex_index & 3`), each corner its own colour (low byte R) and AO: a pixel
+        // read back tells blending before decoding from after, and each corner's byte.
+        let corner = |x: f32, y: f32, color: u32| {
+            // Over opaque texels (bit 15): the blank sprites pass no alpha test.
+            crate::mesher::TerrainVertex::new([x, y, 0.5], [0.0, 0.0], 0x8000, color, 0xf0f0)
+        };
+        let corners = [
+            corner(-1.0, -1.0, 0x3f40_80c0),
+            corner(1.0, -1.0, 0x3f20_4010),
+            corner(1.0, 1.0, 0x3f10_f030),
+            corner(-1.0, 1.0, 0x3fc0_2080),
+        ];
+        let buffer = |contents: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents,
+                usage,
+            })
+        };
+        let vertex = wgpu::BufferUsages::VERTEX;
+        let vertices = buffer(bytemuck::cast_slice(&corners), vertex);
+        let origins = buffer(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]), vertex);
+        let indices = buffer(
+            bytemuck::cast_slice(&[0u16, 1, 2, 0, 2, 3]),
+            wgpu::BufferUsages::INDEX,
+        );
+        // Pixels (column, row) off the diagonal, two on each triangle, and the corners' weights
+        // at their centres.
+        let pixels = [(0, 0), (1, 0), (3, 3), (3, 2)];
+        let weights = |(i, j): (usize, usize)| {
+            let (x, y) = ((i as f32 + 0.5) / 2.0 - 1.0, 1.0 - (j as f32 + 0.5) / 2.0);
+            if y < x {
+                let b2 = (y + 1.0) / 2.0;
+                let b1 = (x + 1.0) / 2.0 - b2;
+                [1.0 - b1 - b2, b1, b2, 0.0]
+            } else {
+                let b2 = (x + 1.0) / 2.0;
+                let b3 = (y + 1.0) / 2.0 - b2;
+                [1.0 - b2 - b3, 0.0, b2, b3]
+            }
+        };
+        // What a pack showing `shown` draws over the quad with `looks`, at `pixels`.
+        let draw = |shown: &str, looks: &wgpu::BindGroup| -> Vec<[u8; 4]> {
+            let material = format!(
+                "fn material(input: MaterialInput) -> Surface {{\n    \
+                 let k = input.shaded_tint;\n    return Surface(vec4<f32>({shown}, 1.0));\n}}\n"
+            );
+            let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
+                            [material]\nfile = \"material.wgsl\"\n";
+            let files = [
+                (horizon_shader_api::MANIFEST, manifest),
+                ("material.wgsl", &material),
+            ]
+            .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+            .into();
+            let pack = horizon_shader_api::Pack::from_files(files).unwrap();
+            let report = horizon_shader_api::check(&pack).unwrap();
+            let (pack, _) =
+                NativePack::new(&device, &queue, &shape, report, &[], Default::default()).unwrap();
+            let layers = pack.terrain_layers().unwrap();
+            let target = texture(
+                rgba,
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            let depth = texture(
+                wgpu::TextureFormat::Depth32Float,
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            let (view, depth) = (
+                target.create_view(&Default::default()),
+                depth.create_view(&Default::default()),
+            );
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Default::default(),
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(Default::default()),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pass.set_pipeline(layers.solid);
+                pass.set_bind_group(0, &terrain, &[]);
+                pass.set_bind_group(super::super::looks::GROUP, looks, &[]);
+                layers.bind(&mut pass);
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_vertex_buffer(1, origins.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..6, 0, 0..1);
+            }
+            let buffer = crate::gfx::copy_frame(&device, &mut encoder, &target, [4, 4]);
+            queue.submit([encoder.finish()]);
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let frame = buffer.slice(..).get_mapped_range().unwrap();
+            let row = crate::gfx::padded_row(4) as usize;
+            (pixels.iter())
+                .map(|&(i, j)| frame[j * row + i * 4..][..4].try_into().unwrap())
+                .collect()
+        };
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        type Want = [[f32; 4]; 3];
+        let fields: [(&str, fn(&Want) -> [f32; 3]); 2] = [
+            ("input.tint.r, input.tint.g, input.shade", |w| {
+                [w[0][0], w[0][1], w[0][3]]
+            }),
+            ("input.ao, input.emission, k.r", |w| {
+                [w[1][3], w[2][0], w[1][0]]
+            }),
+        ];
+        let material = crate::gfx::rt::scene::looks_tests::material;
+        for (look, group) in &groups {
+            for (shown, of) in fields {
+                let got = draw(shown, group);
+                for (k, &pixel) in pixels.iter().enumerate() {
+                    let [a, b, c] = of(&material(&corners, *look, weights(pixel)));
+                    let oracle = draw(&format!("{a:?}, {b:?}, {c:?}"), group)[k];
+                    assert_eq!([got[k][3], oracle[3]], [255; 2], "uncovered {pixel:?}");
+                    assert!(
+                        got[k].iter().zip(oracle).all(|(g, o)| g.abs_diff(o) <= 1),
+                        "{look:?}, {shown} at {pixel:?}: {:?}, the oracle's {oracle:?}",
+                        got[k]
+                    );
+                }
+            }
+        }
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            panic!("{e}");
+        }
+    }
+
+    /// On a device with ray queries, an entity stage that traces is built a second time against
+    /// the scene, beside the entities' own groups, with the entity layer's bindings where the
+    /// pack names `RAY_ENTITY`; one that doesn't trace is built once, as before.
+    #[test]
+    fn an_entity_stage_that_traces_is_built_against_the_scene() {
+        use horizon_shader_api::{MANIFEST, Pack, check};
+        let ray_query = crate::gfx::rt::scene::entity_tests::ray_device;
+        let Some((device, queue)) = ray_query() else {
+            eprintln!("no GPU with ray queries: skipped");
+            return;
+        };
+        let layout = |entries: &[wgpu::BindGroupLayoutEntry]| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries,
+            })
+        };
+        let entities = layout(&super::super::native_entity::entity_entries());
+        // The retained block entities' place, read by their vertex shader only.
+        let retained = layout(&[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }]);
+        let empty = layout(&[]);
+        let sprites = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let views: Vec<_> = (0..8)
+            .map(|_| {
+                sprites.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let terrain = TerrainShape {
+            globals: &empty,
+            flat: None,
+            sprites: [8.0, 1.0],
+            sprite_views: &views,
+            format: wgpu::TextureFormat::Rgba16Float,
+            linear: true,
+            msaa: false,
+            sprite_tags: &[],
+            sprite_materials: &[],
+            entities: &entities,
+            retained_entities: &retained,
+            weather_groups: [&empty, &empty],
+            pbr: None,
+            looks: None,
+        };
+        let build = |entity: &str| {
+            let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
+                [entity]\nfile = \"entity.wgsl\"\n[ray_tracing]\n";
+            let files = [(MANIFEST, manifest), ("entity.wgsl", entity)]
+                .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+                .into();
+            let report = check(&Pack::from_files(files).unwrap()).unwrap();
+            let lights = Default::default();
+            NativePack::new(&device, &queue, &terrain, report, &[], lights)
+                .unwrap()
+                .0
+        };
+        let sun = "fn entity(input: EntityInput) -> Surface {\n    \
+            let start = input.position + input.normal * 0.05;\n    \
+            let shade = select(1.0, 0.4, trace_any_layers(start, frame.sun_direction, 64.0, LAYERS));\n    \
+            return Surface(vec4<f32>(input.albedo.rgb * shade, input.albedo.a));\n}\n";
+        let solid = build(&format!("const LAYERS: u32 = RAY_SOLID;\n{sun}"));
+        let stage = solid.entity.as_ref().unwrap();
+        assert!(stage.scene.as_ref().is_some_and(|s| !s.traces_entities()));
+        assert!(!solid.traces_entities());
+        let mobs = build(&format!(
+            "const LAYERS: u32 = RAY_SOLID | RAY_ENTITY;\n{sun}"
+        ));
+        assert!(mobs.entity.as_ref().unwrap().scene.is_some());
+        assert!(mobs.traces_entities());
+        let looks = build(
+            "fn entity(input: EntityInput) -> Surface {
+                let hit = trace(input.position, input.normal, 16.0);
+                return Surface(vec4<f32>(hit.tint.rgb * hit_normal_map(hit).b, 1.0));
+            }",
+        );
+        assert!(looks.traces_looks());
+        assert!(!solid.traces_looks());
+        let quiet =
+            build("fn entity(input: EntityInput) -> Surface { return Surface(input.albedo); }\n");
+        assert!(quiet.entity.as_ref().unwrap().scene.is_none());
     }
 
     fn option(id: &str, kind: OptionKind) -> PackOption {

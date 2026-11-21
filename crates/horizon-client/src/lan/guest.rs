@@ -191,13 +191,26 @@ pub struct Guest {
     pub left_reason: String,
     /// A validated movement report the mods have not ruled on yet (`player_move`).
     pub pending_move: Option<super::hub::PendingMove>,
+    /// Validated movement packets waiting to be told to `player_move_packet`, oldest first, and
+    /// the hub tick with how many were told in it (the per-tick budget, `MOVE_PACKET_BUDGET`).
+    pub move_packet_queue: VecDeque<super::hub::MovePacket>,
+    pub move_packets_told: (u64, usize),
     /// A disconnect was started ([`Guest::begin_disconnect`]); the connection closes when the
     /// server next polls it, and until then no other disconnect is sent.
     pub disconnect_pending: bool,
+    /// The mods are hearing `player_leaving` for this guest right now; a disconnect asked for
+    /// inside the hook is refused, as one is while [`Guest::disconnect_pending`].
+    pub leaving: bool,
+    /// A mod's personal sidebar is on this client (`Game::native_sidebar`); it is gone with the
+    /// connection.
+    pub personal_sidebar: bool,
     pub uuid: u128,
     pub name: String,
-    /// The profile's properties, for the player list (skins).
+    /// The properties the player logged in with (`ServerPlayer.getGameProfile`).
     pub properties: Vec<horizon_protocol::packets::login::Property>,
+    /// The properties a native mod set (`player_set_profile_property`): overrides by name over the login
+    /// ones in what is published (the player list, the profile lookups), never in `properties` itself.
+    pub profile_overrides: Vec<horizon_protocol::packets::login::Property>,
     pub entity_id: i32,
     pub sender: PlayerSender,
     pub latency: Arc<AtomicI32>,
@@ -209,9 +222,8 @@ pub struct Guest {
     pub position: [f64; 3],
     /// Where the player's chunk tickets stay while they are not at `position`.
     /// `None`: they are at `position`'s chunk. `Some(chunk)`: a teleport sent
-    /// the player away and they are still at the chunk it left. The hold ends
-    /// (back to `None`) at an accepted move, the teleport's ack, a passenger or
-    /// vehicle move, a camera change and a placement.
+    /// the player away and they are still at the chunk it left. The hold ends (back to `None`) at
+    /// an accepted move or teleport ack, a passenger or vehicle move, a camera change, a placement.
     pub held_ticket_chunk: Option<(i32, i32)>,
     pub previous_position: [f64; 3],
     pub yaw: f32,
@@ -318,6 +330,8 @@ pub struct Guest {
     pub replay: Option<Box<super::prediction::Replay>>,
     /// What the server sent this tick that changes how the client moves (only while it records).
     pub changes: std::sync::Mutex<Vec<Change>>,
+    /// The pings sent to it that its client has not answered (`player_pong` hears only those).
+    pub pings: std::sync::Mutex<super::ping_ledger::PingLedger>,
     /// It accepted a move since the last entity range checks
     /// (ServerChunkCache.move), which then check all of its pairs again.
     pub moved: bool,
@@ -361,18 +375,16 @@ pub struct Guest {
     pub tracker: Tracker,
     // Player state the gameplay code reads and writes.
     pub motion: Option<Box<PlayerMotion>>,
-    /// What the player's file says of the body (`Entity.load`: the fire
-    /// and air ticks and the fall distance), for the first body it gets.
+    /// What the player's file says of the body (`Entity.load`: fire, air, fall distance), for its first.
     pub loaded_body: Option<SavedBody>,
-    /// The attribute list the player's last body hands to its next one
-    /// (`ServerPlayer.restoreFrom`, `PlayerMotion::carried_attributes`),
-    /// until that body exists: the scale a player has set stays through a
-    /// respawn and a change of level (#3684).
+    /// The attribute list a body hands to the next (`ServerPlayer.restoreFrom`,
+    /// `PlayerMotion::carried_attributes`) until it exists: a set scale stays through a respawn (#3684).
     pub carried_attributes: Option<horizon_core::nbt::Tag>,
     /// The accepted hit follows the same living body through a full teleport restore.
     pub carried_hit: Option<std::sync::Arc<crate::health::AcceptedHit>>,
-    /// The vehicle the player's file names (`ServerPlayer.saveParentVehicle`'s
-    /// "RootVehicle"), for the ride to come back on the next login.
+    /// `Entity.tickCount` across a trip to another level (`ServerPlayer.teleport` keeps the object).
+    pub carried_ticks: Option<i32>,
+    /// The vehicle the player's file names (`saveParentVehicle`'s "RootVehicle"), for the next login.
     pub saved_vehicle: Option<[i32; 4]>,
     /// The hurt and attack logs of the body it had before it respawned,
     /// until the new body takes them over (the control socket's `hurtlog`
@@ -445,6 +457,12 @@ pub struct Guest {
     pub glide_end_unsent: bool,
     /// Pose last delivered to this player's own entity data, initially Standing.
     pub sent_pose: Pose,
+    /// Avatar.DATA_PLAYER_MAIN_HAND last sent to this player's own entity data, RIGHT (1) first.
+    pub sent_main_hand: i32,
+    /// The skin parts (Avatar.DATA_PLAYER_MODE_CUSTOMISATION) last delivered to
+    /// this player's own entity data, initially 0: the bits the client's own model
+    /// shows, which its player starts at (no layer) until the server sends them.
+    pub sent_skin: u8,
     /// The shoulder parrots (Player.DATA_SHOULDER_PARROT_LEFT and _RIGHT) the
     /// player's client was last sent about itself.
     pub sent_shoulders: [Option<i32>; 2],
@@ -512,6 +530,11 @@ pub struct Guest {
     /// saves neither its player file nor its records, since the other server has the
     /// player now.
     pub released: bool,
+    /// The hand-overs of this player that were started (`player-export ... freeze`) and not
+    /// settled by a release. One outlives its freeze, which runs out on its own: the destination
+    /// may have committed in the meantime, so while any is unsettled the mods' `player_leaving`
+    /// is not heard for them. A successful `abort` settles its own hand-over only.
+    pub transfer_unresolved: Vec<u128>,
     /// Root command names the mods took out of this player's command tree
     /// (`native_player_commands_sent`); their tree is sent without them.
     pub hidden_commands: Vec<String>,
@@ -703,13 +726,18 @@ impl Guest {
             placed_at: 0,
             level_entered: 0,
             last_reported: (position, [0.0, 0.0]),
+            move_packet_queue: VecDeque::new(),
+            move_packets_told: (0, 0),
             center_sent: None,
             left_reason: String::new(),
             pending_move: None,
             disconnect_pending: false,
+            leaving: false,
+            personal_sidebar: false,
             uuid: j.uuid,
             name: j.name,
             properties: j.properties,
+            profile_overrides: Vec::new(),
             entity_id,
             sender: j.sender,
             latency: j.latency,
@@ -768,6 +796,7 @@ impl Guest {
             client_sprinting: false,
             replay: None,
             changes: Default::default(),
+            pings: Default::default(),
             moved: false,
             tab_hidden: Default::default(),
             loaded: false,
@@ -790,6 +819,7 @@ impl Guest {
             loaded_body: None,
             carried_attributes: None,
             carried_hit: None,
+            carried_ticks: None,
             saved_vehicle: None,
             logs_kept: None,
             inventory: vec![None; 36],
@@ -826,6 +856,8 @@ impl Guest {
             sent_shared: 0,
             glide_end_unsent: false,
             sent_pose: Pose::Standing,
+            sent_main_hand: 1,
+            sent_skin: 0,
             sent_shoulders: [None; 2],
             sent_stuck: (0, 0),
             last_death: None,
@@ -852,6 +884,7 @@ impl Guest {
             arrival_recentered: false,
             quiet_leave: false,
             released: false,
+            transfer_unresolved: Vec::new(),
             hidden_commands: Vec::new(),
             abilities: Default::default(),
             dimension: "minecraft:overworld".into(),
@@ -884,6 +917,12 @@ impl Guest {
         }
         if self.record.is_some() {
             self.note_change(packet);
+        }
+        if let play::Clientbound::Ping(p) = packet {
+            self.pings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sent(p.id, std::time::Instant::now());
         }
         match packet.try_encode() {
             Ok(body) => self.sender.send(body),
@@ -1041,6 +1080,18 @@ impl Guest {
     pub fn spectator(&self) -> bool {
         self.game_mode == SPECTATOR
     }
+    /// Whether handlePlayerPositionChange's moved-wrongly check applies (the
+    /// spectators and sleepers aside): not in creative, and not in the
+    /// server body's `LivingEntity.isInPostImpulseGraceTime` (the 40 ticks
+    /// after a wind charge's push, `ServerPlayer.onExplosionHit`, or a mace's
+    /// smash).
+    pub fn checks_wrong_moves(&self) -> bool {
+        !self.creative()
+            && !self
+                .motion
+                .as_ref()
+                .is_some_and(|m| m.impulse.is_in_grace_time())
+    }
     /// Its client's `minecraft:brand` is Horizon's: it reads the protocol's
     /// extensions, such as a native mod's particle (`Particle::horizon_only`).
     pub fn is_horizon(&self) -> bool {
@@ -1095,6 +1146,7 @@ impl Guest {
     pub fn new_body(&mut self, restore_all: bool) -> Option<Box<PlayerMotion>> {
         if !restore_all {
             self.carried_hit = None;
+            self.carried_ticks = None;
             self.death_canceled = false;
             self.death_time = 0;
         }
@@ -1102,6 +1154,7 @@ impl Guest {
         self.carried_attributes = Some(m.carried_attributes(restore_all));
         if restore_all {
             self.carried_hit = m.health.accepted_hit.take();
+            self.carried_ticks = Some(m.health.tick_count);
         }
         Some(m)
     }
@@ -1169,17 +1222,22 @@ impl Guest {
     }
     /// The inventory menu's 46 slots (ServerPlayer.inventoryMenu): 0 crafting
     /// result, 1..=4 crafting grid, 5..=8 armor, 9..=35 main, 36..=44 hotbar,
-    /// 45 off hand.
-    pub fn menu_slot(&self, slot: usize) -> Option<ItemStack> {
+    /// 45 off hand. The stack where it lies, for comparing against what the
+    /// client was last sent without copying it.
+    pub fn menu_slot_ref(&self, slot: usize) -> Option<&ItemStack> {
         match slot {
-            0 => self.craft_result.clone(),
-            1..=4 => self.craft_grid[slot - 1].clone(),
-            5..=8 => self.armor[slot - 5].clone(),
-            9..=35 => self.inventory.get(slot).cloned().flatten(),
-            36..=44 => self.inventory.get(slot - 36).cloned().flatten(),
-            45 => self.offhand.clone(),
+            0 => self.craft_result.as_ref(),
+            1..=4 => self.craft_grid[slot - 1].as_ref(),
+            5..=8 => self.armor[slot - 5].as_ref(),
+            9..=35 => self.inventory.get(slot).and_then(|s| s.as_ref()),
+            36..=44 => self.inventory.get(slot - 36).and_then(|s| s.as_ref()),
+            45 => self.offhand.as_ref(),
             _ => None,
         }
+    }
+    /// [`Self::menu_slot_ref`], copied: the slot's stack as it is now.
+    pub fn menu_slot(&self, slot: usize) -> Option<ItemStack> {
+        self.menu_slot_ref(slot).cloned()
     }
     /// The open menu's packets told the client every inventory slot: the
     /// inventory menu's own sync has nothing to add. Sent again, it could land
@@ -1362,9 +1420,229 @@ fn builtin_component(
             }
         }
         "minecraft:tool" => write_tool(value, ids, &mut w)?,
+        "minecraft:consumable" => write_consumable(value, ids, &mut w)?,
+        "minecraft:bees" => write_bees(value, ids, &mut w)?,
+        "minecraft:block_state" => write_block_state(value, &mut w)?,
         _ => return None,
     }
     Some(horizon_protocol::item::Component::Raw(w.data))
+}
+
+/// `ItemUseAnimation`'s network id (`ItemUseAnimation.STREAM_CODEC`, by ordinal).
+fn use_animation_id(name: &str) -> Option<i32> {
+    const NAMES: [&str; 12] = [
+        "none",
+        "eat",
+        "drink",
+        "block",
+        "bow",
+        "trident",
+        "crossbow",
+        "spyglass",
+        "toot_horn",
+        "brush",
+        "bundle",
+        "spear",
+    ];
+    NAMES.iter().position(|n| *n == name).map(|i| i as i32)
+}
+
+/// A string tag's text.
+fn tag_text(value: &horizon_core::nbt::Tag) -> Option<String> {
+    match value {
+        horizon_core::nbt::Tag::String(text) => text.to_string().ok(),
+        _ => None,
+    }
+}
+
+/// `SoundEvent.STREAM_CODEC` (a holder) from its saved form: a registered event's
+/// name, or an event of its own (`sound_id`, optional `range`).
+fn write_sound(
+    value: &horizon_core::nbt::Tag,
+    ids: &dyn Fn(&str, &str) -> Option<i32>,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_world::datafix::dynamic::{as_number, namespaced};
+    if let Some(name) = tag_text(value) {
+        let name = namespaced(&name);
+        match ids("minecraft:sound_event", &name) {
+            Some(id) => w.varint(id.checked_add(1)?),
+            None => {
+                w.varint(0);
+                w.string(&name);
+                w.bool(false);
+            }
+        }
+        return Some(());
+    }
+    w.varint(0);
+    w.string(&namespaced(&tag_text(value.get("sound_id")?)?));
+    match value.get("range") {
+        Some(range) => {
+            w.bool(true);
+            w.f32(as_number(range)?.float_value());
+        }
+        None => w.bool(false),
+    }
+    Some(())
+}
+
+/// `ConsumeEffect.STREAM_CODEC` from its saved form: the type's id, then its fields.
+fn write_consume_effect(
+    value: &horizon_core::nbt::Tag,
+    ids: &dyn Fn(&str, &str) -> Option<i32>,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_core::nbt::Tag;
+    use horizon_world::datafix::dynamic::{as_bool_opt, as_number, namespaced};
+    match namespaced(&tag_text(value.get("type")?)?).as_str() {
+        "minecraft:apply_effects" => {
+            w.varint(0);
+            let effects = match value.get("effects")? {
+                Tag::List(list) => list.as_slice(),
+                single @ Tag::Compound(_) => std::slice::from_ref(single),
+                _ => return None,
+            };
+            w.varint(i32::try_from(effects.len()).ok()?);
+            for effect in effects {
+                w.varint(ids(
+                    "minecraft:mob_effect",
+                    &namespaced(&tag_text(effect.get("id")?)?),
+                )?);
+                write_effect_details(effect, w);
+            }
+            w.f32(
+                value
+                    .get("probability")
+                    .map_or(Some(1.0), |p| Some(as_number(p)?.float_value()))?,
+            );
+        }
+        "minecraft:remove_effects" => {
+            w.varint(1);
+            write_holder_set("minecraft:mob_effect", value.get("effects")?, ids, w)?;
+        }
+        "minecraft:clear_all_effects" => w.varint(2),
+        "minecraft:teleport_randomly" => {
+            w.varint(3);
+            w.f32(
+                value
+                    .get("diameter")
+                    .map_or(Some(16.0), |d| Some(as_number(d)?.float_value()))?,
+            );
+            w.bool(
+                value
+                    .get("directional_particles")
+                    .map_or(Some(true), |d| as_bool_opt(Some(d)))?,
+            );
+        }
+        "minecraft:play_sound" => {
+            w.varint(4);
+            write_sound(value.get("sound")?, ids, w)?;
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// `Consumable.STREAM_CODEC` from `Consumable.CODEC`'s saved form. A field the
+/// stack leaves out is written at its codec default: 1.6 seconds, eat, the
+/// generic eat sound, particles, no effects.
+fn write_consumable(
+    value: &horizon_core::nbt::Tag,
+    ids: &dyn Fn(&str, &str) -> Option<i32>,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_core::nbt::{Tag, Tag::Compound};
+    use horizon_world::datafix::dynamic::{as_bool_opt, as_number};
+    let Compound(_) = value else { return None };
+    w.f32(
+        value
+            .get("consume_seconds")
+            .map_or(Some(1.6), |s| Some(as_number(s)?.float_value()))?,
+    );
+    w.varint(use_animation_id(
+        &value
+            .get("animation")
+            .map_or(Some("eat".to_owned()), tag_text)?,
+    )?);
+    match value.get("sound") {
+        Some(sound) => write_sound(sound, ids, w)?,
+        None => write_sound(&Tag::String("minecraft:entity.generic.eat".into()), ids, w)?,
+    }
+    w.bool(
+        value
+            .get("has_consume_particles")
+            .map_or(Some(true), |p| as_bool_opt(Some(p)))?,
+    );
+    let effects = match value.get("on_consume_effects") {
+        Some(Tag::List(list)) => list.as_slice(),
+        Some(_) => return None,
+        None => &[],
+    };
+    w.varint(i32::try_from(effects.len()).ok()?);
+    for effect in effects {
+        write_consume_effect(effect, ids, w)?;
+    }
+    Some(())
+}
+
+/// `Bees.STREAM_CODEC` from the saved list: each `Occupant` as its
+/// `TypedEntityData` (the entity type's registry id, then its data without
+/// the id), `ticksInHive` and `minTicksInHive`.
+fn write_bees(
+    value: &horizon_core::nbt::Tag,
+    ids: &dyn Fn(&str, &str) -> Option<i32>,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_core::nbt::Tag;
+    // An empty list is the hive item's default, which a patch leaves out.
+    let Tag::List(bees) = value else {
+        return None;
+    };
+    if bees.is_empty() {
+        return None;
+    }
+    w.varint(i32::try_from(bees.len()).ok()?);
+    for bee in bees {
+        let Some(Tag::Compound(data)) = bee.get("entity_data") else {
+            return None;
+        };
+        let mut data = data.clone();
+        let Some(Tag::String(kind)) = data.remove(&"id".into()) else {
+            return None;
+        };
+        let kind = horizon_world::datafix::dynamic::namespaced(&kind.to_string().ok()?);
+        w.varint(ids("minecraft:entity_type", &kind)?);
+        w.nbt(&Tag::Compound(data));
+        let int = |key: &str| match bee.get(key) {
+            Some(Tag::Int(v)) => Some(*v),
+            _ => None,
+        };
+        w.varint(int("ticks_in_hive")?);
+        w.varint(int("min_ticks_in_hive")?);
+    }
+    Some(())
+}
+
+/// `BlockItemStateProperties.STREAM_CODEC` from the saved map: the count of
+/// properties, then each name and value as strings.
+fn write_block_state(
+    value: &horizon_core::nbt::Tag,
+    w: &mut horizon_protocol::buf::Writer,
+) -> Option<()> {
+    use horizon_core::nbt::Tag;
+    let Tag::Compound(properties) = value else {
+        return None;
+    };
+    w.varint(i32::try_from(properties.len()).ok()?);
+    for (name, value) in properties {
+        let Tag::String(value) = value else {
+            return None;
+        };
+        w.string(&name.to_string().ok()?);
+        w.string(&value.to_string().ok()?);
+    }
+    Some(())
 }
 
 /// `Tool.STREAM_CODEC` from `Tool.CODEC`'s saved form: the rules (blocks, an
@@ -1846,8 +2124,20 @@ pub(super) fn network_stack(
             // the stack's own attribute modifiers (#14641).
             ("minecraft:tool", horizon_protocol::item::component::TOOL),
             (
+                "minecraft:consumable",
+                horizon_protocol::item::component::CONSUMABLE,
+            ),
+            (
                 "minecraft:attribute_modifiers",
                 horizon_protocol::item::component::ATTRIBUTE_MODIFIERS,
+            ),
+            // A hive item's bees: its tooltip, its bundle weight and whether
+            // it stacks all read them.
+            ("minecraft:bees", horizon_protocol::item::component::BEES),
+            // A block item's state: a hive's honey level, a statue's pose.
+            (
+                "minecraft:block_state",
+                horizon_protocol::item::component::BLOCK_STATE,
             ),
         ] {
             if d.other(&format!("!{name}")).is_some() {
@@ -2358,6 +2648,48 @@ mod tests {
     use horizon_core::nbt::Tag;
     use horizon_protocol::buf::{Codec, Reader, Writer};
     use horizon_protocol::item::{Component, component};
+
+    /// A consumable a client made goes out as `Consumable.STREAM_CODEC`. A byte
+    /// flag is `Codec.BOOL` (non-zero is true). An unknown animation is refused.
+    #[test]
+    fn a_saved_consumable_is_written_as_the_stream_codec() {
+        use horizon_core::nbt::parse_snbt;
+        let (value, _) = parse_snbt(
+            r#"{consume_seconds:3.2f,animation:"toot_horn",sound:"minecraft:block.fire.ambient",has_consume_particles:0b,on_consume_effects:[{type:"minecraft:apply_effects",effects:[{id:"minecraft:nausea",amplifier:7b,duration:2400,show_particles:0b,show_icon:0b}]}]}"#,
+        )
+        .unwrap();
+        let ids = |registry: &str, name: &str| match (registry, name) {
+            ("minecraft:sound_event", "minecraft:block.fire.ambient") => Some(300),
+            ("minecraft:mob_effect", "minecraft:nausea") => Some(8),
+            _ => None,
+        };
+        let Some(horizon_protocol::item::Component::Raw(bytes)) =
+            builtin_component("minecraft:consumable", &value, &ids)
+        else {
+            panic!("not written");
+        };
+        let mut w = horizon_protocol::buf::Writer::new();
+        w.f32(3.2);
+        w.varint(8);
+        w.varint(301);
+        w.bool(false);
+        w.varint(1);
+        w.varint(0);
+        w.varint(1);
+        w.varint(8);
+        w.varint(7);
+        w.varint(2400);
+        w.bool(false);
+        w.bool(false);
+        w.bool(false);
+        w.bool(false);
+        w.f32(1.0);
+        assert_eq!(bytes, w.data);
+        let (defaults, _) = parse_snbt("{}").unwrap();
+        assert!(builtin_component("minecraft:consumable", &defaults, &ids).is_some());
+        let (unknown, _) = parse_snbt(r#"{animation:"juggle"}"#).unwrap();
+        assert!(builtin_component("minecraft:consumable", &unknown, &ids).is_none());
+    }
 
     #[test]
     fn builtin_predicate_streams_keep_typed_conjunctions_and_reject_whole_unknown_forms() {

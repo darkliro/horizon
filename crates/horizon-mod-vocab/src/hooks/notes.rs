@@ -214,11 +214,6 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   3 accepted, 4 downloaded, 5 invalid URL, 6 failed reload, 7 discarded). It only hears. The pack a dedicated server
   offers during the configuration is answered before the player has joined and is not heard. The player's state is
   swapped in, so `PlayerRef::tell` works.
-- **`native_projectile_hit(owner, kind, hit_entity, pos, cancel)`**: a projectile a server player launched (arrow,
-  snowball, egg, thrown trident, ender pearl, ...) hit an entity (`hit_entity`) or a block at `pos`, heard before any
-  of its effects (NeoForge's `ProjectileImpactEvent`). Set `cancel` and it does nothing: it vanishes, a thrown trident
-  flies on through. The shooter's state is swapped in, so `PlayerRef::tell` answers them. Mobs' and the host's
-  projectiles are not heard, nor are fishing bobbers and firework rockets.
 - **`tnt_primed(player, pos, cancel)`**: TNT at `pos` is about to be lit by a flint and steel or fire charge
   (`player` is whoever clicked, whose state is swapped in), fire, a redstone signal, an arrow or a dispenser (`player` is
   None). Set `cancel` and it is not primed: the block stays, or is put back if fire or a signal had already taken it
@@ -228,8 +223,8 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   frame, a painting or a leash knot (tying a lead to a fence that has none; `pos` is the fence), once it fits and
   before it is placed or the item used. Set `cancel` and nothing happens; the item stays in the hand. The player's
   state is swapped in, so `PlayerRef::tell` answers them. `/summon` and a lead tied to a mob are not heard.
-- **`hanging_break(player, kind, pos, cancel)`**: an item frame, a glow item frame or a painting (`kind`)
-  hanging in `pos` is about to break: a server player's hit (`player`, whose state is swapped in), a blast, or the
+- **`hanging_break(dimension, player, kind, pos, cancel)`**: an item frame, a glow item frame or a painting (`kind`)
+  hanging in `pos` of the level `dimension` (`&str`, as `entity_join_level` gives it) is about to break: a server player's hit (`player`, whose state is swapped in), a blast, or the
   wall it hangs on gone (`player` None for both), before anything drops or sounds. Set `cancel` and it stays as it
   was. A hit that only takes a frame's item out, the game's own player and `/kill` are not asked.
 - **`bucket_empty(player, name, pos, fluid, cancel)`**: a server player empties a bucket (`fluid` is
@@ -525,7 +520,7 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   calculated velocity, before it is added to the entity. Replace `knockback_velocity` to change the push;
   `entity` is None for a player, whom `host.players().acting_player` names. The player packet uses the same replacement. Wind bursts are heard too.
 
-- **`fill_bucket(stack, pos, canceled)`** and **`attack_entity(entity, kind, pos, canceled)`**:
+- **`fill_bucket(stack, pos, canceled)`** and **`attack_entity(dimension, entity, kind, pos, canceled)`**:
   a player's bucket at a block, and their blow on an entity, with the acting player swapped in. Canceled, the bucket
   does nothing and the blow does no harm. A fluid or mob bucket also asks about the block beside the clicked face
   whenever that block is not its target, since a block that refuses the fluid passes it there; the fluid may still
@@ -1733,7 +1728,7 @@ still go on each event or registrar.
   sets one off as `Level.explode` does, with an optional source entity, `ExplosionInteraction::None`, `Block`, `Mob`, `Tnt`
   or `Trigger` for what it does to blocks, and `ExplosionSettings` for its damage type, calculator, particles and sound.
 
-- Dispenser behaviours are chosen at `DispenserBlock.getDispenseMethod`, before any vanilla behaviour, for mod or vanilla items, on the authoritative server only (droppers are unaffected). The block the dispenser faces is asked first: `dispense_method` gives its part the dimension, dispenser position, facing, the selected stack and `state`, the block at `pos` moved by `facing` (air included), and the part is asked only for that block. Then, unless that part answered, the item's own part is asked by `dispense_item` with the same dimension, position, facing and stack. Either answer is `Some((remainder, event))`: a `None` remainder empties the slot, `Some(stack)` writes that remainder without consuming again, and `event` is the level event played with the smoke (1000 click, 1001 fail, 0 nothing, as `NOOP`). The first answer wins: the other part is not asked and vanilla's behaviour doesn't run. `host.dispense_default(dimension, pos, facing, stack)` drops one item normally, including items with a special vanilla behaviour: answer its remainder with 1000. Leave the answer `None` to let vanilla decide, as before.
+- Dispenser behaviours are chosen at `DispenserBlock.getDispenseMethod`, before any vanilla behaviour, for mod or vanilla items, on the authoritative server only (droppers are unaffected). The global `dispenser_acts(dimension, pos, facing, stack)` is asked first, once per dispenser action, for a mod that cannot name every item or block at registration; its answer (the same `Some((remainder, event))`) wins and no part is asked. Otherwise the block the dispenser faces is asked: `dispense_method` gives its part the dimension, dispenser position, facing, the selected stack and `state`, the block at `pos` moved by `facing` (air included), and the part is asked only for that block. Then, unless that part answered, the item's own part is asked by `dispense_item` with the same dimension, position, facing and stack. Either answer is `Some((remainder, event))`: a `None` remainder empties the slot, `Some(stack)` writes that remainder without consuming again, and `event` is the level event played with the smoke (1000 click, 1001 fail, 0 nothing, as `NOOP`). The first answer wins: the other part is not asked and vanilla's behaviour doesn't run. `host.dispense_default(dimension, pos, facing, stack)` drops one item normally, including items with a special vanilla behaviour: answer its remainder with 1000. Leave the answer `None` to let vanilla decide, as before.
 
 - Image tooltip components: `tooltip_component(stack, size)` answers finite positive width/height in GUI pixels, and `tooltip_component_draw(stack, batch, origin, size)` draws that component with `native_sprite`, `native_fill` and `native_text`. The stack supplies its data. Space and background are reserved after the text and any vanilla bundle component; the component width participates in tooltip positioning. Neither hook changes ordinary tooltips without an answer. Client-side.
 
@@ -1755,9 +1750,13 @@ still go on each event or registrar.
   drops when a neighbour changes), and wherever else vanilla asks. `state` may not be in the world yet, so decide from
   `state`. `may_place_on(dimension, state, ground, ground_pos, may)` answers `VegetationBlock.mayPlaceOn` for a
   mod plant (a block whose template is a vanilla plant, such as a crop): the blocks it can stand on, which its
-  template's `canSurvive` asks, so it is refused elsewhere and pops off when its ground changes. Answer only for your
-  own blocks and leave the answer empty otherwise; the level is read-only. Both run on every shape update of such a
-  block: keep them short.
+  template's `canSurvive` asks, so it is refused elsewhere and pops off when its ground changes.
+  `can_sustain_plant(dimension, state, ground, ground_pos, sustains)` is the soil's half of that question, asked
+  before the plant's `may_place_on`: an answer there is the plant's. Answer only for your own blocks and leave the
+  answer empty otherwise; the level is read-only. All three run on every shape update of such a block: keep them
+  short. `can_survive_v2`, `may_place_on_v2` and `can_sustain_plant_v2` are the same three questions in world
+  generation: a feature placing a block reads the server's tables instead of a level, and asks the soil before the
+  plant as the live game does.
 
 - Drawing mod block entities on the client. `block_entity_submit(pos, block, state, entity, draw)` runs once a frame
   for each mod block entity in view, as vanilla's `BlockEntityRenderer.submit` does (within its view distance, 64 blocks
@@ -2309,7 +2308,7 @@ registration path.
 
 - Entities ticking, through `entity_tick_pre` (NeoForge's `EntityTickEvent.Pre`) and `entity_tick_post` (`EntityTickEvent.Post`), with the entity's id and type (`minecraft:zombie`, `minecraft:item`) and the level. Set `canceled` in the Pre and the entity doesn't tick this tick (and its Post isn't told). Told for the mobs, item entities, minecarts and boats that tick in an entity-ticking chunk, on the single player server thread and on a dedicated server; not for a player's own boat or minecart, projectiles, orbs, primed TNT, falling blocks or armor stands. Check `kind`. Mobs and items hear every Pre before the family's first tick and every Post after its last; minecarts and boats hear theirs around each one's tick. A mod that hooks them also hooks `entity_tick_listened(listened)` and sets `*listened = true`: otherwise no entity's tick is told. It runs each tick for every ticking entity, so keep it cheap.
 
-- A mob's, an armor stand's or a player's equipment changing, on the single player server thread and on a dedicated server: `living_equipment_change(entity, kind, slot, from, to)` once for each slot (`mainhand`, `offhand`, `feet`, `legs`, `chest`, `head`, `body`, `saddle`) that holds another stack than the mods last heard (NeoForge's `LivingEquipmentChangeEvent`, vanilla's `LivingEntity.collectEquipmentChanges`). A mob new to the level counts from empty on its first tick. A mod that hooks it also hooks `living_equipment_listened(listened)` and sets `*listened = true`: otherwise the game does not read every mob's and connected player's equipment each tick, and only armor stands are told. Players connected to the server (a dedicated server's, a published world's guests) are told the same way with `kind` `minecraft:player`, for their six slots `mainhand` (the selected hotbar slot, so a hotbar selection counts), `offhand`, `feet`, `legs`, `chest` and `head`; their `body` and `saddle` are never told. The world host's own player isn't told here: `on_equip` hears it. It only hears.
+- A mob's, an armor stand's or a player's equipment changing, on the single player server thread and on a dedicated server: `living_equipment_change(entity, kind, slot, from, to)` once for each slot (`mainhand`, `offhand`, `feet`, `legs`, `chest`, `head`, `body`, `saddle`) that holds another stack than the mods last heard (NeoForge's `LivingEquipmentChangeEvent`, vanilla's `LivingEntity.collectEquipmentChanges`). A mob new to the level counts from empty on its first tick. The game reads every mob's and connected player's equipment each tick, and tells it, while an enabled mod subscribes to this hook; `living_equipment_listened(listened)` with `*listened = true` is no longer needed. With neither, only armor stands are told. Players connected to the server (a dedicated server's, a published world's guests) are told the same way with `kind` `minecraft:player`, for their six slots `mainhand` (the selected hotbar slot, so a hotbar selection counts), `offhand`, `feet`, `legs`, `chest` and `head`; their `body` and `saddle` are never told. The world host's own player isn't told here: `on_equip` hears it. It only hears.
 
 - `render_player_pre(player, who, draw, hidden, canceled)` fires once a frame for each other player in view and for this window's player in third person, before its `render_living_pre`, with the same frame (`MobRender`, a `BlockEntityDraw` at the feet turned with the body) and `who` (profile name, whether it is the local player); set `canceled` to draw nothing of the player this frame (`RenderPlayerEvent.Pre`). `render_living_post(entity, parts, draw)` and then, for a player, `render_player_post(player, who, parts, draw)` fire once a frame after the vanilla model and layers of every mob and player in view whose pre hooks weren't canceled (but a player whose `render_living_pre` alone was canceled still gets `render_player_post`, with no parts), and what the mod adds in that frame is drawn with it (`RenderLivingEvent.Post`, `RenderPlayerEvent.Post`; layers of one type's renderer are `register_entity_layers`, `EntityRenderersEvent.AddLayers`). Geometry attaches to the entity's frame, not to the model's bones: head yaw, pitch and the walk cycle are in `MobRender`. The game asks once a frame whether any mod listens to the four, and with none builds nothing for them.
 
@@ -2670,7 +2669,7 @@ registration path.
 
 - A player releases a bow: `arrow_loose(stack, has_ammo, charge, canceled)` may change held-tick `charge` or cancel the shot; negative charge also prevents it. Unlike `living_entity_use_item_stop`, it does not skip the whole item release; `entity_shoot_bow` reports the spawned arrow afterward with read-only force. Fires on the Game running the bow release, including LAN guests; a remote client's own release path, crossbows, and ArrowNockEvent are not covered.
 
-- An item frame or painting about to break: `hanging_break(player, kind, pos, cancel)` is heard before a server player's hit, a blast or the loss of its wall breaks an item frame, a glow item frame or a painting, with the hitting player (None for a blast or a lost wall). A mod sets `cancel` and it stays. The hitting player's state is swapped in. A hit that only takes a frame's item out, the game's own player and `/kill` are not asked.
+- An item frame or painting about to break: `hanging_break(dimension, player, kind, pos, cancel)` is heard before a server player's hit, a blast or the loss of its wall breaks an item frame, a glow item frame or a painting, with the hitting player (None for a blast or a lost wall). A mod sets `cancel` and it stays. The hitting player's state is swapped in. A hit that only takes a frame's item out, the game's own player and `/kill` are not asked.
 
 - A criterion of a server player's advancement was granted or revoked after its progress changed and before any completion rewards, except the `minecraft:tick` criteria granted on a network player's first tick or a reload, which are heard after that tick's rewards and packets; `advancement` is its identifier, such as `minecraft:story/mine_stone`, `criterion` the criterion name and `progress_type` is `ProgressType::Grant` or `ProgressType::Revoke`. A grant or revoke that changes nothing is not heard.
 

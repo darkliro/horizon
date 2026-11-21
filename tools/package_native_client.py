@@ -108,8 +108,9 @@ def main():
     with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
         tar.add(args.binary, 'horizon/horizon-client')
         tar.add(ROOT / 'LICENSE', 'horizon/LICENSE')
+        tar.add(ROOT / 'LICENSES', 'horizon/LICENSES')  # the GPL text the LGPL needs beside it (section 4b)
         tar.add(ROOT / 'THIRD_PARTY_NOTICES.md', 'horizon/THIRD_PARTY_NOTICES.md')
-        ctl = args.binary.with_name('horizon-ctl')  # built with --bins: scripts and agents play through it
+        ctl = lab.binary(args.binary.parent, 'horizon-ctl')  # built with --bins: scripts and agents play through it
         if ctl.is_file():
             tar.add(ctl, 'horizon/horizon-ctl')
         add_bytes(tar, 'horizon/horizon.sh', LAUNCHER.replace('@MINECRAFT@', lab.VERSION).encode(), 0o755)

@@ -1182,11 +1182,13 @@ fn ruby_mod_with_pistons(dir: &Path, pistons: bool) -> ContentMod {
             r#"{"type": "minecraft:crafting_shapeless", "category": "misc",
                 "ingredients": ["ruby:ruby_stew"], "result": {"id": "ruby:ruby"}}"#,
         ),
-        // Carried-over tags name blocks left out and other mods' ids too.
+        // Carried-over tags name blocks left out and other mods' ids too, and
+        // 1.21.1's vanilla tags 26.3 renamed (`concrete_powders`).
         (
             "data/minecraft/tags/block/mineable/pickaxe.json",
             r##"{"values": ["ruby:ruby_block", "ruby:left_out", "othermod:thing",
-                {"id": "othermod:optional", "required": false}, "#c:storage_blocks/ruby"]}"##,
+                {"id": "othermod:optional", "required": false}, "#c:storage_blocks/ruby",
+                "#minecraft:concrete_powder"]}"##,
         ),
         (
             "data/c/tags/item/gems/ruby.json",
@@ -1542,8 +1544,7 @@ fn content_root_loads_with_every_table() {
             }
             for _ in 0..4 {
                 level.time += 1;
-                independent_behaviours.tick_scheduled(&mut level, &mut ticks);
-                independent_behaviours.run_block_events(&mut level, &mut ticks);
+                independent_behaviours.tick_level_blocks(&mut level, &mut ticks);
                 independent_behaviours.tick_block_entities(&mut level, &mut ticks);
             }
             assert_eq!(
@@ -2034,6 +2035,86 @@ fn additions_append_by_priority_then_order_and_skip_unknown_targets() {
             .unwrap()
             .is_none()
     );
+}
+
+/// A mod's own carver joins the carvers bundle, so a biome of the mod that
+/// names it finds it. One of a type the world can't decode, or whose load
+/// conditions fail, is left out and listed for the worldgen loader.
+#[test]
+#[ignore = "daily"]
+fn content_root_carries_a_mods_carver() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-carver-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("hollows");
+    let vanilla: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(base.join("worldgen/carvers.json")).unwrap()).unwrap();
+    let biomes: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(base.join("worldgen/biomes.json")).unwrap()).unwrap();
+    let mut hollow: serde_json::Value = serde_json::from_str(&biomes["minecraft:plains"]).unwrap();
+    let named = serde_json::json!(["hollows:deep_cave", "hollows:vent", "hollows:gated"]);
+    hollow["carvers"] = named.clone();
+    let hollow = hollow.to_string();
+    let mut gated: serde_json::Value = serde_json::from_str(&vanilla["minecraft:cave"]).unwrap();
+    gated["neoforge:conditions"] =
+        serde_json::json!([{"type": "neoforge:mod_loaded", "modid": "absent"}]);
+    let gated = gated.to_string();
+    let files = [
+        (
+            "horizon-mod.toml",
+            "id = \"hollows\"\nname = \"Hollows\"\nversion = \"1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n",
+        ),
+        // Shaped as 26.3's own cave carver, under the mod's id.
+        (
+            "data/hollows/worldgen/carver/deep_cave.json",
+            vanilla["minecraft:cave"].as_str(),
+        ),
+        // A carver type of the mod's Java.
+        (
+            "data/hollows/worldgen/carver/vent.json",
+            r#"{"type": "hollows:vent", "config": {"probability": 0.1}}"#,
+        ),
+        // A cave carver only for when a mod nobody loads is there.
+        ("data/hollows/worldgen/carver/gated.json", gated.as_str()),
+        ("data/hollows/worldgen/biome/hollow.json", hollow.as_str()),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let package = horizon_mod_package::Package::read(&dir).unwrap();
+    let m = ContentMod {
+        id: "hollows".into(),
+        content: Content::read(&dir, &package.manifest).unwrap(),
+        jars: Vec::new(),
+    };
+    let root = resource_root_fixture(
+        &base,
+        Path::new(""),
+        std::slice::from_ref(&m),
+        &scratch.join("cache"),
+    )
+    .unwrap();
+    let carvers: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/carvers.json")).unwrap()).unwrap();
+    assert_eq!(carvers["hollows:deep_cave"], vanilla["minecraft:cave"]);
+    assert!(carvers.contains_key("minecraft:cave"));
+    assert!(!carvers.contains_key("hollows:vent"));
+    assert!(!carvers.contains_key("hollows:gated"));
+    // The biome keeps every name: the worldgen loader drops the left-out ones
+    // after a world's data packs are in, unless one supplies them.
+    let biomes: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/biomes.json")).unwrap()).unwrap();
+    let hollow: serde_json::Value = serde_json::from_str(&biomes["hollows:hollow"]).unwrap();
+    assert_eq!(hollow["carvers"], named);
+    let left_out: Vec<String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/carvers_left_out.json")).unwrap())
+            .unwrap();
+    assert_eq!(left_out, ["hollows:gated", "hollows:vent"]);
+    let _ = fs::remove_dir_all(&scratch);
 }
 
 /// A structure mod's worldgen reaches the worldgen loader: its structure,
@@ -2748,6 +2829,46 @@ fn folder_mod(dir: &Path, files: &[(&str, &str)]) -> ContentMod {
         content: Content::read(dir, &package.manifest).unwrap(),
         jars: Vec::new(),
     }
+}
+
+/// The game mounts a flat package's entries as its checks read them: by the END record's
+/// count. One it lists past that count, outside the mod's namespaces, is never loaded.
+#[test]
+fn a_package_entry_past_its_end_count_is_not_mounted() {
+    use std::io::Write as _;
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-hidden-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch).unwrap();
+    let path = scratch.join("ruby.hmod");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    for (name, text) in [
+        ("horizon-mod.toml", manifest("ruby", "")),
+        ("assets/ruby/lang/en_us.json", "{}".to_owned()),
+        ("data/minecraft/recipe/stone.json", "{}".to_owned()),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    let ruby = || {
+        let package = horizon_mod_package::Package::read(&path)?;
+        Ok::<_, String>(ContentMod {
+            id: "ruby".into(),
+            content: Content::read(&path, &package.manifest)?,
+            jars: Vec::new(),
+        })
+    };
+    // As written, the fence refuses the vanilla recipe.
+    assert!(ruby().is_err());
+    // The END record now lists the first two entries only.
+    let mut bytes = fs::read(&path).unwrap();
+    let end = bytes.len() - 22;
+    bytes[end + 8..end + 12].copy_from_slice(&[2, 0, 2, 0]);
+    fs::write(&path, &bytes).unwrap();
+    let mods = [ruby().unwrap()];
+    assert!(load_layers(&scratch.join("jars"), &mods).is_err());
+    let _ = fs::remove_dir_all(&scratch);
 }
 
 fn manifest(id: &str, namespaces: &str) -> String {
@@ -5482,6 +5603,78 @@ fn biome_modifiers_none_keep_the_vanilla_biomes() {
         fs::read(base.join("worldgen/biomes.json")).unwrap()
     );
     let _ = fs::remove_dir_all(&scratch);
+}
+
+/// A mod's own biome joins the biome bundle, its tags and the command registry, and a biome
+/// modifier reaches it through its tag; vanilla's biomes stay.
+#[test]
+fn mod_biomes_join_the_biome_bundle() {
+    for with_modifier in [false, true] {
+        let base = biome_base(&format!("mod-biomes-{with_modifier}"));
+        let scratch = base.parent().unwrap().to_owned();
+        fs::write(
+            base.join("command-registries.json"),
+            r#"{"blocks":{},"items":[],"by_registry":{"minecraft:worldgen/biome":{"ids":[]}}}"#,
+        )
+        .unwrap();
+        let foo = r#"{"temperature":1.5,"downfall":0.2,"features":[[],[],[],[],[],[],[]]}"#;
+        let mut files = vec![
+            ("horizon-mod.toml", manifest("zinc", "")),
+            (
+                "data/zinc/worldgen/feature/ore_zinc.json",
+                r#"{"type":"minecraft:ore","config":{}}"#.to_owned(),
+            ),
+            (
+                "data/zinc/worldgen/placed_feature/ore_zinc.json",
+                r#"{"feature":"zinc:ore_zinc","placement":[]}"#.to_owned(),
+            ),
+            ("data/zinc/worldgen/biome/foo.json", foo.to_owned()),
+            (
+                "data/zinc/tags/worldgen/biome/hot.json",
+                r#"{"values":["zinc:foo"]}"#.to_owned(),
+            ),
+        ];
+        if with_modifier {
+            files.push((
+                "data/zinc/neoforge/biome_modifier/ores.json",
+                r##"{"type":"neoforge:add_features","biomes":"#zinc:hot","features":"zinc:ore_zinc","step":"underground_ores"}"##.to_owned(),
+            ));
+        }
+        let files: Vec<(&str, &str)> = files.iter().map(|(a, b)| (*a, b.as_str())).collect();
+        let m = folder_mod(&scratch.join("zinc"), &files);
+        let out = scratch.join("out");
+        build_fixture(&base, Path::new(""), &[m], &out).unwrap();
+
+        let bundle: BTreeMap<String, String> =
+            serde_json::from_slice(&fs::read(out.join("worldgen/biomes.json")).unwrap()).unwrap();
+        let vanilla: BTreeMap<String, String> =
+            serde_json::from_slice(&fs::read(base.join("worldgen/biomes.json")).unwrap()).unwrap();
+        assert_eq!(bundle["minecraft:plains"], vanilla["minecraft:plains"]);
+        let foo: serde_json::Value = serde_json::from_str(&bundle["zinc:foo"]).unwrap();
+        let ores = match with_modifier {
+            true => serde_json::json!(["zinc:ore_zinc"]),
+            false => serde_json::json!([]),
+        };
+        assert_eq!(foo["features"][6], ores, "modifier: {with_modifier}");
+        let tags: BTreeMap<String, String> =
+            serde_json::from_slice(&fs::read(out.join("worldgen/biome_tags.json")).unwrap())
+                .unwrap();
+        let hot: serde_json::Value = serde_json::from_str(&tags["zinc:hot"]).unwrap();
+        assert_eq!(hot["values"], serde_json::json!(["zinc:foo"]));
+        let commands: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("command-registries.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            commands["by_registry"]["minecraft:worldgen/biome"]["ids"],
+            serde_json::json!(["zinc:foo"])
+        );
+        let mods: Vec<String> = crate::biome::mod_biome_files(&out)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(mods, ["zinc:foo"]);
+        let _ = fs::remove_dir_all(&scratch);
+    }
 }
 
 /// An unknown biome, biome tag, feature, entity type, step or modifier type is

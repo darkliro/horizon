@@ -340,6 +340,12 @@ impl Game<'_> {
                         .as_ref()
                         .map_or(0, |driver| driver.position_ms())
                         as u64;
+                    if time_ms < current {
+                        self.system_message(Text::translate(
+                            "horizon.studio.replay.seek.backward_requires_standalone",
+                            &[],
+                        ));
+                    }
                     time_ms.max(current)
                 };
                 self.studio.timeline.current_time_ms = time_ms;
@@ -467,7 +473,13 @@ impl Game<'_> {
                 .as_mut()
                 .and_then(|driver| driver.as_any_mut().downcast_mut::<ReplayDriver>())
         {
-            driver.save_camera_track(&self.studio.freecam.track)?;
+            let track = &self.studio.freecam.track;
+            let json = if track.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_vec_pretty(track).map_err(std::io::Error::other)?)
+            };
+            driver.save_camera_path(json)?;
             self.studio.camera_track_dirty = false;
         }
         Ok(())
@@ -479,7 +491,14 @@ impl Game<'_> {
         self.studio.timeline.current_time_ms = 0;
         self.studio.timeline.playing = !driver.is_paused();
         self.studio.timeline.markers = driver.markers().to_vec();
-        self.studio.freecam.track = driver.camera_track().cloned().unwrap_or_default();
+        self.studio.freecam.track = match driver.camera_path().map(serde_json::from_slice) {
+            Some(Ok(track)) => track,
+            Some(Err(error)) => {
+                log::warn!("Studio: could not read the replay's camera path: {error}");
+                Default::default()
+            }
+            None => Default::default(),
+        };
         self.studio.camera_track_dirty = false;
     }
 
@@ -627,6 +646,11 @@ impl Game<'_> {
                     }
                     return true;
                 }
+            }
+            if !self.studio.flying() && !self.studio.rmb_down {
+                // First-person view of the recorded player: the click is ours, but it never
+                // grabs the pointer, so mouse motion cannot turn the recorded view.
+                return true;
             }
             if pressed {
                 self.studio.topbar.close_dropdown();

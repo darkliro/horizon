@@ -79,6 +79,17 @@ impl Root {
             directory,
         })
     }
+
+    /// Configured roots may have aliases; managed descendants still use `open`
+    /// and the held directory's no-follow traversal.
+    fn configured(root: &Path) -> Result<Self, Error> {
+        checked(root, true)?;
+        match root.canonicalize() {
+            Ok(root) => Self::open(&root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::open(root),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 struct Entry {
@@ -86,6 +97,9 @@ struct Entry {
     directory: Option<Arc<Dir>>,
     relative: PathBuf,
     path: PathBuf,
+    links: Links,
+    /// The instance folder this unit is in: its delete holds that instance against launches.
+    instance: Option<PathBuf>,
 }
 
 impl Entry {
@@ -108,6 +122,8 @@ impl Entry {
             directory: root.directory.clone(),
             relative: relative.to_owned(),
             path,
+            links: Links::Refused,
+            instance: None,
         })
     }
 
@@ -237,6 +253,20 @@ impl Entry {
         }
     }
 
+    /// The space the entry takes, each file once across `seen`.
+    fn bytes(&self, seen: &mut HashSet<(u64, u64)>) -> Result<u64, Error> {
+        walk(&self.path, seen, self.links)
+    }
+
+    fn bytes_alone(&self) -> Result<u64, Error> {
+        self.bytes(&mut HashSet::new())
+    }
+
+    /// Walks the entry once; sums over the result cost no disk access.
+    fn survey(&self) -> Result<Allocated, Error> {
+        survey(&self.path, self.links)
+    }
+
     fn clear(&self) -> Result<(), Error> {
         if !self.path.try_exists()? {
             return Ok(());
@@ -246,9 +276,13 @@ impl Entry {
         };
         let access = self.access()?;
         if matches!(access, Access::LeasedGame) {
-            return crate::cache_cleanup::delete_game_unit(&self.path);
+            return crate::cache_cleanup::delete_game_unit_in(
+                &self.path,
+                self.links,
+                self.instance.as_deref(),
+            );
         }
-        access.check()?;
+        access.check(crate::cache_cleanup::Proof::Lease)?;
         let mut parent = root.try_clone()?;
         for part in self.relative.parent().unwrap_or(Path::new("")).components() {
             parent = parent.open_dir_nofollow(part.as_os_str())?;
@@ -357,7 +391,7 @@ impl Storage {
                 }
             }
         }
-        let data = Root::open(&backend::data_dir())?;
+        let data = Root::configured(&backend::data_dir())?;
         let played: HashSet<_> = instances::list()
             .into_iter()
             .filter_map(|instance| instance.resolve_version(None).ok())
@@ -408,11 +442,22 @@ impl Storage {
             if backend::in_use(&version) {
                 continue;
             }
-            let root = Root::open(&instance.home)?;
+            let root = Root::configured(&instance.home)?;
+            let start = entries.len();
             old_logs(&mut entries, &root)?;
             unused_jars(&mut entries, &root)?;
-            for relative in [".horizon-cache", "wasm-cache", "cache"] {
+            // The game links what a resource pack leaves untouched into the pack's mirror
+            // there (#17911).
+            let mut cache =
+                Entry::fixed(&root, Path::new(".horizon-cache"), Category::OtherCaches)?;
+            cache.links = Links::GameMade;
+            entries.push(cache);
+            for relative in ["wasm-cache", "cache"] {
                 add(&mut entries, &root, relative, Category::OtherCaches)?;
+            }
+            // The instance was idle here; it may start before its units are deleted (#18669).
+            for entry in &mut entries[start..] {
+                entry.instance = Some(root.path.clone());
             }
         }
         // Detached trees can remain beside any managed cache after an interrupted removal.
@@ -509,12 +554,21 @@ impl Storage {
                 Err(_) => unknown_revision = true,
             }
         }
+        // Each folder is walked once here and again only if it was cleared.
+        let mut surveyed = entries
+            .iter()
+            .map(Entry::survey)
+            .collect::<Result<Vec<_>, Error>>()?;
         let mut seen = HashSet::new();
         let units: Vec<_> = entries
             .iter()
-            .map(|entry| {
+            .enumerate()
+            .map(|(index, entry)| {
                 let last_used = entry.last_used()?;
-                let tier = if entry.relative.starts_with("rust")
+                let tier = if entry.relative == Path::new("native/build.log") {
+                    // It holds the result of the build this cleanup follows (#18469).
+                    Tier::Protected
+                } else if entry.relative.starts_with("rust")
                     && entry.path.file_name().is_some_and(|name| {
                         name.to_string_lossy()
                             .starts_with(crate::rust_toolchain::VERSION)
@@ -538,7 +592,7 @@ impl Storage {
                     let Some(unit_revision) = entry.revision() else {
                         return Ok(Unit {
                             eligible: false,
-                            bytes: walk(&entry.path, &mut seen)?,
+                            bytes: sum_new(&surveyed[index], &mut seen),
                             last_used,
                             tier: Tier::Protected,
                         });
@@ -568,8 +622,11 @@ impl Storage {
                     Tier::Lru
                 };
                 Ok(Unit {
-                    eligible: entry.access()?.check().is_ok(),
-                    bytes: walk(&entry.path, &mut seen)?,
+                    eligible: entry
+                        .access()?
+                        .check(crate::cache_cleanup::Proof::Lease)
+                        .is_ok(),
+                    bytes: sum_new(&surveyed[index], &mut seen),
                     last_used,
                     tier,
                 })
@@ -585,7 +642,7 @@ impl Storage {
         );
         let mut report = self.apply_retaining(Vec::new(), None, false, true)?;
         for row in &mut report.rows {
-            row.bytes = allocated(&entries, row.category)?;
+            row.bytes = allocated_of(&entries, &surveyed, row.category);
         }
         for (index, entry) in entries.iter().enumerate() {
             let row = report
@@ -599,18 +656,23 @@ impl Storage {
                 } else {
                     entry.clear()
                 };
+                // Only a unit that was cleared is measured again, with every listing of the
+                // same files (an expired `.trash-*` is listed under two categories).
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => resurvey(&entries, &mut surveyed, index)?,
                     Err(
                         error @ (Error::Busy | Error::UnprovenExclusion | Error::IncompleteUnit),
-                    ) => row.kept.push(Kept {
-                        bytes: allocated_bytes(&entry.path)?,
-                        reason: native_mods::cache_error(error),
-                    }),
+                    ) => {
+                        resurvey(&entries, &mut surveyed, index)?;
+                        row.kept.push(Kept {
+                            bytes: sum_new(&surveyed[index], &mut HashSet::new()),
+                            reason: native_mods::cache_error(error),
+                        });
+                    }
                     Err(error) => return Err(error),
                 }
             }
-            let remaining = allocated_bytes(&entry.path)?;
+            let remaining = sum_new(&surveyed[index], &mut HashSet::new());
             if !selected.contains(&index) && remaining > 0 {
                 row.kept.push(Kept {
                     bytes: remaining,
@@ -618,7 +680,7 @@ impl Storage {
                         native_mods::cache_error(
                             entry
                                 .access()?
-                                .check()
+                                .check(crate::cache_cleanup::Proof::Lease)
                                 .err()
                                 .unwrap_or(Error::UnprovenExclusion),
                         )
@@ -629,7 +691,7 @@ impl Storage {
             }
         }
         for row in &mut report.rows {
-            row.remaining_bytes = allocated(&entries, row.category)?;
+            row.remaining_bytes = allocated_of(&entries, &surveyed, row.category);
             row.freed_bytes = row.bytes.saturating_sub(row.remaining_bytes);
         }
         report.total_bytes = report.rows.iter().map(|row| row.bytes).sum();
@@ -668,8 +730,11 @@ impl Storage {
         let mut report = self.apply_retaining(entries, clear, all, true)?;
         if clear.is_none() && !all {
             for entry in self.entries()? {
-                if let Err(error) = entry.access().and_then(|access| access.check()) {
-                    let bytes = allocated_bytes(&entry.path)?;
+                if let Err(error) = entry
+                    .access()
+                    .and_then(|access| access.check(crate::cache_cleanup::Proof::Lease))
+                {
+                    let bytes = entry.bytes_alone()?;
                     if bytes > 0 {
                         report
                             .rows
@@ -734,7 +799,7 @@ impl Storage {
                             .find(|row| row.category == entry.category)
                             .unwrap();
                         row.kept.push(Kept {
-                            bytes: allocated_bytes(&entry.path)?,
+                            bytes: entry.bytes_alone()?,
                             reason: native_mods::cache_error(error),
                         });
                         // A busy build may be using subsequent build-tool units too. Stop
@@ -769,8 +834,32 @@ fn allocated(entries: &[Entry], category: Category) -> Result<u64, Error> {
         .iter()
         .filter(|entry| entry.category == category)
         .try_fold(0u64, |bytes, entry| {
-            Ok(bytes.saturating_add(walk(&entry.path, &mut seen)?))
+            Ok(bytes.saturating_add(entry.bytes(&mut seen)?))
         })
+}
+
+/// `allocated` from walks already made: `surveyed[i]` belongs to `entries[i]`.
+fn allocated_of(entries: &[Entry], surveyed: &[Allocated], category: Category) -> u64 {
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .zip(surveyed)
+        .filter(|(entry, _)| entry.category == category)
+        .fold(0u64, |bytes, (_, items)| {
+            bytes.saturating_add(sum_new(items, &mut seen))
+        })
+}
+
+/// Walks again every entry that shares files with the cleared `entries[index]`: the same path,
+/// or one inside or around it.
+fn resurvey(entries: &[Entry], surveyed: &mut [Allocated], index: usize) -> Result<(), Error> {
+    let cleared = &entries[index].path;
+    for (entry, items) in entries.iter().zip(surveyed.iter_mut()) {
+        if entry.path.starts_with(cleared) || cleared.starts_with(&entry.path) {
+            *items = entry.survey()?;
+        }
+    }
+    Ok(())
 }
 
 fn old_logs(entries: &mut Vec<Entry>, home: &Root) -> Result<(), Error> {
@@ -942,6 +1031,81 @@ mod eviction_tests {
             assert_eq!(entry.leftover(), leftover, "{path}");
         }
     }
+    /// #17911: one link the game made in a game folder's cache refused the whole report.
+    #[test]
+    fn a_game_cache_with_a_link_is_reported() {
+        let home = crate::storage::tests::Home::new();
+        let outside = crate::storage::tests::Home::new();
+        let atlas = outside.seed("version/textures/atlas.png");
+        home.seed("instance/.horizon-cache/resourcepacks/0123456789abcdef/pack.json");
+        crate::storage::tests::link_dir(
+            atlas.parent().unwrap(),
+            &home
+                .0
+                .join("instance/.horizon-cache/resourcepacks/0123456789abcdef/textures"),
+        );
+        let storage = Storage::at(&home.0).unwrap();
+        let root = Root::open(&home.0).unwrap();
+        let cache = |links: Links| {
+            let relative = Path::new("instance/.horizon-cache");
+            let mut entry = Entry::fixed(&root, relative, Category::OtherCaches).unwrap();
+            entry.links = links;
+            vec![entry]
+        };
+
+        assert!(matches!(
+            storage.apply(cache(Links::Refused), None, false),
+            Err(Error::Unsafe(_))
+        ));
+        let report = storage.apply(cache(Links::GameMade), None, false).unwrap();
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.category == Category::OtherCaches)
+            .unwrap();
+        assert!(row.bytes > 0);
+        assert!(atlas.exists());
+    }
+
+    /// An expired `.trash-*` beside prebuilt games is listed under two categories: clearing one
+    /// listing leaves neither counting its bytes, and the folders it doesn't share are not
+    /// walked again.
+    #[test]
+    fn a_cleared_unit_leaves_no_bytes_in_its_other_listings() {
+        let home = crate::storage::tests::Home::new();
+        home.seed("native/prebuilt/.trash-1/payload");
+        home.seed("native/prebuilt/kept/payload");
+        let root = Root::open(&home.0).unwrap();
+        let trash = Path::new("native/prebuilt/.trash-1");
+        let entries = vec![
+            Entry::fixed(&root, trash, Category::PrebuiltGames).unwrap(),
+            Entry::fixed(
+                &root,
+                Path::new("native/prebuilt/kept"),
+                Category::PrebuiltGames,
+            )
+            .unwrap(),
+            Entry::fixed(&root, trash, Category::OtherCaches).unwrap(),
+        ];
+        let mut surveyed: Vec<_> = entries
+            .iter()
+            .map(Entry::survey)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let kept = sum_new(&surveyed[1], &mut HashSet::new());
+        assert!(allocated_of(&entries, &surveyed, Category::OtherCaches) > 0);
+        fs::remove_dir_all(&entries[2].path).unwrap();
+        crate::storage::SURVEYS.with(|s| s.borrow_mut().clear());
+        resurvey(&entries, &mut surveyed, 2).unwrap();
+        let walked = crate::storage::SURVEYS.with(|s| s.borrow().clone());
+        assert_eq!(walked, [entries[0].path.clone(), entries[2].path.clone()]);
+        assert_eq!(allocated_of(&entries, &surveyed, Category::OtherCaches), 0);
+        assert_eq!(
+            allocated_of(&entries, &surveyed, Category::PrebuiltGames),
+            kept
+        );
+    }
+
     #[test]
     fn refused_units_are_residual_with_bytes_and_reason() {
         let home = crate::storage::tests::Home::new();

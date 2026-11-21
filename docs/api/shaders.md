@@ -53,16 +53,19 @@ shared = ["common.wgsl"]   # optional: WGSL put before every stage's file, in or
 [sky]                      # each stage is optional, but a pack has at least one
 file = "sky.wgsl"
 clouds = true              # optional: false when the pack draws its own clouds
-sun = true                 # optional: false when the pack draws its own sun (the moon stays)
+sun = true                 # optional: false when the pack draws its own sun
+moon = true                # optional: false when the pack draws its own moon
 stars = true               # optional: false when the pack draws its own stars
 
 [material]
 file = "material.wgsl"
 files = ["pbr.wgsl"]       # optional, on any stage: WGSL put after `shared`, before this stage's file
-fog = false                # optional: the pack fogs its surfaces itself (Horizon does when absent or true)
 
 [vertex]                   # needs [material]: where corners of terrain are drawn, for the world and the shadow map; shares the material's module
 file = "vertex.wgsl"
+
+[frame]                    # optional
+fog = "pack"               # optional: the pack fogs what its stages draw itself (Horizon does under "engine", the default)
 
 [weather]                  # the colour of rain and snow streaks
 file = "weather.wgsl"
@@ -75,7 +78,7 @@ option = "shadows"         # optional: drawn while this option is not 0 (else al
 resolution_option = "shadow_resolution"   # optional: an int, or a choice of numbers, whose value replaces resolution
 distance_option = "shadow_distance"       # optional: the same for distance
 
-[[post]]                   # full-screen passes, in the order they run (8 at most)
+[[post]]                   # full-screen passes, in the order they run (12 at most)
 file = "post/grade.wgsl"
 name = "Colour grade"      # optional: the GPU time overlay's label
 output = "bloom"           # optional, not on the last pass: writes this target, read by name in later passes
@@ -160,7 +163,9 @@ removed filename cannot be mapped back to an ID. If several installed packs shar
 filename in lexical order is used and listed. The `HORIZON_SHADER_PACK` development override still
 names an exact filesystem path; `shaders/` packs still use filenames.
 
-## Shader API 0.2 (experimental)
+<a id="shader-api-02-experimental"></a>
+
+## Shader API 0.2
 
 0.2 is the line this build serves, the line for linear light and HDR
 ([hdr-linear-light.md](../design/hdr-linear-light.md)): `horizon-shader check` and `pack` take it, the game draws it
@@ -236,7 +241,9 @@ blend = "gamma"            # optional: gamma (default) or linear
 primaries = "bt709"        # optional: bt709 (default) or bt2020, which needs blend = "linear"
 fog = "engine"             # optional: engine (default) or pack, when the pack fogs what its stages draw
 
-[ray_tracing]              # optional, needs [[post]] or [material], no keys: the post stage gets `trace` and `trace_any`, the material stage where it calls them
+[ray_tracing]              # optional, needs [[post]], [[before_world]], [material] or [entity]: the post stage gets `trace` and `trace_any`, other supported stages get them where they call them
+lights = true              # optional, default false: the light sources (`ray_lights_near`, `ray_light`) in the stages that name them
+step = true                # optional, default false: `trace_step`, a ray query whose per-surface rule is the pack's `ray_step`, in the stages that name it
 [motion]                   # optional, needs [[post]]: the post stage's motion guide (not drawn yet)
 ```
 
@@ -245,14 +252,26 @@ linear light: decode a constant written for display values with a 2.2 power, com
 `frame.luminance`, and stop returning `input.color.a` from post passes (their alpha is ignored). The example pack,
 `crates/horizon-shader-api/packs/golden_hour`, was moved this way. `packs/traced_shadows` and
 `packs/traced_water` are the smallest packs that trace rays, from a post pass and from the material stage
-([the guide](../shaders.md#ray-tracing)).
+([the guide](../shaders.md#ray-tracing)); `packs/traced_lights` lights a post pass with the block light sources. `packs/horizon_hdr` is Horizon's own HDR look as a pack, from the look file
+the renderer's own shaders start with: it reads the light-source fields, `frame.full_lightmap` and `lit_tint`
+(changelog, 2026-11-19), and its README lists what a pack can't draw of the look yet.
+
+A 0.2 pack from before 2026-11-16 moves to the terrain's own inputs so: where it drew vanilla's colour with
+`input.tint` or `hit.tint`, it reads `shaded_tint` (the old value, the shade and ambient occlusion in it), or lights
+with `tint`, `shade` and `ao` apart; `[material] fog = false` becomes `[frame] fog = "pack"`; `frame.fog_start` and
+`fog_end` become `fog_environment` and `fog_render`; the post stage's `history` becomes a
+`[[resource]]` with `keep = "view"` that a pass writes as its `output` and reads as `<name>_previous` next frame; and
+`EntityInput.emission` is `full_light`. A terrain hit's `emission` is the block's light level over 15 from
+2026-11-18, as `input.emission`, no longer its brightness class. `shaded_tint` and `MaterialInput.emission` take no
+look storage, and reading them triggers no remesh (a pack's LabPBR maps still can, the first time one starts); reading `tint`, `shade`, `ao` or `face` makes the world
+load again when the pack starts and terrain take a third again its memory.
 
 ## Testing a pack frame by frame
 
 `horizon-ctl screenshot-sequence FRAMES STEP_MS PATH`, under `HORIZON_STILL`, starts the running pack over and draws
 its first FRAMES frames on a set clock: frame n has `frame_index` n, `time` (n - 1) × STEP_MS / 1000 and `delta_time`
-STEP_MS / 1000 (0 on frame 1; STEP_MS may be a decimal, `16.666667` for 60 fps), and `history` and the eased values
-start as in a pack just loaded. The last frame is written as a PNG, the same bytes every run on the same build, GPU
+STEP_MS / 1000 (0 on frame 1; STEP_MS may be a decimal, `16.666667` for 60 fps), and the eased values start as in
+a pack just loaded. The last frame is written as a PNG, the same bytes every run on the same build, GPU
 and driver. Packs in the `shaders/` format get the same (`frameCounter`, `frameTimeCounter`, `frameTime`). How to use
 it: [the guide](../shaders.md#testing-a-pack-frame-by-frame).
 
@@ -266,9 +285,10 @@ it: [the guide](../shaders.md#testing-a-pack-frame-by-frame).
 
 ## Stability
 
-Experimental (API 0.2). The stages ship in the game behind pack selection; see [stability.md](stability.md).
-While the API is experimental, a line is served until the next one is on by default: 0.1 ended when 0.2 was
-([hdr-linear-light.md](../design/hdr-linear-light.md), step 5).
+API 0.2 is final, at the preview level of [stability.md](stability.md): #17834 was its last breaking change. What
+the reference says stays: additions and fixes toward it go on in 0.2, and a change that breaks a 0.2 pack only comes
+with a new line, 0.3, after a deprecation while the game still serves 0.2. API 0.1 has ended: it is refused since #15886,
+when 0.2 went on by default ([hdr-linear-light.md](../design/hdr-linear-light.md), step 5).
 
 ## Not there yet
 
@@ -279,6 +299,102 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
 
 ## Changelog
 
+- 2026-11-21: API 0.2 (additions, preview; first build: Nightly `TBD`): the candidate step, under `[ray_tracing]`
+  with its second key, `step = true` (off by default). A stage whose files name `trace_step`, `RayCandidate`, a
+  `candidate_` function or a `RAY_PASS`/`RAY_STOP`/`RAY_END` action defines `struct RayState` and `fn ray_step(c:
+  RayCandidate, state: ptr<function, RayState>) -> u32`, and `trace_step` hands it every surface of one ray query, in
+  no set order ([the guide](../shaders.md#candidate-steps)); `trace_light` of #19249 is a step of a few lines. A pack
+  without the key sees the same prelude as before, and its own names stay its own.
+- 2026-11-20: API 0.2 (additions, preview): the light sources, under `[ray_tracing]` with its first key,
+  `lights = true` (off by default). A stage whose files name `ray_lights_near`, `ray_light`, `ray_light_at`,
+  `ray_light_count` or `RayLight` gets the light-giving blocks around the camera (`RayLight`: `position`, `level`,
+  `color`, `material`; up to 1024, nearest first; fluids left out) and a grid of 8-block cells listing the sources that
+  reach each, so a pass aims shadow rays at a few sources ([the guide](../shaders.md#light-sources)); only such a pass
+  binds them (binding 80). A pack without the key sees the same prelude as before, and its own names stay its own.
+- 2026-11-19: API 0.2 (change, preview): under a pack without `[[post]]` whose frame holds gamma light and whose
+  `[tonemap]`, if it has one, never reads `previous`, TAA upscaling and its sharpening apply too (#16126 step 7): the
+  world draws smaller, `frame.resolution` stays its size, `input.color` samples the picture TAA rebuilt, and the
+  sharpening runs before the decode and the tone curve. A `[tonemap]` that reads `previous` keeps TAA at the world's
+  size. With TAA or upscaling off, upscaling and sharpening change nothing. Under every pack, TAA or not,
+  `frame.projection` is now the lens the world is drawn with, of the window's aspect, where it was made again from the world's rounded size: at a resolution scale that rounds unevenly,
+  a position rebuilt from depth no longer drifts sideways.
+- 2026-11-19: API 0.2 (change, preview): a pack without `[[post]]` whose frame holds gamma light also gets the
+  player's TAA, at the world's size (#16126 step 7); `frame.jitter` and `frame.previous_jitter` then carry its offset.
+  TAA upscaling and its sharpening stay off, and under any other pack TAA is off. With TAA off nothing changes. A pack
+  must never write an infinite value into the world's frame: TAA's history would carry it.
+- 2026-11-19: API 0.2 (additions, preview): `frame.jitter`, the world's sub-pixel offset this frame in clip space,
+  which `frame.projection` leaves out, and `frame.previous_jitter`, last frame's, declared only for a pack whose files
+  name either, at the end of `Frame`. Both are `(0, 0)` while the world isn't jittered, today in every pack's frame. A
+  pack that names neither sees the same prelude as before, and its picture is unchanged.
+- 2026-11-19: API 0.2 (addition, preview): a pack without `[[post]]` whose frame holds gamma light (not
+  `blend = "linear"` on the float frame) gets the player's FXAA, at the world's size, before its `[tonemap]` (#16126
+  step 6). TAA and upscaling stay off under every pack, and a pack with a post chain is unchanged. With FXAA off
+  nothing changes.
+- 2026-11-19: API 0.2 (addition, preview): `MaterialInput.lit_tint`, vanilla's lit vertex colour as Horizon's terrain
+  draws it: `shaded_tint` times the lightmap (coloured lights added under it) at each corner, then smoothed over the
+  face, so `albedo * lit_tint` is vanilla's lit colour where multiplying the two smoothed apart is not (6.6 steps of
+  255 off at an occluded corner beside a torch). Decoded as `shaded_tint` is, declared after the light-source fields
+  and before `shaded_tint` only for a pack whose files name it. It takes one varying, the terrain's last on the weakest
+  GPUs, and no look storage; a pack that doesn't name it sees the same prelude and entry points as before, and its
+  picture is unchanged. `packs/horizon_hdr` draws its blocks with it.
+- 2026-11-19: API 0.2 (additions, preview): what Horizon's own HDR look reads of light sources, for a pack that
+  draws it. `MaterialInput.light_source_tier` (0 none, 1 low to 4 very bright), `light_source_whole` (the whole sprite
+  shines) and `light_source_threshold` (the brightness a texel of the sprite must reach to shine), and
+  `EntityInput.light_source_tier`, declared after their other fields (before `shaded_tint`) only for a pack whose
+  files name one of the three; and `frame.full_lightmap`, the lightmap at full block and sky light, declared only for
+  a pack whose files name it, at the end of `Frame`. The vertex, the sprite and the lightmap already hold them: they
+  cost no vertex data, no look storage and no reload. A pack that names none of them sees the same prelude and entry
+  points as before, and its picture is unchanged.
+- 2026-11-18: API 0.2 (terrain ray-hit fix): a terrain hit's `tint`, `shade` and `ao` match
+  `MaterialInput` when a usable look record is available. Reading any of them queues fresh meshes for
+  loaded sections and costs eight bytes per face in CPU memory for loaded sections and in video
+  memory within the ray scene's reach. Without a usable record, `tint` uses the baked vertex
+  colour, with `shade` and `ao` both 1. `shaded_tint` and `emission` come from the vertex.
+- 2026-11-18: API 0.2 (preview), a fix toward the reference: a terrain hit's `RayHit.emission` is its block's light
+  level over 15, as `MaterialInput.emission` (one candle 3/15, a lantern 1), no longer its brightness class (7/15,
+  14/15 or 1); an entity hit's stays 0. `MaterialInput.emission` comes with the vertex, as `shaded_tint` does: of
+  the terrain's inputs only `tint`, `shade`, `ao` and `face` turn on terrain look storage, which can make the world
+  load again when a pack starts and needs a vertex stage that reads storage buffers. A pack that reads `emission` and
+  none of them pays none of that, and terrain takes a third again its memory for them, not half. No WGSL name
+  changes.
+- 2026-11-18: API 0.2 is final (preview): #17834 was the last change that breaks a 0.2 pack. A breaking change now
+  starts 0.3, after a deprecation. No WGSL or manifest change.
+- 2026-11-17: API 0.2 (experimental, #18023): an R-relative kept texture takes its two versions at their size of the
+  post targets' budget, `2 × scale² × bytes a texel / 8` render-size `rgba16float` textures, instead of 2 at any
+  format and scale: `rgba16float` at scale 0.5 takes 0.5, `r32uint` at scale 1 takes 1. Packs that keep small
+  textures fit where they were refused. A `rgba32float` or `rgba32uint` one at scale 1 takes 4 where it took 2, so a
+  pack whose post targets took more than 4 with one of those, or two of them, is now refused; no WGSL name changes.
+- 2026-11-16: API 0.2 (**breaking**, experimental): the terrain's own inputs. `MaterialInput` and `VertexInput` have
+  the quad's `tint` without its shade and ambient occlusion, the face's `shade`, the corner's `ao` and its `face`;
+  `MaterialInput.emission` is the block state's light level over 15 (one candle 3/15, four 12/15); `VertexInput.fluid`
+  is 2 for lava. A pack whose material or vertex stage reads `tint`, `shade`, `ao`, `face` or `emission` makes the
+  world load again when it starts, and terrain takes half again its memory; a device whose vertex stage reads no
+  storage buffers refuses it. A pack that names `shaded_tint` gets the old `tint` last in `MaterialInput`,
+  `VertexInput` and `RayHit`, free (on an entity hit, its `tint` times its `shade`). `RayHit` gains `shade`, `ao` and
+  `back` and is ordered as the reference lists it; an entity hit has vanilla's entity shade, the Nether's in the
+  Nether. A terrain hit's `tint`, `shade` and `ao` change value, not type, in a later version (to what
+  `MaterialInput` gives), without a source break; its `shaded_tint` stays their product. `EntityInput.emission` is
+  `full_light: bool`. Gone: the post stage's `history`, `[material] fog` (a check error naming `[frame] fog`), and
+  `frame.fog_start` and `fog_end`; the fog's fields are declared for every pack. [Moving a
+  pack](#shader-api-02-experimental) says what to read instead. A pack that reads none of these is built and draws as
+  before.
+- 2026-11-16: API 0.2 (additions, experimental): `[sky] moon = false` leaves out Minecraft's moon, as `sun = false`
+  its sun, for a sky that draws its own; and `frame.moon_phase`, the phase of the moon Horizon draws (0 full to 7
+  waxing gibbous), declared only for a pack whose files name `moon_phase`, at the end of `Frame`. A pack that sets
+  neither is built from the same WGSL and drawn as before.
+- 2026-11-16: API 0.2 (additions, experimental): `[entity] reads` and `[sky] reads` (#16011 item 4): the entity and
+  sky stages read kept resources by `[material] reads`' rules: `x` for this frame's version of a texture a
+  `[[before_world]]` pass writes, `x_previous` for last frame's, and buffers, in their fragments only. The check
+  refuses `x` of a texture only `[[post]]` passes write, and `writes` on either stage. An entity or sky stage without
+  `reads` composes and draws as before, a test holds. The reference now says that a compute pass may call
+  `storageBarrier()`.
+- 2026-11-15: API 0.2 (additions, experimental): `[material] reads` (#16011 item 4): the terrain reads kept
+  resources, `x` for this frame's version of a texture a `[[before_world]]` pass writes (in the same frame),
+  `x_previous` for last frame's, and buffers; their declarations join the material's module at the passes'
+  bindings. The check refuses `x` of a texture only `[[post]]` passes write (they run after the terrain draws),
+  `writes` on `[material]`, `reads` on the other stages, and `displacement` or a `[vertex]` file reaching a kept
+  resource, as both also draw the shadow map. The kept resources' frame (the versions' swap and the clears) now starts
+  before the world draws in every pack that keeps them. A material without `reads` composes as before, a test holds.
 - 2026-11-15: API 0.2 (addition, experimental): `[frame] fog = "pack"` turns Horizon's fog off on what the material
   and entity stages return, and gives every stage `fn vanilla_fog(position: vec3<f32>) -> f32` and the frame's
   `fog_environment` and `fog_render`, the two distances vanilla's fog takes the larger of, which `fog_start` and
@@ -293,6 +409,11 @@ no shadow into a pack's shadow map yet, and the first-person hand has no stage.
   times the layer's opacity is cut and blends, not the returned alpha, and `horizon-shader check` refuses a `discard`
   that `entity` can reach. An entity stage that cuts or fades entities itself sets `coverage = "pack"`, which keeps
   the old behaviour.
+- 2026-11-14: API 0.2 (additions, experimental): under `[ray_tracing]` the entity stage gets `RayHit`, the trace
+  functions, `hit_normal_map`, `hit_specular_map` and `block_pbr_maps` too, as the material stage has them, where its
+  files name a trace function; an entity stage that names none is built from the same WGSL as before, a test holds.
+  `[ray_tracing]` needs a `[[post]]` pass, a `[[before_world]]` pass, a `[material]` or an `[entity]` stage. The game binds the scene to the
+  entities' draw in the world's colour pass.
 - 2026-11-14: API 0.2 (experimental): `RAY_ENTITY` also holds the block entities at rest that the block entity cache
   keeps (on in every graphics preset: closed chests, shulker boxes, bells, decorated pots, banners), in view or not,
   so they cast traced shadows and show in reflections as the mobs do. A hit on one is an entity hit like any other.

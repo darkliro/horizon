@@ -184,6 +184,12 @@ pub(super) fn cached_user_by_id(id: u128) -> Option<NameAndId> {
     USER_CACHE.lock().unwrap().as_mut()?.get_by_id(id)
 }
 
+/// A player in the user cache by name (any case) while their entry hasn't expired, on a
+/// dedicated server: no profile lookup, no offline player.
+pub(super) fn cached_user_by_name(name: &str) -> Option<NameAndId> {
+    USER_CACHE.lock().unwrap().as_ref()?.find_by_name(name)
+}
+
 /// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
 /// default (on) without the file or the section, off (with an error logged) when the section is wrong.
 fn load_anticheat() -> horizon_anticheat::Config {
@@ -876,6 +882,10 @@ struct ServerState {
     lists: Arc<Mutex<Lists>>,
     console: mpsc::Receiver<String>,
     empty_ticks: i32,
+    /// Since when nobody is on, and how many of [`GIVE_BACK_AFTER`]'s passes ran since
+    /// ([`Game::give_memory_back_when_empty`]).
+    empty_since: Option<Instant>,
+    given_back: usize,
     /// The mutable `DedicatedServer.pauseWhenEmptySeconds` setting.
     pause_when_empty_seconds: i32,
     /// When the last passes of the loop ended, for the tick rate horizon-server shows.
@@ -946,6 +956,21 @@ fn ban_ip_info(names: &[&str]) -> Option<Text> {
 /// `MinecraftServer.isAutoSave`: all of Horizon's server levels share this save flag.
 fn auto_save(state: &ServerState) -> bool {
     state.lists.lock().unwrap().autosave
+}
+
+/// How long after the last player left (or the start, with nobody on) the server gives its memory
+/// back: once the chunks around the players are unloaded, then again once the slower ones (saved
+/// last, or kept a while by a ticket) are gone. Horizon's own: vanilla's JVM keeps its heap.
+const GIVE_BACK_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// The passes of [`GIVE_BACK_AFTER`] due at `now` and not yet run: nobody on since `empty_since`
+/// (None while someone is), `given_back` passes run since.
+fn give_back_due(empty_since: Option<Instant>, given_back: usize, now: Instant) -> bool {
+    empty_since.is_some_and(|since| {
+        GIVE_BACK_AFTER
+            .get(given_back)
+            .is_some_and(|after| now.duration_since(since) >= *after)
+    })
 }
 
 /// `MinecraftServer.tickServer`'s pause-when-empty count. `pause_after` is its
@@ -1402,6 +1427,8 @@ impl Game<'_> {
             lists,
             console,
             empty_ticks: 0,
+            empty_since: None,
+            given_back: 0,
             pause_when_empty_seconds: props.pause_when_empty_seconds,
             ticks: Default::default(),
             paused: false,
@@ -1489,6 +1516,7 @@ impl Game<'_> {
                 self.clock.sprinting(),
             );
             state.paused = paused;
+            self.give_memory_back_when_empty(&mut state, players, Instant::now());
             if paused && state.empty_ticks == pause_after {
                 log(
                     "INFO",
@@ -1644,6 +1672,27 @@ impl Game<'_> {
         }
         self.player = None;
         Ok(())
+    }
+
+    /// Once nobody is on for a while ([`GIVE_BACK_AFTER`]), drop what was kept only to send chunks
+    /// again and have every thread give back to the OS the memory its heap holds free, so an empty
+    /// server sits near what it took at the start rather than at its busiest.
+    fn give_memory_back_when_empty(&self, state: &mut ServerState, players: usize, now: Instant) {
+        if players > 0 {
+            state.empty_since = None;
+            state.given_back = 0;
+            return;
+        }
+        let since = *state.empty_since.get_or_insert(now);
+        if !give_back_due(Some(since), state.given_back, now) {
+            return;
+        }
+        state.given_back += 1;
+        if let Some(host) = &self.lan {
+            host.hub.encoder.forget_cache();
+        }
+        horizon_client::lan::conn::forget_shared_frames();
+        horizon_threads::release_everywhere();
     }
 
     /// The chunks to keep loaded: the players' (lan_update_streaming). While
@@ -1843,8 +1892,7 @@ impl Game<'_> {
         self.console_broadcast = Some(inform);
         self.console_command(state, line);
         self.console_broadcast = None;
-        if let Some(host) = self.lan.as_ref() {
-            crash_fixture("hub", || host.hub.guests.iter().any(|g| g.placed));
+        if self.lan.is_some() {
             self.run_level_teleports();
             self.send_admin_feedback(None);
         }
@@ -1881,6 +1929,14 @@ impl Game<'_> {
         };
         let rest: Vec<&str> = words.collect();
         let lit = |s: &str| Text::literal(s.to_owned());
+        #[cfg(feature = "state-digest")]
+        if command == "digest-sync" {
+            match self.as_console_in_overworld(|g| g.state_digest_sync(&rest)) {
+                Ok(()) => log("INFO", "digest-sync done"),
+                Err(e) => log("WARN", &format!("digest-sync: {e}")),
+            }
+            return;
+        }
         match command {
             "stop" => {
                 self.console_reply(Text::translate("commands.stop.stopping", &[]));
@@ -2510,12 +2566,15 @@ impl Game<'_> {
     }
 
     /// `Hub::kick`, with the server's `kick` event recorded. Whether it started the guest's
-    /// disconnect: false for a missing guest and one whose disconnect is already pending.
+    /// disconnect: false for a missing guest and one whose disconnect is already pending or who is hearing `player_leaving`.
     pub(super) fn kick_conn(&mut self, conn: u32, reason: Tag) -> bool {
         let Some(h) = self.lan.as_mut() else {
             return false;
         };
-        if h.hub.guest(conn).is_none_or(|g| g.disconnect_pending) {
+        if h.hub
+            .guest(conn)
+            .is_none_or(|g| g.disconnect_pending || g.leaving)
+        {
             return false;
         }
         h.hub.kick(conn, reason);
@@ -2582,7 +2641,8 @@ impl Game<'_> {
 }
 
 /// `tools/test_dedicated_crash_save.py`'s fixture: with `HORIZON_CRASH_FIXTURE` naming `point`
-/// (`guest`: during a placed guest's turn, `hub`: after a console line while a player is in),
+/// (`guest`: during a placed guest's turn, `hub`: in the network tick, with the hub out of the
+/// game and a player in),
 /// the tick panics there, to see what crash teardown keeps.
 /// `armed` is asked only when the variable names `point`, so the tick pays one
 /// load of a `OnceLock` without it.
@@ -2637,17 +2697,8 @@ impl Game<'_> {
         } else {
             log("ERROR", &format!("The server thread panicked: {message}"));
         }
-        let acting = self.lan_acting;
-        let hub_lost = self.lan.is_none();
-        if let (Some(conn), Some(host)) = (acting, self.lan.as_mut()) {
-            host.hub
-                .guests
-                .update_connection(conn, |guest| guest.placed = false);
-        }
-        if hub_lost {
-            warn("The panic interrupted the network tick: players are not saved, only the world");
-        } else if acting.is_some() {
-            warn("The panic interrupted a player's turn: that player keeps the last saved file");
+        if let Some(warning) = self.keep_interrupted_players() {
+            warn(warning);
         }
         if integrated {
             // `IntegratedServer.stopServer`'s steps; `save_guest` skips the guest unplaced above.
@@ -2885,6 +2936,22 @@ mod tests {
             false
         ));
         assert_eq!(empty_ticks, 5);
+    }
+
+    /// An empty server gives its memory back 5 s after the last player left and again at 30 s,
+    /// then no more until someone has been on again (the loop then starts from None).
+    #[test]
+    fn an_empty_server_gives_memory_back_twice() {
+        use std::time::{Duration, Instant};
+        let left = Instant::now();
+        let at = |s: u64| left + Duration::from_secs(s);
+        let due = |given_back, s| super::give_back_due(Some(left), given_back, at(s));
+        assert!(!due(0, 4));
+        assert!(due(0, 5));
+        assert!(!due(1, 29));
+        assert!(due(1, 30));
+        assert!(!due(2, 3600));
+        assert!(!super::give_back_due(None, 0, at(3600)));
     }
 
     /// A `panic!("literal")` carries a `&str`, a formatted one a `String`; anything else is
